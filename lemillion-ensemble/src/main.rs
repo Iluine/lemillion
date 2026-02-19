@@ -51,9 +51,17 @@ enum Command {
         #[arg(short, long, default_value = "5")]
         suggestions: usize,
 
-        /// Seed pour la reproductibilité
+        /// Seed pour la reproductibilité (défaut: date du jour YYYYMMDD)
         #[arg(long)]
         seed: Option<u64>,
+
+        /// Facteur de suréchantillonnage (nombre de candidats = suggestions × oversample)
+        #[arg(long, default_value = "20")]
+        oversample: usize,
+
+        /// Différence minimale de boules entre deux suggestions
+        #[arg(long, default_value = "2")]
+        min_diff: usize,
     },
 
     /// Historique des derniers tirages
@@ -79,7 +87,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Calibrate { windows, output } => cmd_calibrate(&conn, &windows, &output),
         Command::Weights { calibration } => cmd_weights(&calibration),
-        Command::Predict { calibration, suggestions, seed } => cmd_predict(&conn, &calibration, suggestions, seed),
+        Command::Predict { calibration, suggestions, seed, oversample, min_diff } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
     }
@@ -163,7 +171,7 @@ fn cmd_weights(calibration_path: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>) -> Result<()> {
+fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -204,12 +212,21 @@ fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str
     display::display_consensus(&ball_consensus, Pool::Balls);
     display::display_consensus(&star_consensus, Pool::Stars);
 
+    // Résolution du seed
+    let effective_seed = seed.unwrap_or_else(|| {
+        let ds = lemillion_ensemble::sampler::date_seed();
+        println!("(Seed du jour : {ds})");
+        ds
+    });
+
     // Suggestions
     let suggestions = generate_suggestions_from_probs(
         &ball_pred.distribution,
         &star_pred.distribution,
         n_suggestions,
-        seed,
+        effective_seed,
+        oversample,
+        min_diff,
     )?;
     display::display_suggestions(&suggestions);
 
