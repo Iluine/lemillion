@@ -179,14 +179,44 @@ pub fn display_consensus(entries: &[ConsensusEntry], pool: Pool) {
     }
 }
 
-pub fn display_suggestions(suggestions: &[Suggestion]) {
+pub fn display_optimal_grid(grid: &Suggestion, consensus: i32) {
+    println!("\n== Grille optimale (consensus max) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Boules", "Étoiles", "Score", "Consensus"]);
+
+    let balls_str = grid.balls
+        .iter()
+        .map(|b| format!("{:2}", b))
+        .collect::<Vec<_>>()
+        .join(" - ");
+
+    let stars_str = grid.stars
+        .iter()
+        .map(|s| format!("{:2}", s))
+        .collect::<Vec<_>>()
+        .join(" - ");
+
+    table.add_row(vec![
+        Cell::new(&balls_str).fg(Color::Green),
+        Cell::new(&stars_str).fg(Color::Yellow),
+        Cell::new(format!("{:.4}", grid.score)),
+        Cell::new(format!("{:+}", consensus)),
+    ]);
+    println!("{table}");
+}
+
+pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[i32]) {
     println!("\n== Suggestions de grilles ==\n");
 
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["#", "Boules", "Étoiles", "Score"]);
+        .set_header(vec!["#", "Boules", "Étoiles", "Score", "Consensus"]);
 
     for (i, sug) in suggestions.iter().enumerate() {
         let balls_str = sug.balls
@@ -201,12 +231,25 @@ pub fn display_suggestions(suggestions: &[Suggestion]) {
             .collect::<Vec<_>>()
             .join(" - ");
 
-        table.add_row(vec![
-            &format!("{}", i + 1),
-            &balls_str,
-            &stars_str,
-            &format!("{:.4}", sug.score),
-        ]);
+        let cs = consensus_scores.get(i).copied().unwrap_or(0);
+
+        if i == 0 {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)).fg(Color::Green),
+                Cell::new(&balls_str).fg(Color::Green),
+                Cell::new(&stars_str).fg(Color::Green),
+                Cell::new(format!("{:.4}", sug.score)).fg(Color::Green),
+                Cell::new(format!("{:+}", cs)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)),
+                Cell::new(&balls_str),
+                Cell::new(&stars_str),
+                Cell::new(format!("{:.4}", sug.score)),
+                Cell::new(format!("{:+}", cs)),
+            ]);
+        }
     }
     println!("{table}");
 }

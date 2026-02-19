@@ -52,6 +52,34 @@ fn select_diverse(candidates: &[Suggestion], count: usize, min_ball_diff: usize)
     selected
 }
 
+/// Grille déterministe : top 5 boules + top 2 étoiles par probabilité ensemble.
+pub fn optimal_grid(ball_probs: &[f64], star_probs: &[f64]) -> Suggestion {
+    let mut ball_indices: Vec<usize> = (0..ball_probs.len()).collect();
+    ball_indices.sort_by(|&a, &b| ball_probs[b].partial_cmp(&ball_probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut star_indices: Vec<usize> = (0..star_probs.len()).collect();
+    star_indices.sort_by(|&a, &b| star_probs[b].partial_cmp(&star_probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut balls = [0u8; 5];
+    for (i, &idx) in ball_indices.iter().take(5).enumerate() {
+        balls[i] = (idx + 1) as u8;
+    }
+    balls.sort();
+
+    let mut stars = [0u8; 2];
+    for (i, &idx) in star_indices.iter().take(2).enumerate() {
+        stars[i] = (idx + 1) as u8;
+    }
+    stars.sort();
+
+    let uniform_ball = 1.0 / ball_probs.len() as f64;
+    let uniform_star = 1.0 / star_probs.len() as f64;
+    let score: f64 = balls.iter().map(|&b| ball_probs[(b - 1) as usize] / uniform_ball).product::<f64>()
+        * stars.iter().map(|&s| star_probs[(s - 1) as usize] / uniform_star).product::<f64>();
+
+    Suggestion { balls, stars, score }
+}
+
 pub fn generate_suggestions_from_probs(
     ball_probs: &[f64],
     star_probs: &[f64],
@@ -218,6 +246,44 @@ mod tests {
             let suggestions = generate_suggestions_from_probs(&ball_probs, &star_probs, count, 42, 10, 2).unwrap();
             assert_eq!(suggestions.len(), count, "devrait retourner exactement {count} suggestions");
         }
+    }
+
+    #[test]
+    fn test_optimal_grid_picks_highest_probs() {
+        let mut ball_probs = vec![0.01; 50];
+        // Les 5 plus hautes probas aux indices 9,19,29,39,49 (numéros 10,20,30,40,50)
+        for &i in &[9, 19, 29, 39, 49] {
+            ball_probs[i] = 0.10;
+        }
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+
+        let star_probs = vec![1.0 / 12.0; 12];
+
+        let grid = optimal_grid(&ball_probs, &star_probs);
+        assert_eq!(grid.balls, [10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn test_optimal_grid_sorted() {
+        // Probas décroissantes : indice 49 le plus haut, 0 le plus bas
+        let ball_probs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+
+        let star_probs: Vec<f64> = (1..=12).map(|i| i as f64).collect();
+        let total: f64 = star_probs.iter().sum();
+        let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
+
+        let grid = optimal_grid(&ball_probs, &star_probs);
+        // Boules triées
+        assert!(grid.balls.windows(2).all(|w| w[0] <= w[1]));
+        // Étoiles triées
+        assert!(grid.stars[0] <= grid.stars[1]);
+        // Top 5 boules = 46,47,48,49,50
+        assert_eq!(grid.balls, [46, 47, 48, 49, 50]);
+        // Top 2 étoiles = 11,12
+        assert_eq!(grid.stars, [11, 12]);
     }
 
     #[test]

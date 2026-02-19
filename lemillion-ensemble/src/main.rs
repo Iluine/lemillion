@@ -10,9 +10,9 @@ use lemillion_ensemble::ensemble::EnsembleCombiner;
 use lemillion_ensemble::ensemble::calibration::{
     EnsembleWeights, calibrate_model, compute_weights, load_weights, save_weights,
 };
-use lemillion_ensemble::ensemble::consensus::build_consensus_map;
+use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
-use lemillion_ensemble::sampler::generate_suggestions_from_probs;
+use lemillion_ensemble::sampler::{generate_suggestions_from_probs, optimal_grid};
 
 #[derive(Parser)]
 #[command(name = "lemillion-ensemble", about = "EuroMillions Ensemble Forecasting")]
@@ -212,6 +212,11 @@ fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str
     display::display_consensus(&ball_consensus, Pool::Balls);
     display::display_consensus(&star_consensus, Pool::Stars);
 
+    // Grille optimale
+    let optimal = optimal_grid(&ball_pred.distribution, &star_pred.distribution);
+    let optimal_cs = consensus_score(&optimal.balls, &optimal.stars, &ball_consensus, &star_consensus);
+    display::display_optimal_grid(&optimal, optimal_cs);
+
     // Résolution du seed
     let effective_seed = seed.unwrap_or_else(|| {
         let ds = lemillion_ensemble::sampler::date_seed();
@@ -228,7 +233,17 @@ fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str
         oversample,
         min_diff,
     )?;
-    display::display_suggestions(&suggestions);
+
+    // Trier par consensus score décroissant (à score égal, garder l'ordre par score bayésien)
+    let mut scored: Vec<(usize, i32)> = suggestions.iter().enumerate()
+        .map(|(i, s)| (i, consensus_score(&s.balls, &s.stars, &ball_consensus, &star_consensus)))
+        .collect();
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let sorted_suggestions: Vec<_> = scored.iter().map(|(i, _)| suggestions[*i].clone()).collect();
+    let consensus_scores: Vec<i32> = scored.iter().map(|(_, cs)| *cs).collect();
+
+    display::display_suggestions(&sorted_suggestions, &consensus_scores);
 
     Ok(())
 }
