@@ -18,7 +18,9 @@ cargo run -p lemillion-cli -- predict --seed 42  # Dirichlet prediction
 cargo run -p lemillion-cli -- predict --model ewma --alpha 0.9 --seed 42  # EWMA prediction
 cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate ensemble models
 cargo run -p lemillion-ensemble -- weights     # show ensemble weights
-cargo run -p lemillion-ensemble -- predict --seed 42  # ensemble prediction
+cargo run -p lemillion-ensemble -- predict --seed 42  # ensemble prediction (explicit seed)
+cargo run -p lemillion-ensemble -- predict              # ensemble prediction (auto-seed YYYYMMDD)
+cargo run -p lemillion-ensemble -- predict --oversample 50 --min-diff 3  # custom oversampling/diversity
 cargo run -p lemillion-ensemble -- history --last 5   # show recent draws
 cargo run -p lemillion-ensemble -- compare 3 15 27 38 44 2 9  # analyze a grid
 ```
@@ -71,8 +73,15 @@ Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 
 **Feature engineering** (`features/compute.rs`): 14 features per number (freq_5/10/20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count).
 
+**Sampler** (`sampler.rs`):
+- `date_seed()` — deterministic YYYYMMDD seed from local date (via chrono), used when no `--seed` provided
+- Oversampling: generates `count × oversample` candidates (default 20×), keeps top scores
+- Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair of suggestions
+- Signature: `generate_suggestions_from_probs(ball_probs, star_probs, count, seed: u64, oversample, min_ball_diff)`
+
 **Ensemble** (`ensemble/`):
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
+- Stride sampling (~100 test points) for calibration performance
 - Models below uniform log-likelihood get weight 0
 - Consensus map: 2D classification (prob x spread) -> StrongPick/DivisivePick/StrongAvoid/Uncertain
 - Calibration results saved/loaded as JSON
