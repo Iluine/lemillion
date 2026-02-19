@@ -43,10 +43,14 @@ pub fn walk_forward_evaluate(
         return f64::NEG_INFINITY;
     }
 
+    // Limiter à ~100 points de test avec un stride pour la performance
+    let max_tests = 100;
+    let stride = (max_t / max_tests).max(1);
+
     let mut total_ll = 0.0f64;
     let mut n_tests = 0usize;
 
-    for t in 0..max_t {
+    for t in (0..max_t).step_by(stride) {
         // Données d'entraînement : strictement après le tirage test
         let train_end = (t + 1 + window).min(draws.len());
         let train_data = &draws[t + 1..train_end];
