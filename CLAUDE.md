@@ -48,6 +48,7 @@ lemillion/                          (workspace root)
 
 - `Draw` — full draw record (id, date, 5 balls [1-50], 2 stars [1-12], winners, prize, My Million)
 - `Pool` — enum `Balls | Stars` with `size()`, `pick_count()`, `numbers_from(draw)`
+- `Suggestion` — struct `{ balls: [u8;5], stars: [u8;2], score: f64 }`
 - `validate_draw` — ensures ranges and no duplicates
 - `db.rs` — SQLite via `rusqlite` (bundled). Single `draws` table keyed by `draw_id`. `INSERT OR IGNORE` handles duplicates. DB at `./data/lemillion.db`
 
@@ -75,6 +76,7 @@ Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 
 **Sampler** (`sampler.rs`):
 - `date_seed()` — deterministic YYYYMMDD seed from local date (via chrono), used when no `--seed` provided
+- `optimal_grid(ball_probs, star_probs)` — deterministic grid: top 5 balls + top 2 stars by ensemble probability, score = product of (prob/uniform)
 - Oversampling: generates `count × oversample` candidates (default 20×), keeps top scores
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair of suggestions
 - Signature: `generate_suggestions_from_probs(ball_probs, star_probs, count, seed: u64, oversample, min_ball_diff)`
@@ -83,8 +85,18 @@ Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
 - Stride sampling (~100 test points) for calibration performance
 - Models below uniform log-likelihood get weight 0
-- Consensus map: 2D classification (prob x spread) -> StrongPick/DivisivePick/StrongAvoid/Uncertain
-- Calibration results saved/loaded as JSON
+- Calibration results saved/loaded as JSON (`calibration.json`)
+
+**Consensus** (`ensemble/consensus.rs`):
+- `build_consensus_map` — 2D classification (prob × spread) -> `StrongPick | DivisivePick | StrongAvoid | Uncertain`
+- `consensus_score(balls, stars, ball_consensus, star_consensus)` — scores a grid against the consensus map: StrongPick=+2, DivisivePick=+1, Uncertain=0, StrongAvoid=-1. Range: -7 to +14
+
+**Prediction pipeline** (`cmd_predict` in `main.rs`):
+1. Load calibration weights (or uniform fallback)
+2. Predict ball/star distributions via `EnsembleCombiner`
+3. Display top-N distributions + consensus maps
+4. Display optimal grid (deterministic, max probability)
+5. Generate sampled suggestions, sort by consensus score (descending, stable on bayesian score), display with consensus column
 
 ### Conventions
 
@@ -93,3 +105,4 @@ Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 - The `--alpha` flag has different semantics per model (Dirichlet: prior strength, EWMA: decay factor 0<alpha<1)
 - `draws[0]` = most recent draw in all contexts
 - `Pool::numbers_from(draw)` to extract balls/stars from a Draw
+- Display uses `comfy-table` with `UTF8_FULL` preset and `Cell::fg(Color)` for emphasis
