@@ -1,0 +1,3 @@
+[workspace]
+members = ["lemillion-db", "lemillion-cli", "lemillion-ensemble"]
+resolver = "3"
