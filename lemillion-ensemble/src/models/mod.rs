@@ -5,6 +5,7 @@ pub mod random_forest;
 pub mod markov;
 pub mod retard;
 pub mod hot_streak;
+pub mod esn;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -36,6 +37,18 @@ pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(markov::MarkovModel::new()),
         Box::new(retard::RetardModel::new(1.5)),
         Box::new(hot_streak::HotStreakModel::new(5)),
+        Box::new(esn::EsnModel::new(lemillion_esn::config::EsnConfig {
+            reservoir_size: 1000,
+            spectral_radius: 0.95,
+            sparsity: 0.8,
+            leaking_rate: 1.0,
+            ridge_lambda: 1e-6,
+            input_scaling: 0.1,
+            encoding: lemillion_esn::config::Encoding::Normalized,
+            washout: 100,
+            noise_amplitude: 1e-4,
+            seed: 42,
+        })),
     ]
 }
 

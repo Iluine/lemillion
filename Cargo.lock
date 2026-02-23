@@ -1047,6 +1047,7 @@ dependencies = [
  "comfy-table",
  "indicatif",
  "lemillion-db",
+ "lemillion-esn",
  "ndarray",
  "rand 0.10.0",
  "serde",

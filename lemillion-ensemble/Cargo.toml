@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 lemillion-db = { path = "../lemillion-db" }
+lemillion-esn = { path = "../lemillion-esn" }
 clap = { version = "4.5.60", features = ["derive"] }
 ndarray = "0.17.2"
 serde = { version = "1", features = ["derive"] }
