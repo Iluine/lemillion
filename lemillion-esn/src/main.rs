@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Datelike;
 use clap::{Parser, Subcommand};
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
+use rayon::prelude::*;
 
 use lemillion_db::db;
 
@@ -56,6 +59,9 @@ enum Command {
         suggestions: usize,
         #[arg(long)]
         seed: Option<u64>,
+        /// Nombre de reservoirs dans l'ensemble (1 = comportement standard)
+        #[arg(long, default_value = "1")]
+        ensemble: usize,
     },
 }
 
@@ -139,21 +145,77 @@ fn main() -> Result<()> {
             config: config_path,
             suggestions: _,
             seed,
+            ensemble,
         } => {
             let json = std::fs::read_to_string(&config_path)
                 .with_context(|| format!("Impossible de lire {config_path}"))?;
-            let mut config: EsnConfig = serde_json::from_str(&json)
+            let base_config: EsnConfig = serde_json::from_str(&json)
                 .with_context(|| format!("JSON invalide dans {config_path}"))?;
 
-            // Override seed if provided, else use date-based seed
-            config.seed = seed.unwrap_or_else(date_seed);
+            let base_seed = seed.unwrap_or_else(date_seed);
 
-            println!("Entrainement ESN avec la configuration de {config_path}...");
-            let (mut esn, result) = training::train_and_evaluate(&draws, &config)?;
-            display::display_metrics(&result);
+            if ensemble <= 1 {
+                // Single ESN — comportement inchange
+                let mut config = base_config;
+                config.seed = base_seed;
 
-            let (ball_probs, star_probs) = training::predict_next(&mut esn, &draws);
-            display::display_prediction(&ball_probs, &star_probs);
+                println!("Entrainement ESN avec la configuration de {config_path}...");
+                let (mut esn, result) = training::train_and_evaluate(&draws, &config)?;
+                display::display_metrics(&result);
+
+                let (ball_probs, star_probs) = training::predict_next(&mut esn, &draws);
+                display::display_prediction(&ball_probs, &star_probs);
+            } else {
+                // Ensemble de N reservoirs
+                println!("Ensemble de {ensemble} ESN avec la configuration de {config_path}...");
+
+                // Deriver N seeds depuis la seed de base
+                let mut seed_rng = StdRng::seed_from_u64(base_seed);
+                let member_seeds: Vec<u64> = (0..ensemble).map(|_| seed_rng.random::<u64>()).collect();
+
+                // Entrainer N modeles en parallele
+                let results: Vec<Result<_>> = member_seeds
+                    .par_iter()
+                    .map(|&s| {
+                        let mut cfg = base_config.clone();
+                        cfg.seed = s;
+                        let (mut esn, result) = training::train_and_evaluate(&draws, &cfg)?;
+                        let (bp, sp) = training::predict_next(&mut esn, &draws);
+                        Ok((result, bp, sp))
+                    })
+                    .collect();
+
+                // Collecter les resultats, echouer si un membre echoue
+                let mut all_results = Vec::with_capacity(ensemble);
+                let mut all_ball_probs: Vec<Vec<f64>> = Vec::with_capacity(ensemble);
+                let mut all_star_probs: Vec<Vec<f64>> = Vec::with_capacity(ensemble);
+                for r in results {
+                    let (result, bp, sp) = r?;
+                    all_results.push(result);
+                    all_ball_probs.push(bp);
+                    all_star_probs.push(sp);
+                }
+
+                // Afficher les metriques de l'ensemble
+                display::display_ensemble_metrics(&all_results);
+
+                // Moyenner les probabilites
+                let n = ensemble as f64;
+                let mut ball_probs = vec![0.0; 50];
+                let mut star_probs = vec![0.0; 12];
+                for bp in &all_ball_probs {
+                    for (i, &p) in bp.iter().enumerate() {
+                        ball_probs[i] += p / n;
+                    }
+                }
+                for sp in &all_star_probs {
+                    for (i, &p) in sp.iter().enumerate() {
+                        star_probs[i] += p / n;
+                    }
+                }
+
+                display::display_prediction(&ball_probs, &star_probs);
+            }
         }
     }
 

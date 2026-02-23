@@ -162,6 +162,62 @@ pub fn display_prediction(ball_probs: &[f64], star_probs: &[f64]) {
     println!("{table}");
 }
 
+pub fn display_ensemble_metrics(results: &[EsnResult]) {
+    let n = results.len() as f64;
+    println!("\n== Metriques Ensemble ({} membres) ==\n", results.len());
+
+    let mean = |f: fn(&EsnResult) -> f64| -> f64 { results.iter().map(f).sum::<f64>() / n };
+    let std_dev = |f: fn(&EsnResult) -> f64| -> f64 {
+        let m = mean(f);
+        (results.iter().map(|r| (f(r) - m).powi(2)).sum::<f64>() / n).sqrt()
+    };
+
+    let metrics: Vec<(&str, fn(&EsnResult) -> f64)> = vec![
+        ("Ball hit rate", |r| r.val_ball_hit_rate),
+        ("Star hit rate", |r| r.val_star_hit_rate),
+        ("Ball top-K", |r| r.val_ball_topk),
+        ("Star top-K", |r| r.val_star_topk),
+    ];
+    let test_metrics: Vec<(&str, fn(&EsnResult) -> f64)> = vec![
+        ("Ball hit rate", |r| r.test_ball_hit_rate),
+        ("Star hit rate", |r| r.test_star_hit_rate),
+        ("Ball top-K", |r| r.test_ball_topk),
+        ("Star top-K", |r| r.test_star_topk),
+    ];
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Metrique", "Val (moy +/- std)", "Test (moy +/- std)"]);
+
+    for (&(name, vf), &(_, tf)) in metrics.iter().zip(test_metrics.iter()) {
+        table.add_row(vec![
+            Cell::new(name),
+            Cell::new(format!("{:.4} +/- {:.4}", mean(vf), std_dev(vf))),
+            Cell::new(format!("{:.4} +/- {:.4}", mean(tf), std_dev(tf))),
+        ]);
+    }
+
+    println!("{table}");
+
+    // Lyapunov moyen
+    let lyap_mean: f64 = results.iter().map(|r| r.lyapunov_exponent).sum::<f64>() / n;
+    let lyap_std: f64 = (results
+        .iter()
+        .map(|r| (r.lyapunov_exponent - lyap_mean).powi(2))
+        .sum::<f64>()
+        / n)
+        .sqrt();
+    println!(
+        "\nLyapunov moyen : {:.4} +/- {:.4}",
+        lyap_mean, lyap_std
+    );
+
+    let total_ms: u64 = results.iter().map(|r| r.train_time_ms).sum();
+    println!("Temps total d'entrainement : {} ms", total_ms);
+}
+
 pub fn display_calibration(bins: &[(f64, f64, f64, usize)]) {
     println!("\n== Calibration ==\n");
 
