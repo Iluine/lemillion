@@ -2,69 +2,69 @@
   "ball_weights": [
     [
       "Dirichlet",
-      0.18181193380687452
+      0.20332084263770936
     ],
     [
       "EWMA",
-      0.04257381523955244
+      0.04041333490047801
     ],
     [
       "Logistic",
-      0.2273104174531902
+      0.2157897889168536
     ],
     [
       "RandomForest",
-      0.21522459155488213
+      0.20834245336220156
     ],
     [
       "Markov",
-      0.15254349372712137
+      0.15853348443690923
     ],
     [
       "Retard",
-      0.001132632685338903
+      0.003301095070659288
     ],
     [
       "HotStreak",
-      6.416183185466534e-9
+      6.090583106025635e-9
     ],
     [
       "ESN",
-      0.1794031091168571
+      0.17029899458460573
     ]
   ],
   "star_weights": [
     [
       "Dirichlet",
-      0.16705369684602117
+      0.1660774698799765
     ],
     [
       "EWMA",
-      0.12349817437903064
+      0.1227764768029679
     ],
     [
       "Logistic",
-      0.17141123047209864
+      0.17061294517466238
     ],
     [
       "RandomForest",
-      0.16636605246743016
+      0.17103422921969416
     ],
     [
       "Markov",
-      0.1621635322755075
+      0.16121588241139034
     ],
     [
       "Retard",
-      0.04764302243012927
+      0.04736460654279317
     ],
     [
       "HotStreak",
-      0.0052629701966715155
+      0.005232214496411761
     ],
     [
       "ESN",
-      0.1566013209331109
+      0.15568617547210367
     ]
   ],
   "calibrations": [
@@ -88,10 +88,16 @@
           "window": 100,
           "log_likelihood": -19.783890356541452,
           "n_tests": 531
+        },
+        {
+          "model_name": "Dirichlet",
+          "window": 200,
+          "log_likelihood": -19.61999834541747,
+          "n_tests": 431
         }
       ],
-      "best_window": 100,
-      "best_ll": -19.783890356541452
+      "best_window": 200,
+      "best_ll": -19.61999834541747
     },
     {
       "model_name": "EWMA",
@@ -113,6 +119,12 @@
           "window": 100,
           "log_likelihood": -21.235623780079827,
           "n_tests": 531
+        },
+        {
+          "model_name": "EWMA",
+          "window": 200,
+          "log_likelihood": -21.251821910252342,
+          "n_tests": 431
         }
       ],
       "best_window": 100,
@@ -138,10 +150,16 @@
           "window": 100,
           "log_likelihood": -19.560961800303886,
           "n_tests": 531
+        },
+        {
+          "model_name": "Logistic",
+          "window": 200,
+          "log_likelihood": -19.56047884802014,
+          "n_tests": 431
         }
       ],
-      "best_window": 20,
-      "best_ll": -19.56054661752996
+      "best_window": 200,
+      "best_ll": -19.56047884802014
     },
     {
       "model_name": "RandomForest",
@@ -163,10 +181,16 @@
           "window": 100,
           "log_likelihood": -19.615181083849006,
           "n_tests": 531
+        },
+        {
+          "model_name": "RandomForest",
+          "window": 200,
+          "log_likelihood": -19.59560044613052,
+          "n_tests": 431
         }
       ],
-      "best_window": 100,
-      "best_ll": -19.615181083849006
+      "best_window": 200,
+      "best_ll": -19.59560044613052
     },
     {
       "model_name": "Markov",
@@ -188,10 +212,16 @@
           "window": 100,
           "log_likelihood": -19.95941341848019,
           "n_tests": 531
+        },
+        {
+          "model_name": "Markov",
+          "window": 200,
+          "log_likelihood": -19.868817753096753,
+          "n_tests": 431
         }
       ],
-      "best_window": 100,
-      "best_ll": -19.95941341848019
+      "best_window": 200,
+      "best_ll": -19.868817753096753
     },
     {
       "model_name": "Retard",
@@ -213,10 +243,16 @@
           "window": 100,
           "log_likelihood": -24.862318445673175,
           "n_tests": 531
+        },
+        {
+          "model_name": "Retard",
+          "window": 200,
+          "log_likelihood": -23.740529329359653,
+          "n_tests": 431
         }
       ],
-      "best_window": 100,
-      "best_ll": -24.862318445673175
+      "best_window": 200,
+      "best_ll": -23.740529329359653
     },
     {
       "model_name": "HotStreak",
@@ -238,6 +274,12 @@
           "window": 100,
           "log_likelihood": -36.94355031508939,
           "n_tests": 531
+        },
+        {
+          "model_name": "HotStreak",
+          "window": 200,
+          "log_likelihood": -38.16933943129585,
+          "n_tests": 431
         }
       ],
       "best_window": 100,
@@ -263,6 +305,12 @@
           "window": 100,
           "log_likelihood": -19.89848191569355,
           "n_tests": 531
+        },
+        {
+          "model_name": "ESN",
+          "window": 200,
+          "log_likelihood": -19.960187460872643,
+          "n_tests": 431
         }
       ],
       "best_window": 20,
@@ -288,6 +336,12 @@
           "window": 100,
           "log_likelihood": -4.992699467932219,
           "n_tests": 531
+        },
+        {
+          "model_name": "Dirichlet",
+          "window": 200,
+          "log_likelihood": -5.014434962402286,
+          "n_tests": 431
         }
       ],
       "best_window": 100,
@@ -313,6 +367,12 @@
           "window": 100,
           "log_likelihood": -5.327265050124078,
           "n_tests": 531
+        },
+        {
+          "model_name": "EWMA",
+          "window": 200,
+          "log_likelihood": -5.321086726705352,
+          "n_tests": 431
         }
       ],
       "best_window": 20,
@@ -338,10 +398,16 @@
           "window": 100,
           "log_likelihood": -4.969749832809118,
           "n_tests": 531
+        },
+        {
+          "model_name": "Logistic",
+          "window": 200,
+          "log_likelihood": -4.965756320996328,
+          "n_tests": 431
         }
       ],
-      "best_window": 50,
-      "best_ll": -4.9669492406420535
+      "best_window": 200,
+      "best_ll": -4.965756320996328
     },
     {
       "model_name": "RandomForest",
@@ -363,10 +429,16 @@
           "window": 100,
           "log_likelihood": -4.99682427070693,
           "n_tests": 531
+        },
+        {
+          "model_name": "RandomForest",
+          "window": 200,
+          "log_likelihood": -4.963290126102116,
+          "n_tests": 431
         }
       ],
-      "best_window": 100,
-      "best_ll": -4.99682427070693
+      "best_window": 200,
+      "best_ll": -4.963290126102116
     },
     {
       "model_name": "Markov",
@@ -388,6 +460,12 @@
           "window": 100,
           "log_likelihood": -5.0224094821042655,
           "n_tests": 531
+        },
+        {
+          "model_name": "Markov",
+          "window": 200,
+          "log_likelihood": -5.038769950025714,
+          "n_tests": 431
         }
       ],
       "best_window": 100,
@@ -413,6 +491,12 @@
           "window": 100,
           "log_likelihood": -6.247278581074424,
           "n_tests": 531
+        },
+        {
+          "model_name": "Retard",
+          "window": 200,
+          "log_likelihood": -6.5122477883493435,
+          "n_tests": 431
         }
       ],
       "best_window": 100,
@@ -438,6 +522,12 @@
           "window": 100,
           "log_likelihood": -9.879993847776477,
           "n_tests": 531
+        },
+        {
+          "model_name": "HotStreak",
+          "window": 200,
+          "log_likelihood": -9.29094649111715,
+          "n_tests": 431
         }
       ],
       "best_window": 20,
@@ -463,6 +553,12 @@
           "window": 100,
           "log_likelihood": -5.137840057442873,
           "n_tests": 531
+        },
+        {
+          "model_name": "ESN",
+          "window": 200,
+          "log_likelihood": -5.315781822678044,
+          "n_tests": 431
         }
       ],
       "best_window": 50,
