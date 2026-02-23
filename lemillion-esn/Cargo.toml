@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 lemillion-db = { path = "../lemillion-db" }
 ndarray = "0.17.2"
+sprs = "0.11"
 faer = "0.24.0"
 rand = "0.10.0"
 rayon = "1.10"
