@@ -122,10 +122,34 @@ pub fn run_grid_search(
         best_config,
     };
 
-    // Save to JSON
-    let json = serde_json::to_string_pretty(&gs_results)?;
-    std::fs::write(output_path, json)?;
-    log::info!("Results saved to {output_path}");
+    // Compare with existing results before saving
+    let new_score = score(&gs_results.results[0]);
+    let should_save = match std::fs::read_to_string(output_path) {
+        Ok(existing_json) => match serde_json::from_str::<GridSearchResults>(&existing_json) {
+            Ok(old) if !old.results.is_empty() => {
+                let old_score = score(&old.results[0]);
+                if new_score >= old_score {
+                    println!(
+                        "Resultats sauvegardes (score: {new_score:.4}, ancien: {old_score:.4})"
+                    );
+                    true
+                } else {
+                    println!(
+                        "Resultats non sauvegardes : score {new_score:.4} < ancien {old_score:.4}"
+                    );
+                    false
+                }
+            }
+            _ => true,
+        },
+        Err(_) => true,
+    };
+
+    if should_save {
+        let json = serde_json::to_string_pretty(&gs_results)?;
+        std::fs::write(output_path, json)?;
+        log::info!("Results saved to {output_path}");
+    }
 
     Ok(gs_results)
 }
