@@ -93,32 +93,34 @@ pub fn uniform_log_likelihood(pool: Pool) -> f64 {
 }
 
 /// Calcule les poids de l'ensemble à partir des calibrations.
-/// Les modèles avec une LL inférieure à la LL uniforme reçoivent un poids de 0.
+/// Pondération continue : poids = exp(skill) où skill = best_ll - uniform_ll.
+/// Les modèles proches de l'uniforme ont un poids élevé, les mauvais décroissent
+/// exponentiellement sans être coupés brutalement.
 pub fn compute_weights(
     calibrations: &[ModelCalibration],
     pool: Pool,
 ) -> Vec<(String, f64)> {
     let uniform_ll = uniform_log_likelihood(pool);
 
-    // Calculer les skills (LL - LL_uniforme)
-    let skills: Vec<f64> = calibrations
+    // Poids = exp(skill) où skill = best_ll - uniform_ll
+    // Plus le modèle est proche de l'uniforme, plus son poids est élevé
+    // Les modèles meilleurs que l'uniforme (skill > 0) ont poids > 1
+    // Les modèles pires (skill < 0) ont poids < 1, décroissant exponentiellement
+    let raw_weights: Vec<f64> = calibrations
         .iter()
-        .map(|c| {
-            let skill = c.best_ll - uniform_ll;
-            if skill > 0.0 { skill } else { 0.0 }
-        })
+        .map(|c| (c.best_ll - uniform_ll).exp())
         .collect();
 
-    let total_skill: f64 = skills.iter().sum();
+    let total: f64 = raw_weights.iter().sum();
 
-    if total_skill > 0.0 {
+    if total > 0.0 {
         calibrations
             .iter()
-            .zip(skills.iter())
-            .map(|(c, &skill)| (c.model_name.clone(), skill / total_skill))
+            .zip(raw_weights.iter())
+            .map(|(c, &w)| (c.model_name.clone(), w / total))
             .collect()
     } else {
-        // Tous les modèles sont inférieurs à l'uniforme, poids égaux
+        // Cas dégénéré (ne devrait pas arriver avec exp)
         let n = calibrations.len() as f64;
         calibrations
             .iter()
@@ -234,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_weights_zero_for_below_uniform() {
+    fn test_compute_weights_bad_model_has_lower_weight() {
         let uniform_ll = uniform_log_likelihood(Pool::Balls);
         let calibrations = vec![
             ModelCalibration {
@@ -251,8 +253,41 @@ mod tests {
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
+        let good_weight = weights.iter().find(|(n, _)| n == "Good").unwrap().1;
         let bad_weight = weights.iter().find(|(n, _)| n == "Bad").unwrap().1;
-        assert_eq!(bad_weight, 0.0, "Bad model should have weight 0");
+        assert!(bad_weight < good_weight, "Bad model should have lower weight");
+        assert!(bad_weight < 0.2, "Bad model should have small weight, got {}", bad_weight);
+    }
+
+    #[test]
+    fn test_compute_weights_exponential_ordering() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "Best".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_ll: uniform_ll + 2.0,
+            },
+            ModelCalibration {
+                model_name: "Medium".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_ll: uniform_ll + 0.5,
+            },
+            ModelCalibration {
+                model_name: "Worst".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_ll: uniform_ll - 3.0,
+            },
+        ];
+        let weights = compute_weights(&calibrations, Pool::Balls);
+        let best_w = weights.iter().find(|(n, _)| n == "Best").unwrap().1;
+        let medium_w = weights.iter().find(|(n, _)| n == "Medium").unwrap().1;
+        let worst_w = weights.iter().find(|(n, _)| n == "Worst").unwrap().1;
+        assert!(best_w > medium_w, "Best should have highest weight");
+        assert!(medium_w > worst_w, "Medium should beat worst");
     }
 
     #[test]
