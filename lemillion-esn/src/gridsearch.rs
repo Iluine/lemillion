@@ -73,6 +73,8 @@ pub fn run_grid_search(
         .progress_chars("=> "),
     );
 
+    let start = std::time::Instant::now();
+
     let results: Vec<EsnResult> = configs
         .par_iter()
         .filter_map(|config| {
@@ -88,7 +90,18 @@ pub fn run_grid_search(
         })
         .collect();
 
-    pb.finish_with_message("Grid search complete");
+    let elapsed = start.elapsed();
+    pb.finish_and_clear();
+
+    let total_secs = elapsed.as_secs();
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    let ok = results.len();
+    let failed = configs.len() - ok;
+    println!(
+        "Grid search terminee : {ok}/{} configs en {mins}m{secs:02}s ({failed} echecs)",
+        configs.len(),
+    );
 
     if results.is_empty() {
         anyhow::bail!("All configurations failed");
