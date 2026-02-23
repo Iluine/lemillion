@@ -1,3 +1,5 @@
+mod interactive;
+
 use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -76,6 +78,9 @@ enum Command {
         /// 5 boules + 2 étoiles (7 nombres)
         numbers: Vec<u8>,
     },
+
+    /// Mode interactif (REPL)
+    Interactive,
 }
 
 fn main() -> Result<()> {
@@ -90,10 +95,11 @@ fn main() -> Result<()> {
         Command::Predict { calibration, suggestions, seed, oversample, min_diff } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
+        Command::Interactive => interactive::run_interactive(&conn),
     }
 }
 
-fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, output: &str) -> Result<()> {
+pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, output: &str) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -164,14 +170,14 @@ fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, o
     Ok(())
 }
 
-fn cmd_weights(calibration_path: &str) -> Result<()> {
+pub(crate) fn cmd_weights(calibration_path: &str) -> Result<()> {
     let weights = load_weights(&PathBuf::from(calibration_path))
         .context("Impossible de charger le fichier de calibration. Lancez d'abord : lemillion-ensemble calibrate")?;
     display::display_weights(&weights);
     Ok(())
 }
 
-fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize) -> Result<()> {
+pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -248,7 +254,7 @@ fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str
     Ok(())
 }
 
-fn cmd_history(conn: &lemillion_db::rusqlite::Connection, last: u32) -> Result<()> {
+pub(crate) fn cmd_history(conn: &lemillion_db::rusqlite::Connection, last: u32) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -278,7 +284,7 @@ fn cmd_history(conn: &lemillion_db::rusqlite::Connection, last: u32) -> Result<(
     Ok(())
 }
 
-fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[u8]) -> Result<()> {
+pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[u8]) -> Result<()> {
     if numbers.len() != 7 {
         bail!("Attendu 7 nombres : 5 boules + 2 étoiles. Reçu : {}", numbers.len());
     }

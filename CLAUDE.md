@@ -23,6 +23,7 @@ cargo run -p lemillion-ensemble -- predict              # ensemble prediction (a
 cargo run -p lemillion-ensemble -- predict --oversample 50 --min-diff 3  # custom oversampling/diversity
 cargo run -p lemillion-ensemble -- history --last 5   # show recent draws
 cargo run -p lemillion-ensemble -- compare 3 15 27 38 44 2 9  # analyze a grid
+cargo run -p lemillion-ensemble -- interactive              # interactive REPL mode
 ```
 
 ## Architecture
@@ -38,7 +39,7 @@ lemillion/                          (workspace root)
   lemillion-cli/                   (bin crate - original CLI)
     src/main.rs, import.rs, display.rs, analysis/{mod,dirichlet,ewma,sampler}.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
-    src/main.rs, lib.rs, display.rs, sampler.rs
+    src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs
     src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus}.rs
@@ -97,6 +98,11 @@ Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 3. Display top-N distributions + consensus maps
 4. Display optimal grid (deterministic, max probability)
 5. Generate sampled suggestions, sort by consensus score (descending, stable on bayesian score), display with consensus column
+
+**Interactive mode** (`interactive.rs`):
+- REPL loop with menu: add draw, calibrate, predict, history, compare, weights, quit
+- Commands by number (`1`-`7`), French name (`ajouter`), or alias (`add`, `q`, `cal`, `pred`, `hist`, `comp`)
+- Each command prompts for parameters with defaults; errors are caught without exiting the loop
 
 ### Conventions
 
