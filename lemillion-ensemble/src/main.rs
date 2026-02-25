@@ -79,6 +79,12 @@ enum Command {
         numbers: Vec<u8>,
     },
 
+    /// Ajouter un tirage manuellement: draw_id jour date b1 b2 b3 b4 b5 s1 s2
+    AddDraw {
+        /// Paramètres: draw_id jour date b1 b2 b3 b4 b5 s1 s2
+        args: Vec<String>,
+    },
+
     /// Corriger le tirage erroné 20260221 → 26015
     FixDraw,
 
@@ -101,6 +107,7 @@ fn main() -> Result<()> {
         Command::Predict { calibration, suggestions, seed, oversample, min_diff } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
+        Command::AddDraw { args } => cmd_add_draw(&conn, &args),
         Command::FixDraw => cmd_fix_draw(&conn),
         Command::Rebuild => cmd_rebuild(&conn),
         Command::Interactive => interactive::run_interactive(&conn),
@@ -333,6 +340,41 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
 
     display::display_compare(&balls, &stars, &ball_pred, &star_pred);
 
+    Ok(())
+}
+
+fn cmd_add_draw(conn: &lemillion_db::rusqlite::Connection, args: &[String]) -> Result<()> {
+    if args.len() != 10 {
+        bail!("Attendu 10 arguments: draw_id jour date b1 b2 b3 b4 b5 s1 s2\nExemple: add-draw 26016 MARDI 2026-02-24 10 27 40 43 47 6 10");
+    }
+    let draw = Draw {
+        draw_id: args[0].clone(),
+        day: args[1].clone(),
+        date: args[2].clone(),
+        balls: [
+            args[3].parse().context("b1 invalide")?,
+            args[4].parse().context("b2 invalide")?,
+            args[5].parse().context("b3 invalide")?,
+            args[6].parse().context("b4 invalide")?,
+            args[7].parse().context("b5 invalide")?,
+        ],
+        stars: [
+            args[8].parse().context("s1 invalide")?,
+            args[9].parse().context("s2 invalide")?,
+        ],
+        winner_count: 0,
+        winner_prize: 0.0,
+        my_million: String::new(),
+    };
+    lemillion_db::models::validate_draw(&draw.balls, &draw.stars)?;
+    let inserted = insert_draw(conn, &draw)?;
+    if inserted {
+        println!("Tirage {} ({}) inséré.", draw.draw_id, draw.date);
+    } else {
+        println!("Tirage {} déjà présent.", draw.draw_id);
+    }
+    let n = count_draws(conn)?;
+    println!("Total : {} tirages en base.", n);
     Ok(())
 }
 
