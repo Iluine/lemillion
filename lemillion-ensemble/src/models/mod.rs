@@ -6,6 +6,8 @@ pub mod markov;
 pub mod retard;
 pub mod hot_streak;
 pub mod esn;
+pub mod takens;
+pub mod spectral;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -30,7 +32,7 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
 
 pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
-        Box::new(dirichlet::DirichletModel::new(1.0)),
+        Box::new(dirichlet::DirichletModel::with_window(0.1, Some(30))),
         Box::new(ewma::EwmaModel::new(0.9)),
         Box::new(logistic::LogisticModel::new(0.01, 0.001, 50, 100)),
         Box::new(random_forest::RandomForestModel::new(50, 5, 100)),
@@ -49,6 +51,8 @@ pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
             noise_amplitude: 1e-4,
             seed: 42,
         })),
+        Box::new(takens::TakensKnnModel::default()),
+        Box::new(spectral::SpectralModel::default()),
     ]
 }
 

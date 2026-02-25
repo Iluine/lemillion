@@ -14,7 +14,10 @@ use lemillion_ensemble::ensemble::calibration::{
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
-use lemillion_ensemble::sampler::{generate_suggestions_from_probs, optimal_grid};
+use lemillion_ensemble::sampler::{
+    compute_bayesian_score, generate_suggestions_filtered,
+    generate_suggestions_joint, optimal_grid, StructuralFilter,
+};
 
 #[derive(Parser)]
 #[command(name = "lemillion-ensemble", about = "EuroMillions Ensemble Forecasting")]
@@ -91,6 +94,28 @@ enum Command {
     /// Reconstruire la base en ordre chronologique
     Rebuild,
 
+    /// Backtest sur les derniers tirages
+    Backtest {
+        /// Nombre de tirages à tester
+        #[arg(short, long, default_value = "10")]
+        last: usize,
+
+        /// Nombre de suggestions par tirage
+        #[arg(short, long, default_value = "5000")]
+        suggestions: usize,
+
+        /// Facteur de suréchantillonnage
+        #[arg(long, default_value = "20")]
+        oversample: usize,
+
+        /// Fichier de calibration
+        #[arg(short, long, default_value = "calibration.json")]
+        calibration: String,
+    },
+
+    /// Analyser la non-aléatoire des tirages
+    Analyze,
+
     /// Mode interactif (REPL)
     Interactive,
 }
@@ -110,6 +135,8 @@ fn main() -> Result<()> {
         Command::AddDraw { args } => cmd_add_draw(&conn, &args),
         Command::FixDraw => cmd_fix_draw(&conn),
         Command::Rebuild => cmd_rebuild(&conn),
+        Command::Backtest { last, suggestions, oversample, calibration } => cmd_backtest(&conn, last, suggestions, oversample, &calibration),
+        Command::Analyze => cmd_analyze(&conn),
         Command::Interactive => interactive::run_interactive(&conn),
     }
 }
@@ -245,14 +272,16 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         ds
     });
 
-    // Suggestions
-    let suggestions = generate_suggestions_from_probs(
+    // Suggestions avec scoring conjoint
+    let suggestions = generate_suggestions_joint(
         &ball_pred.distribution,
         &star_pred.distribution,
+        &draws,
         n_suggestions,
         effective_seed,
         oversample,
         min_diff,
+        None,
     )?;
 
     // Trier par consensus score décroissant (à score égal, garder l'ordre par score bayésien)
@@ -408,6 +437,174 @@ fn cmd_fix_draw(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
 
     let n = count_draws(conn)?;
     println!("Total : {} tirages en base.", n);
+    Ok(())
+}
+
+fn cmd_backtest(
+    conn: &lemillion_db::rusqlite::Connection,
+    last: usize,
+    n_suggestions: usize,
+    oversample: usize,
+    calibration_path: &str,
+) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide. Lancez d'abord : lemillion-cli import");
+    }
+
+    let draws = fetch_last_draws(conn, n)?;
+    if draws.len() < last + 10 {
+        bail!(
+            "Pas assez de tirages ({}) pour backtester {} tirages avec un historique suffisant",
+            draws.len(),
+            last
+        );
+    }
+
+    let weights = load_weights(&PathBuf::from(calibration_path));
+
+    println!(
+        "Backtest de {} tirages avec {} suggestions chacun (oversample={})\n",
+        last, n_suggestions, oversample
+    );
+
+    let pb = ProgressBar::new(last as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let mut rows = Vec::with_capacity(last);
+
+    for i in 0..last {
+        let test_draw = &draws[i];
+        let training_draws = &draws[i + 1..];
+
+        pb.set_message(format!("{}", test_draw.date));
+
+        let models = all_models();
+        let combiner = match &weights {
+            Ok(w) => {
+                let ball_w: Vec<f64> = models
+                    .iter()
+                    .map(|m| {
+                        w.ball_weights
+                            .iter()
+                            .find(|(n, _)| n == m.name())
+                            .map(|(_, w)| *w)
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                let star_w: Vec<f64> = models
+                    .iter()
+                    .map(|m| {
+                        w.star_weights
+                            .iter()
+                            .find(|(n, _)| n == m.name())
+                            .map(|(_, w)| *w)
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                EnsembleCombiner::with_weights(models, ball_w, star_w)
+            }
+            Err(_) => EnsembleCombiner::new(models),
+        };
+
+        let ball_pred = combiner.predict(training_draws, Pool::Balls);
+        let star_pred = combiner.predict(training_draws, Pool::Stars);
+
+        // Score bayésien du tirage réel
+        let real_score = compute_bayesian_score(
+            &test_draw.balls,
+            &test_draw.stars,
+            &ball_pred.distribution,
+            &star_pred.distribution,
+        );
+
+        // Générer les suggestions avec filtre structurel
+        let filter = StructuralFilter::from_history(training_draws, Pool::Balls);
+        let suggestions = generate_suggestions_filtered(
+            &ball_pred.distribution,
+            &star_pred.distribution,
+            n_suggestions,
+            42 + i as u64,
+            oversample,
+            2,
+            Some(&filter),
+        )?;
+
+        // Percentile : % des suggestions avec un score inférieur au tirage réel
+        let below_count = suggestions.iter().filter(|s| s.score < real_score).count();
+        let percentile = 100.0 * below_count as f64 / suggestions.len() as f64;
+
+        // Grille optimale : match avec le tirage réel
+        let optimal = optimal_grid(&ball_pred.distribution, &star_pred.distribution);
+        let ball_match = test_draw
+            .balls
+            .iter()
+            .filter(|b| optimal.balls.contains(b))
+            .count() as u8;
+        let star_match = test_draw
+            .stars
+            .iter()
+            .filter(|s| optimal.stars.contains(s))
+            .count() as u8;
+
+        // Consensus du tirage réel
+        let ball_consensus =
+            build_consensus_map(&ball_pred, Pool::Balls);
+        let star_consensus =
+            build_consensus_map(&star_pred, Pool::Stars);
+        let cs = consensus_score(&test_draw.balls, &test_draw.stars, &ball_consensus, &star_consensus);
+
+        // Bits d'information : log2(score_réel / score_médian)
+        let median_score = if suggestions.len() >= 2 {
+            let mut scores: Vec<f64> = suggestions.iter().map(|s| s.score).collect();
+            scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            scores[scores.len() / 2]
+        } else {
+            1.0
+        };
+        let bits_info = if median_score > 0.0 && real_score > 0.0 {
+            (real_score / median_score).log2()
+        } else {
+            0.0
+        };
+
+        rows.push(display::BacktestRow {
+            date: test_draw.date.clone(),
+            actual_balls: test_draw.balls,
+            actual_stars: test_draw.stars,
+            score: real_score,
+            percentile,
+            optimal_ball_match: ball_match,
+            optimal_star_match: star_match,
+            consensus: cs,
+            bits_info,
+        });
+
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+
+    display::display_backtest_results(&rows);
+
+    Ok(())
+}
+
+fn cmd_analyze(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide. Lancez d'abord : lemillion-cli import");
+    }
+
+    let draws = fetch_last_draws(conn, n)?;
+    let results = lemillion_ensemble::analysis::run_all_tests(&draws);
+    display::display_analysis(&results, draws.len());
+
     Ok(())
 }
 

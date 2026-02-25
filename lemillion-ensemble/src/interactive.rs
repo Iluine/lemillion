@@ -12,6 +12,7 @@ enum InteractiveCommand {
     History,
     Compare,
     Weights,
+    Analyze,
     Quit,
 }
 
@@ -23,7 +24,8 @@ fn parse_command(input: &str) -> Option<InteractiveCommand> {
         "4" | "historique" | "history" | "hist" => Some(InteractiveCommand::History),
         "5" | "comparer" | "compare" | "comp" => Some(InteractiveCommand::Compare),
         "6" | "poids" | "weights" => Some(InteractiveCommand::Weights),
-        "7" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
+        "7" | "analyser" | "analyze" | "ana" => Some(InteractiveCommand::Analyze),
+        "8" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
         _ => None,
     }
 }
@@ -37,7 +39,8 @@ fn display_menu() {
     println!("  4. historique Derniers tirages");
     println!("  5. comparer   Analyser une grille");
     println!("  6. poids      Afficher les poids");
-    println!("  7. quitter    Quitter");
+    println!("  7. analyser   Tests de non-aléatoire");
+    println!("  8. quitter    Quitter");
     println!();
 }
 
@@ -178,6 +181,20 @@ fn cmd_compare_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
     super::cmd_compare(conn, &numbers)
 }
 
+fn cmd_analyze_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    use lemillion_db::db::{count_draws, fetch_last_draws};
+    use lemillion_ensemble::display;
+
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide.");
+    }
+    let draws = fetch_last_draws(conn, n)?;
+    let results = lemillion_ensemble::analysis::run_all_tests(&draws);
+    display::display_analysis(&results, draws.len());
+    Ok(())
+}
+
 pub fn run_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     println!("Bienvenue dans le mode interactif de lemillion-ensemble !");
 
@@ -196,6 +213,11 @@ pub fn run_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> 
             Some(InteractiveCommand::Quit) => {
                 println!("Au revoir !");
                 break;
+            }
+            Some(InteractiveCommand::Analyze) => {
+                if let Err(e) = cmd_analyze_interactive(conn) {
+                    println!("Erreur: {e:#}");
+                }
             }
             Some(InteractiveCommand::Add) => {
                 if let Err(e) = cmd_add_interactive(conn) {
@@ -248,7 +270,8 @@ mod tests {
         assert_eq!(parse_command("4"), Some(InteractiveCommand::History));
         assert_eq!(parse_command("5"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("6"), Some(InteractiveCommand::Weights));
-        assert_eq!(parse_command("7"), Some(InteractiveCommand::Quit));
+        assert_eq!(parse_command("7"), Some(InteractiveCommand::Analyze));
+        assert_eq!(parse_command("8"), Some(InteractiveCommand::Quit));
     }
 
     #[test]
@@ -259,6 +282,7 @@ mod tests {
         assert_eq!(parse_command("historique"), Some(InteractiveCommand::History));
         assert_eq!(parse_command("comparer"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("poids"), Some(InteractiveCommand::Weights));
+        assert_eq!(parse_command("analyser"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("quitter"), Some(InteractiveCommand::Quit));
     }
 
@@ -270,6 +294,7 @@ mod tests {
         assert_eq!(parse_command("hist"), Some(InteractiveCommand::History));
         assert_eq!(parse_command("comp"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("weights"), Some(InteractiveCommand::Weights));
+        assert_eq!(parse_command("ana"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("q"), Some(InteractiveCommand::Quit));
         assert_eq!(parse_command("exit"), Some(InteractiveCommand::Quit));
     }
@@ -280,13 +305,14 @@ mod tests {
         assert_eq!(parse_command("Ajouter"), Some(InteractiveCommand::Add));
         assert_eq!(parse_command("CALIBRER"), Some(InteractiveCommand::Calibrate));
         assert_eq!(parse_command("Predire"), Some(InteractiveCommand::Predict));
+        assert_eq!(parse_command("ANALYSER"), Some(InteractiveCommand::Analyze));
     }
 
     #[test]
     fn test_parse_command_unknown() {
         assert_eq!(parse_command("foo"), None);
         assert_eq!(parse_command(""), None);
-        assert_eq!(parse_command("8"), None);
+        assert_eq!(parse_command("9"), None);
         assert_eq!(parse_command("hello"), None);
     }
 }

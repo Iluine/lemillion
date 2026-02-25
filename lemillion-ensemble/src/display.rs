@@ -2,6 +2,7 @@ use comfy_table::{Table, ContentArrangement, presets::UTF8_FULL, Cell, Color};
 use textplots::Plot;
 
 use lemillion_db::models::{Pool, Suggestion};
+use crate::analysis::{AnalysisResult, Verdict};
 use crate::ensemble::EnsemblePrediction;
 use crate::ensemble::calibration::{EnsembleWeights, ModelCalibration};
 use crate::ensemble::consensus::{ConsensusCategory, ConsensusEntry};
@@ -332,4 +333,187 @@ pub fn display_compare(
         .product();
     println!("\nScore bayésien : {:.4} (boules: {:.4}, étoiles: {:.4})",
         ball_score * star_score, ball_score, star_score);
+}
+
+/// Affiche les résultats de l'analyse de non-aléatoire.
+pub fn display_analysis(results: &[AnalysisResult], n_draws: usize) {
+    println!("\n== Analyse de non-aléatoire ({} tirages) ==\n", n_draws);
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Test", "Valeur", "Attendu (aléatoire)", "Verdict", "Détails"]);
+
+    for r in results {
+        let verdict_color = match r.verdict {
+            Verdict::Signal => Color::Green,
+            Verdict::Neutral => Color::Yellow,
+            Verdict::Random => Color::Red,
+        };
+
+        let value_str = if r.value.is_nan() {
+            "N/A".to_string()
+        } else {
+            format!("{:.4}", r.value)
+        };
+
+        let expected_str = if r.expected_random.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.4}", r.expected_random)
+        };
+
+        table.add_row(vec![
+            Cell::new(&r.test_name),
+            Cell::new(&value_str),
+            Cell::new(&expected_str),
+            Cell::new(format!("{}", r.verdict)).fg(verdict_color),
+            Cell::new(&r.detail),
+        ]);
+    }
+    println!("{table}");
+
+    // Résumé
+    let signals = results.iter().filter(|r| r.verdict == Verdict::Signal).count();
+    let randoms = results.iter().filter(|r| r.verdict == Verdict::Random).count();
+    let neutrals = results.iter().filter(|r| r.verdict == Verdict::Neutral).count();
+
+    println!("\n── Verdict global ──");
+    println!("  SIGNAL: {}  NEUTRE: {}  ALÉATOIRE: {}", signals, neutrals, randoms);
+
+    if signals >= 3 {
+        println!("  --> Structure potentielle détectée. Les modèles ont une chance de faire mieux que l'uniforme.");
+    } else if randoms >= 3 {
+        println!("  --> Aucune structure détectée. La séquence est indiscernable d'un processus aléatoire.");
+    } else {
+        println!("  --> Résultats mitigés. Signal faible ou insuffisant.");
+    }
+}
+
+/// Résultat d'un backtest pour un tirage.
+pub struct BacktestRow {
+    pub date: String,
+    pub actual_balls: [u8; 5],
+    pub actual_stars: [u8; 2],
+    pub score: f64,
+    pub percentile: f64,
+    pub optimal_ball_match: u8,
+    pub optimal_star_match: u8,
+    pub consensus: i32,
+    pub bits_info: f64,
+}
+
+pub fn display_backtest_results(rows: &[BacktestRow]) {
+    println!("\n== Backtest ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            "Date", "Tirage réel", "Score", "Percentile", "Bits", "Optimal", "Consensus",
+        ]);
+
+    for row in rows {
+        let balls_str = row
+            .actual_balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join("-");
+        let stars_str = row
+            .actual_stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join("-");
+        let draw_str = format!("{} + {}", balls_str, stars_str);
+
+        let match_str = format!(
+            "{}/5b {}/2s",
+            row.optimal_ball_match, row.optimal_star_match
+        );
+
+        let pct_color = if row.percentile >= 70.0 {
+            Color::Green
+        } else if row.percentile >= 50.0 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        let bits_color = if row.bits_info > 0.5 {
+            Color::Green
+        } else if row.bits_info > -0.5 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        table.add_row(vec![
+            Cell::new(&row.date),
+            Cell::new(&draw_str),
+            Cell::new(format!("{:.4}", row.score)),
+            Cell::new(format!("{:.1}%", row.percentile)).fg(pct_color),
+            Cell::new(format!("{:+.2}", row.bits_info)).fg(bits_color),
+            Cell::new(&match_str),
+            Cell::new(format!("{:+}", row.consensus)),
+        ]);
+    }
+    println!("{table}");
+
+    // Résumé amélioré
+    if !rows.is_empty() {
+        let n = rows.len() as f64;
+        let avg_score = rows.iter().map(|r| r.score).sum::<f64>() / n;
+        let avg_pct = rows.iter().map(|r| r.percentile).sum::<f64>() / n;
+        let best_pct = rows
+            .iter()
+            .map(|r| r.percentile)
+            .fold(0.0f64, f64::max);
+        let worst_pct = rows
+            .iter()
+            .map(|r| r.percentile)
+            .fold(100.0f64, f64::min);
+        let best_score = rows.iter().map(|r| r.score).fold(0.0f64, f64::max);
+        let worst_score = rows.iter().map(|r| r.score).fold(f64::MAX, f64::min);
+        let avg_bits = rows.iter().map(|r| r.bits_info).sum::<f64>() / n;
+
+        // Ball hit rate
+        let avg_ball_hit =
+            rows.iter().map(|r| r.optimal_ball_match as f64).sum::<f64>() / n;
+        let avg_star_hit =
+            rows.iter().map(|r| r.optimal_star_match as f64).sum::<f64>() / n;
+
+        println!("\n── Résumé ──");
+        println!(
+            "  Score moyen      : {:.4} (min: {:.4}, max: {:.4})",
+            avg_score, worst_score, best_score
+        );
+        println!(
+            "  Percentile moyen : {:.1}% (min: {:.1}%, max: {:.1}%)",
+            avg_pct, worst_pct, best_pct
+        );
+        println!("  Bits d'info moy. : {:+.3}", avg_bits);
+        println!(
+            "  Hit rate optimal : {:.2}/5 boules, {:.2}/2 étoiles",
+            avg_ball_hit, avg_star_hit
+        );
+
+        let above_50 = rows.iter().filter(|r| r.percentile >= 50.0).count();
+        println!(
+            "  Tirages > 50e pct: {}/{}",
+            above_50,
+            rows.len()
+        );
+
+        // Rang estimé
+        let total_combinations: f64 = 2_118_760.0 * 66.0; // C(50,5) * C(12,2)
+        let avg_rank = total_combinations * (1.0 - avg_pct / 100.0);
+        println!(
+            "  Rang estimé moy. : ~{:.0} / {:.0}",
+            avg_rank, total_combinations
+        );
+    }
 }
