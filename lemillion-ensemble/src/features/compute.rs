@@ -65,21 +65,40 @@ fn compute_features_for_number(number: u8, history: &[Draw], pool: Pool, target_
     // recent_even_count : nombre de numéros pairs parmi les pick_count derniers tirés (sur 5 tirages)
     let recent_even_count = compute_recent_even_count(history, pool, 5);
 
+    // freq_3 : fréquence sur les 3 derniers tirages (très court terme)
+    let freq_3 = frequency_in_window(number, history, pool, 3);
+
+    // pair_freq : fréquence d'apparition simultanée avec les numéros du tirage précédent
+    let pair_freq = compute_pair_freq(number, history, pool);
+
+    // gap_acceleration : (gap actuel - gap précédent) / mean_gap
+    let gap_acceleration = compute_gap_acceleration(number, history, pool, mean_gap);
+
+    // low_half : 1.0 si numéro dans la moitié basse du pool
+    let low_half = match pool {
+        Pool::Balls => if number <= 25 { 1.0 } else { 0.0 },
+        Pool::Stars => if number <= 6 { 1.0 } else { 0.0 },
+    };
+
     vec![
-        freq_5,         // 0
-        freq_10,        // 1
-        freq_20,        // 2
-        gap as f64,     // 3
-        retard_norm,    // 4
-        trend,          // 5
-        mean_gap,       // 6
-        std_gap,        // 7
-        is_odd,         // 8
-        decade,         // 9
-        decade_density, // 10
-        day_of_week,    // 11
-        recent_sum_norm,// 12
-        recent_even_count, // 13
+        freq_5,             // 0
+        freq_10,            // 1
+        freq_20,            // 2
+        gap as f64,         // 3
+        retard_norm,        // 4
+        trend,              // 5
+        mean_gap,           // 6
+        std_gap,            // 7
+        is_odd,             // 8
+        decade,             // 9
+        decade_density,     // 10
+        day_of_week,        // 11
+        recent_sum_norm,    // 12
+        recent_even_count,  // 13
+        freq_3,             // 14
+        pair_freq,          // 15
+        gap_acceleration,   // 16
+        low_half,           // 17
     ]
 }
 
@@ -148,6 +167,70 @@ fn compute_decade_density(number: u8, history: &[Draw], pool: Pool, window: usiz
     count / (w as f64 * decade_size)
 }
 
+/// Fréquence d'apparition simultanée avec les numéros du tirage précédent (history[0]).
+fn compute_pair_freq(number: u8, history: &[Draw], pool: Pool) -> f64 {
+    if history.is_empty() {
+        return 0.0;
+    }
+    let prev_numbers: Vec<u8> = pool.numbers_from(&history[0]).to_vec();
+    if history.len() < 2 {
+        return 0.0;
+    }
+
+    // Pour chaque numéro du tirage précédent, compter combien de fois `number` et ce numéro
+    // apparaissent ensemble dans l'historique
+    let mut pair_count = 0u32;
+    let mut total = 0u32;
+    for draw in &history[1..] {
+        let nums: Vec<u8> = pool.numbers_from(draw).to_vec();
+        let has_number = nums.contains(&number);
+        for &prev in &prev_numbers {
+            if nums.contains(&prev) {
+                total += 1;
+                if has_number {
+                    pair_count += 1;
+                }
+            }
+        }
+    }
+
+    if total == 0 { 0.0 } else { pair_count as f64 / total as f64 }
+}
+
+/// Accélération du gap : (gap actuel - gap précédent) / mean_gap.
+fn compute_gap_acceleration(number: u8, history: &[Draw], pool: Pool, mean_gap: f64) -> f64 {
+    // Trouver les deux dernières apparitions pour calculer le gap précédent
+    let mut appearances = Vec::new();
+    for (i, draw) in history.iter().enumerate() {
+        if pool.numbers_from(draw).contains(&number) {
+            appearances.push(i);
+            if appearances.len() >= 3 {
+                break;
+            }
+        }
+    }
+
+    let current_gap = if appearances.is_empty() {
+        history.len() as f64
+    } else {
+        appearances[0] as f64
+    };
+
+    let previous_gap = if appearances.len() >= 2 {
+        (appearances[1] - appearances[0]) as f64
+    } else if appearances.len() == 1 {
+        (history.len() - appearances[0]) as f64
+    } else {
+        current_gap
+    };
+
+    if mean_gap > 0.0 {
+        (current_gap - previous_gap) / mean_gap
+    } else {
+        0.0
+    }
+}
+
 fn compute_recent_sum_norm(history: &[Draw], pool: Pool, window: usize, pool_size: usize) -> f64 {
     let w = window.min(history.len());
     if w == 0 {
@@ -190,7 +273,7 @@ mod tests {
         let draws = make_test_draws(30);
         let features = extract_features_for_draw(&draws, Pool::Balls, 0);
         assert_eq!(features.len(), 50);
-        assert_eq!(features[0].features.len(), 14);
+        assert_eq!(features[0].features.len(), 18);
     }
 
     #[test]

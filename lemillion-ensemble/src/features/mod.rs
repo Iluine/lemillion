@@ -13,6 +13,10 @@ pub const FEATURE_NAMES: &[&str] = &[
     "day_of_week",
     "recent_sum_norm",
     "recent_even_count",
+    "freq_3",
+    "pair_freq",
+    "gap_acceleration",
+    "low_half",
 ];
 
 #[derive(Debug, Clone)]
