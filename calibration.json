@@ -2,85 +2,117 @@
   "ball_weights": [
     [
       "Dirichlet",
-      0.0603439096725362
+      0.04458870113802179
     ],
     [
       "EWMA",
-      0.03434208172571327
+      0.025375697843162154
     ],
     [
       "Logistic",
-      0.1986488883922057
+      0.1467835936383078
     ],
     [
       "RandomForest",
-      0.18416212916170255
+      0.13607918649444375
     ],
     [
       "Markov",
-      0.12944258038505227
+      0.09564638026677727
     ],
     [
       "Retard",
-      0.0010403848018388435
+      0.0007687504381050243
     ],
     [
       "HotStreak",
-      5.439329265650367e-9
+      4.019173241069621e-9
     ],
     [
       "ESN",
-      0.1654723872165509
+      0.12226915458796962
     ],
     [
       "TakensKNN",
-      0.02823875877695261
+      0.020865893218504638
     ],
     [
       "Spectral",
-      0.1983088744281183
+      0.14653235401678313
+    ],
+    [
+      "CTW",
+      0.11409348403976406
+    ],
+    [
+      "NVAR",
+      0.0005321545351700675
+    ],
+    [
+      "NVAR-Memo",
+      0.001872411329796505
+    ],
+    [
+      "BME",
+      0.1445922344340209
     ]
   ],
   "star_weights": [
     [
       "Dirichlet",
-      0.12422752415414792
+      0.09062881974235383
     ],
     [
       "EWMA",
-      0.10445395136023568
+      0.07620322785678982
     ],
     [
       "Logistic",
-      0.13631302167885034
+      0.09944566113173725
     ],
     [
       "RandomForest",
-      0.1334179053349237
+      0.09733356094256103
     ],
     [
       "Markov",
-      0.1254921373117198
+      0.09155140431998073
     ],
     [
       "Retard",
-      0.02951289811968886
+      0.02153080923068873
     ],
     [
       "HotStreak",
-      0.002207896132082948
+      0.0016107462651842963
     ],
     [
       "ESN",
-      0.1215481809687426
+      0.08867413448052175
     ],
     [
       "TakensKNN",
-      0.08662241090427926
+      0.06319442423847023
     ],
     [
       "Spectral",
-      0.1362040740353288
+      0.09936617958033955
+    ],
+    [
+      "CTW",
+      0.09559237209870351
+    ],
+    [
+      "NVAR",
+      0.03361965854058606
+    ],
+    [
+      "NVAR-Memo",
+      0.04315300672943728
+    ],
+    [
+      "BME",
+      0.09809599484264582
     ]
   ],
   "calibrations": [
@@ -575,6 +607,202 @@
       "best_ll": -19.560115027140696
     },
     {
+      "model_name": "CTW",
+      "results": [
+        {
+          "model_name": "CTW",
+          "window": 20,
+          "log_likelihood": -20.407314021532887,
+          "n_tests": 612
+        },
+        {
+          "model_name": "CTW",
+          "window": 30,
+          "log_likelihood": -20.236554987466356,
+          "n_tests": 602
+        },
+        {
+          "model_name": "CTW",
+          "window": 40,
+          "log_likelihood": -20.000821433512474,
+          "n_tests": 592
+        },
+        {
+          "model_name": "CTW",
+          "window": 50,
+          "log_likelihood": -19.959619868679884,
+          "n_tests": 582
+        },
+        {
+          "model_name": "CTW",
+          "window": 60,
+          "log_likelihood": -19.853015010458204,
+          "n_tests": 572
+        },
+        {
+          "model_name": "CTW",
+          "window": 80,
+          "log_likelihood": -19.82984150522119,
+          "n_tests": 552
+        },
+        {
+          "model_name": "CTW",
+          "window": 100,
+          "log_likelihood": -19.810343129960092,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 100,
+      "best_ll": -19.810343129960092
+    },
+    {
+      "model_name": "NVAR",
+      "results": [
+        {
+          "model_name": "NVAR",
+          "window": 20,
+          "log_likelihood": -26.145221078972064,
+          "n_tests": 612
+        },
+        {
+          "model_name": "NVAR",
+          "window": 30,
+          "log_likelihood": -25.178182629924308,
+          "n_tests": 602
+        },
+        {
+          "model_name": "NVAR",
+          "window": 40,
+          "log_likelihood": -25.482230954362542,
+          "n_tests": 592
+        },
+        {
+          "model_name": "NVAR",
+          "window": 50,
+          "log_likelihood": -25.460428724532477,
+          "n_tests": 582
+        },
+        {
+          "model_name": "NVAR",
+          "window": 60,
+          "log_likelihood": -25.43554222162499,
+          "n_tests": 572
+        },
+        {
+          "model_name": "NVAR",
+          "window": 80,
+          "log_likelihood": -25.43974796337255,
+          "n_tests": 552
+        },
+        {
+          "model_name": "NVAR",
+          "window": 100,
+          "log_likelihood": -25.704018226911614,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 30,
+      "best_ll": -25.178182629924308
+    },
+    {
+      "model_name": "NVAR-Memo",
+      "results": [
+        {
+          "model_name": "NVAR-Memo",
+          "window": 20,
+          "log_likelihood": -24.419871864391848,
+          "n_tests": 612
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 30,
+          "log_likelihood": -23.9201341963715,
+          "n_tests": 602
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 40,
+          "log_likelihood": -25.143433655448305,
+          "n_tests": 592
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 50,
+          "log_likelihood": -25.110560327604777,
+          "n_tests": 582
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 60,
+          "log_likelihood": -25.44914375357737,
+          "n_tests": 572
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 80,
+          "log_likelihood": -25.2768202513085,
+          "n_tests": 552
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 100,
+          "log_likelihood": -25.027507092235606,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 30,
+      "best_ll": -23.9201341963715
+    },
+    {
+      "model_name": "BME",
+      "results": [
+        {
+          "model_name": "BME",
+          "window": 20,
+          "log_likelihood": -19.57344367323898,
+          "n_tests": 612
+        },
+        {
+          "model_name": "BME",
+          "window": 30,
+          "log_likelihood": -19.578470768791487,
+          "n_tests": 602
+        },
+        {
+          "model_name": "BME",
+          "window": 40,
+          "log_likelihood": -19.581261952504118,
+          "n_tests": 592
+        },
+        {
+          "model_name": "BME",
+          "window": 50,
+          "log_likelihood": -19.585043222713704,
+          "n_tests": 582
+        },
+        {
+          "model_name": "BME",
+          "window": 60,
+          "log_likelihood": -19.581922926816556,
+          "n_tests": 572
+        },
+        {
+          "model_name": "BME",
+          "window": 80,
+          "log_likelihood": -19.578926781883137,
+          "n_tests": 552
+        },
+        {
+          "model_name": "BME",
+          "window": 100,
+          "log_likelihood": -19.582269386992326,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 20,
+      "best_ll": -19.57344367323898
+    },
+    {
       "model_name": "Dirichlet",
       "results": [
         {
@@ -1063,6 +1291,202 @@
       ],
       "best_window": 20,
       "best_ll": -4.9698132995760025
+    },
+    {
+      "model_name": "CTW",
+      "results": [
+        {
+          "model_name": "CTW",
+          "window": 20,
+          "log_likelihood": -5.094161058536136,
+          "n_tests": 612
+        },
+        {
+          "model_name": "CTW",
+          "window": 30,
+          "log_likelihood": -5.054783233798694,
+          "n_tests": 602
+        },
+        {
+          "model_name": "CTW",
+          "window": 40,
+          "log_likelihood": -5.072632556387399,
+          "n_tests": 592
+        },
+        {
+          "model_name": "CTW",
+          "window": 50,
+          "log_likelihood": -5.028991618203125,
+          "n_tests": 582
+        },
+        {
+          "model_name": "CTW",
+          "window": 60,
+          "log_likelihood": -5.008532082559744,
+          "n_tests": 572
+        },
+        {
+          "model_name": "CTW",
+          "window": 80,
+          "log_likelihood": -5.020410918779473,
+          "n_tests": 552
+        },
+        {
+          "model_name": "CTW",
+          "window": 100,
+          "log_likelihood": -5.008810827823264,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 60,
+      "best_ll": -5.008532082559744
+    },
+    {
+      "model_name": "NVAR",
+      "results": [
+        {
+          "model_name": "NVAR",
+          "window": 20,
+          "log_likelihood": -6.060395415960586,
+          "n_tests": 612
+        },
+        {
+          "model_name": "NVAR",
+          "window": 30,
+          "log_likelihood": -6.137090639911617,
+          "n_tests": 602
+        },
+        {
+          "model_name": "NVAR",
+          "window": 40,
+          "log_likelihood": -6.053514138179378,
+          "n_tests": 592
+        },
+        {
+          "model_name": "NVAR",
+          "window": 50,
+          "log_likelihood": -6.070782908399503,
+          "n_tests": 582
+        },
+        {
+          "model_name": "NVAR",
+          "window": 60,
+          "log_likelihood": -6.150900911753742,
+          "n_tests": 572
+        },
+        {
+          "model_name": "NVAR",
+          "window": 80,
+          "log_likelihood": -6.160540741991754,
+          "n_tests": 552
+        },
+        {
+          "model_name": "NVAR",
+          "window": 100,
+          "log_likelihood": -6.090964932794112,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 40,
+      "best_ll": -6.053514138179378
+    },
+    {
+      "model_name": "NVAR-Memo",
+      "results": [
+        {
+          "model_name": "NVAR-Memo",
+          "window": 20,
+          "log_likelihood": -5.803873013701765,
+          "n_tests": 612
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 30,
+          "log_likelihood": -5.829837442114168,
+          "n_tests": 602
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 40,
+          "log_likelihood": -6.01488703667119,
+          "n_tests": 592
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 50,
+          "log_likelihood": -5.932023541301339,
+          "n_tests": 582
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 60,
+          "log_likelihood": -6.019368610134567,
+          "n_tests": 572
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 80,
+          "log_likelihood": -5.9098770523909465,
+          "n_tests": 552
+        },
+        {
+          "model_name": "NVAR-Memo",
+          "window": 100,
+          "log_likelihood": -6.083203824290123,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 20,
+      "best_ll": -5.803873013701765
+    },
+    {
+      "model_name": "BME",
+      "results": [
+        {
+          "model_name": "BME",
+          "window": 20,
+          "log_likelihood": -4.99248238408658,
+          "n_tests": 612
+        },
+        {
+          "model_name": "BME",
+          "window": 30,
+          "log_likelihood": -4.983446490268474,
+          "n_tests": 602
+        },
+        {
+          "model_name": "BME",
+          "window": 40,
+          "log_likelihood": -4.989243732731199,
+          "n_tests": 592
+        },
+        {
+          "model_name": "BME",
+          "window": 50,
+          "log_likelihood": -4.987200907608509,
+          "n_tests": 582
+        },
+        {
+          "model_name": "BME",
+          "window": 60,
+          "log_likelihood": -4.9839426496682355,
+          "n_tests": 572
+        },
+        {
+          "model_name": "BME",
+          "window": 80,
+          "log_likelihood": -4.988479996401151,
+          "n_tests": 552
+        },
+        {
+          "model_name": "BME",
+          "window": 100,
+          "log_likelihood": -4.982678571225442,
+          "n_tests": 532
+        }
+      ],
+      "best_window": 100,
+      "best_ll": -4.982678571225442
     }
   ]
 }

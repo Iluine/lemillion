@@ -8,6 +8,10 @@ pub mod hot_streak;
 pub mod esn;
 pub mod takens;
 pub mod spectral;
+pub mod ctw;
+pub mod nvar;
+pub mod nvar_memo;
+pub mod mixture;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -53,6 +57,10 @@ pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
         })),
         Box::new(takens::TakensKnnModel::default()),
         Box::new(spectral::SpectralModel::default()),
+        Box::new(ctw::CtwModel::default()),
+        Box::new(nvar::NvarModel::default()),
+        Box::new(nvar_memo::NvarMemoModel::default()),
+        Box::new(mixture::MixtureModel::default()),
     ]
 }
 
