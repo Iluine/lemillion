@@ -68,6 +68,14 @@ pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
     Ok(changed > 0)
 }
 
+pub fn delete_draw(conn: &Connection, draw_id: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM draws WHERE draw_id = ?1",
+        rusqlite::params![draw_id],
+    ).context("Échec de la suppression")?;
+    Ok(changed > 0)
+}
+
 pub fn fetch_last_draws(conn: &Connection, limit: u32) -> Result<Vec<Draw>> {
     let mut stmt = conn.prepare(
         "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
@@ -162,6 +170,27 @@ mod tests {
         let inserted = insert_draw(&conn, &test_draw("001", "2024-01-01")).unwrap();
         assert!(!inserted);
         assert_eq!(count_draws(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_delete_draw() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+
+        insert_draw(&conn, &test_draw("001", "2024-01-01")).unwrap();
+        insert_draw(&conn, &test_draw("002", "2024-01-05")).unwrap();
+        assert_eq!(count_draws(&conn).unwrap(), 2);
+
+        let deleted = delete_draw(&conn, "001").unwrap();
+        assert!(deleted);
+        assert_eq!(count_draws(&conn).unwrap(), 1);
+
+        let deleted = delete_draw(&conn, "001").unwrap();
+        assert!(!deleted);
+
+        let draws = fetch_last_draws(&conn, 10).unwrap();
+        assert_eq!(draws.len(), 1);
+        assert_eq!(draws[0].draw_id, "002");
     }
 
     #[test]

@@ -5,8 +5,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use lemillion_db::db::{count_draws, db_path, fetch_last_draws, migrate, open_db};
-use lemillion_db::models::Pool;
+use lemillion_db::db::{count_draws, db_path, delete_draw, fetch_last_draws, insert_draw, migrate, open_db};
+use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::EnsembleCombiner;
 use lemillion_ensemble::ensemble::calibration::{
@@ -79,6 +79,12 @@ enum Command {
         numbers: Vec<u8>,
     },
 
+    /// Corriger le tirage erroné 20260221 → 26015
+    FixDraw,
+
+    /// Reconstruire la base en ordre chronologique
+    Rebuild,
+
     /// Mode interactif (REPL)
     Interactive,
 }
@@ -95,6 +101,8 @@ fn main() -> Result<()> {
         Command::Predict { calibration, suggestions, seed, oversample, min_diff } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
+        Command::FixDraw => cmd_fix_draw(&conn),
+        Command::Rebuild => cmd_rebuild(&conn),
         Command::Interactive => interactive::run_interactive(&conn),
     }
 }
@@ -324,6 +332,81 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
     let star_pred = combiner.predict(&draws, Pool::Stars);
 
     display::display_compare(&balls, &stars, &ball_pred, &star_pred);
+
+    Ok(())
+}
+
+fn cmd_fix_draw(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    // Supprimer le tirage erroné
+    let deleted = delete_draw(conn, "20260221")?;
+    if deleted {
+        println!("Tirage 20260221 supprimé.");
+    } else {
+        println!("Tirage 20260221 non trouvé (déjà supprimé ?).");
+    }
+
+    // Insérer le tirage corrigé
+    let corrected = Draw {
+        draw_id: "26015".to_string(),
+        day: "VENDREDI".to_string(),
+        date: "2026-02-20".to_string(),
+        balls: [13, 24, 28, 33, 35],
+        stars: [5, 9],
+        winner_count: 0,
+        winner_prize: 0.0,
+        my_million: String::new(),
+    };
+
+    let inserted = insert_draw(conn, &corrected)?;
+    if inserted {
+        println!("Tirage 26015 (2026-02-20) inséré.");
+    } else {
+        println!("Tirage 26015 déjà présent.");
+    }
+
+    let n = count_draws(conn)?;
+    println!("Total : {} tirages en base.", n);
+    Ok(())
+}
+
+fn cmd_rebuild(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide, rien à reconstruire.");
+    }
+
+    // Lire tous les tirages (triés par date DESC)
+    let mut draws = fetch_last_draws(conn, n)?;
+    // Inverser pour obtenir l'ordre chronologique (ancien → récent)
+    draws.reverse();
+
+    println!("Reconstruction de {} tirages en ordre chronologique...", draws.len());
+
+    // Supprimer et recréer la table dans une transaction
+    let tx = conn.unchecked_transaction()
+        .context("Impossible de démarrer la transaction")?;
+
+    tx.execute_batch("DROP TABLE IF EXISTS draws")
+        .context("Échec de la suppression de la table")?;
+    migrate(&tx)?;
+
+    for draw in &draws {
+        insert_draw(&tx, draw)?;
+    }
+
+    tx.commit().context("Échec du commit")?;
+
+    let final_count = count_draws(conn)?;
+    println!("Reconstruction terminée : {} tirages.", final_count);
+
+    // Vérifier le premier et le dernier
+    let first = fetch_last_draws(conn, final_count)?;
+    if let Some(oldest) = first.last() {
+        println!("Premier tirage : {} ({})", oldest.draw_id, oldest.date);
+    }
+    if let Some(newest) = first.first() {
+        println!("Dernier tirage : {} ({})", newest.draw_id, newest.date);
+    }
 
     Ok(())
 }

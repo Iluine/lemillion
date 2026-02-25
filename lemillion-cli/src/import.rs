@@ -90,9 +90,6 @@ pub fn import_csv(conn: &Connection, path: &Path) -> Result<ImportResult> {
         .from_path(path)
         .with_context(|| format!("Impossible d'ouvrir {:?}", path))?;
 
-    let tx = conn.unchecked_transaction()
-        .context("Impossible de démarrer la transaction")?;
-
     let mut result = ImportResult {
         total_records: 0,
         inserted: 0,
@@ -100,21 +97,14 @@ pub fn import_csv(conn: &Connection, path: &Path) -> Result<ImportResult> {
         errors: 0,
     };
 
+    // Phase 1 : parser tous les enregistrements
+    let mut draws = Vec::new();
     for record_result in reader.records() {
         result.total_records += 1;
         match record_result {
             Ok(record) => {
                 match parse_record(&record) {
-                    Ok(draw) => {
-                        match insert_draw(&tx, &draw) {
-                            Ok(true) => result.inserted += 1,
-                            Ok(false) => result.skipped += 1,
-                            Err(e) => {
-                                eprintln!("Erreur insertion tirage {}: {}", result.total_records, e);
-                                result.errors += 1;
-                            }
-                        }
-                    }
+                    Ok(draw) => draws.push(draw),
                     Err(e) => {
                         eprintln!("Erreur parsing ligne {}: {}", result.total_records, e);
                         result.errors += 1;
@@ -123,6 +113,24 @@ pub fn import_csv(conn: &Connection, path: &Path) -> Result<ImportResult> {
             }
             Err(e) => {
                 eprintln!("Erreur lecture ligne {}: {}", result.total_records, e);
+                result.errors += 1;
+            }
+        }
+    }
+
+    // Phase 2 : trier par date puis draw_id (ordre chronologique)
+    draws.sort_by(|a, b| a.date.cmp(&b.date).then(a.draw_id.cmp(&b.draw_id)));
+
+    // Phase 3 : insérer dans l'ordre trié
+    let tx = conn.unchecked_transaction()
+        .context("Impossible de démarrer la transaction")?;
+
+    for draw in &draws {
+        match insert_draw(&tx, draw) {
+            Ok(true) => result.inserted += 1,
+            Ok(false) => result.skipped += 1,
+            Err(e) => {
+                eprintln!("Erreur insertion tirage {}: {}", draw.draw_id, e);
                 result.errors += 1;
             }
         }
