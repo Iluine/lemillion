@@ -31,7 +31,7 @@ enum Command {
     /// Calibrer les modèles par walk-forward validation
     Calibrate {
         /// Fenêtres d'analyse (séparées par des virgules)
-        #[arg(short, long, default_value = "20,30,40,50,60,80,100")]
+        #[arg(short, long, default_value = "20,30,50,80,100,150,200,300")]
         windows: String,
 
         /// Fichier de sortie pour les poids

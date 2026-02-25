@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use lemillion_db::models::{Draw, Pool};
 
-use super::ForecastModel;
+use super::{ForecastModel, SamplingStrategy};
 
 /// Context Tree Weighting (CTW) — prédicteur universel bayésien.
 ///
@@ -229,6 +229,10 @@ impl ForecastModel for CtwModel {
             ("depth".into(), self.depth as f64),
             ("smoothing".into(), self.smoothing),
         ])
+    }
+
+    fn sampling_strategy(&self) -> SamplingStrategy {
+        SamplingStrategy::Sparse { span_multiplier: 3 }
     }
 }
 

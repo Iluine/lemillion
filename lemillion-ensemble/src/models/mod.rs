@@ -12,15 +12,35 @@ pub mod ctw;
 pub mod nvar;
 pub mod nvar_memo;
 pub mod mixture;
+pub mod transformer;
+pub mod tda;
+pub mod diffusion;
+pub mod physics;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
+
+/// Stratégie d'échantillonnage pour la calibration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SamplingStrategy {
+    /// Fenêtre consécutive (comportement actuel). Le modèle reçoit `window` tirages consécutifs.
+    Consecutive,
+    /// Fenêtre éparse : on pioche `window` tirages uniformément dans un span de `span_multiplier * window` tirages.
+    /// Préserve l'ordre chronologique.
+    Sparse { span_multiplier: usize },
+}
 
 pub trait ForecastModel: Send + Sync {
     fn name(&self) -> &str;
     /// draws[0] = tirage le plus récent. Retourne Vec<f64> de taille pool.size(), somme = 1.0
     fn predict(&self, draws: &[Draw], pool: Pool) -> Vec<f64>;
     fn params(&self) -> HashMap<String, f64>;
+
+    /// Stratégie d'échantillonnage préférée pour la calibration.
+    /// Par défaut: fenêtre consécutive.
+    fn sampling_strategy(&self) -> SamplingStrategy {
+        SamplingStrategy::Consecutive
+    }
 }
 
 pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
@@ -61,6 +81,10 @@ pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(nvar::NvarModel::default()),
         Box::new(nvar_memo::NvarMemoModel::default()),
         Box::new(mixture::MixtureModel::default()),
+        Box::new(transformer::TransformerModel::default()),
+        Box::new(tda::TdaModel::default()),
+        Box::new(diffusion::DiffusionModel::default()),
+        Box::new(physics::PhysicsModel::default()),
     ]
 }
 

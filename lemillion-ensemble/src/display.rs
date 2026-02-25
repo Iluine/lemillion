@@ -15,9 +15,15 @@ pub fn display_calibration_results(calibrations: &[ModelCalibration], windows: &
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
 
+    // Check if any model uses sparse
+    let has_sparse = calibrations.iter().any(|c| c.results.iter().any(|r| r.sparse));
+
     let mut header = vec!["Modèle".to_string()];
     for w in windows {
         header.push(format!("w={}", w));
+        if has_sparse {
+            header.push(format!("w={}(S)", w));
+        }
     }
     header.push("Best".to_string());
     table.set_header(&header);
@@ -25,13 +31,24 @@ pub fn display_calibration_results(calibrations: &[ModelCalibration], windows: &
     for cal in calibrations {
         let mut row: Vec<String> = vec![cal.model_name.clone()];
         for w in windows {
+            // Consecutive result
             let ll = cal.results.iter()
-                .find(|r| r.window == *w)
+                .find(|r| r.window == *w && !r.sparse)
                 .map(|r| format!("{:.3}", r.log_likelihood))
                 .unwrap_or_else(|| "—".to_string());
             row.push(ll);
+
+            if has_sparse {
+                // Sparse result
+                let ll_sparse = cal.results.iter()
+                    .find(|r| r.window == *w && r.sparse)
+                    .map(|r| format!("{:.3}", r.log_likelihood))
+                    .unwrap_or_else(|| "—".to_string());
+                row.push(ll_sparse);
+            }
         }
-        row.push(format!("w={} ({:.3})", cal.best_window, cal.best_ll));
+        let sparse_tag = if cal.best_sparse { "(S)" } else { "" };
+        row.push(format!("w={}{} ({:.3})", cal.best_window, sparse_tag, cal.best_ll));
         table.add_row(row);
     }
 
@@ -46,7 +63,7 @@ pub fn display_calibration_chart(calibrations: &[ModelCalibration], windows: &[u
     let x_max = *windows.iter().max().unwrap_or(&100) as f32;
 
     let mut all_lls: Vec<f64> = calibrations.iter()
-        .flat_map(|c| c.results.iter().map(|r| r.log_likelihood))
+        .flat_map(|c| c.results.iter().filter(|r| !r.sparse).map(|r| r.log_likelihood))
         .filter(|ll| ll.is_finite())
         .collect();
     if all_lls.is_empty() {
@@ -59,7 +76,7 @@ pub fn display_calibration_chart(calibrations: &[ModelCalibration], windows: &[u
 
     for cal in calibrations {
         let points: Vec<(f32, f32)> = cal.results.iter()
-            .filter(|r| r.log_likelihood.is_finite())
+            .filter(|r| !r.sparse && r.log_likelihood.is_finite())
             .map(|r| (r.window as f32, r.log_likelihood as f32))
             .collect();
 

@@ -149,7 +149,7 @@ fn cmd_add_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> 
 }
 
 fn cmd_calibrate_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
-    let windows = prompt_with_default("Fenêtres (séparées par des virgules)", "20,30,40,50,60,80,100")?;
+    let windows = prompt_with_default("Fenêtres (séparées par des virgules)", "20,30,50,80,100,150,200,300")?;
     let output = prompt_with_default("Fichier de sortie", "calibration.json")?;
     super::cmd_calibrate(conn, &windows, &output)
 }

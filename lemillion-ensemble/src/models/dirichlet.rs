@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
-use super::ForecastModel;
+use super::{ForecastModel, SamplingStrategy};
 
 pub struct DirichletModel {
     alpha: f64,
@@ -55,6 +55,10 @@ impl ForecastModel for DirichletModel {
             params.insert("window".to_string(), w as f64);
         }
         params
+    }
+
+    fn sampling_strategy(&self) -> SamplingStrategy {
+        SamplingStrategy::Sparse { span_multiplier: 3 }
     }
 }
 

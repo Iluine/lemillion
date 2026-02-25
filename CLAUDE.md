@@ -55,7 +55,7 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs
-    src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn,takens,spectral,ctw,nvar,nvar_memo,mixture}.rs
+    src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn,takens,spectral,ctw,nvar,nvar_memo,mixture,transformer,tda,diffusion,physics}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus}.rs
 ```
@@ -105,9 +105,9 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-14 independent models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0):
+18 independent models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration:
 
-1. **Dirichlet** — Dirichlet-Multinomial prior
+1. **Dirichlet** **(S×3)** — Dirichlet-Multinomial prior
 2. **EWMA** — Exponentially Weighted Moving Average
 3. **Logistic** — SGD with L2 regularization via ndarray, 14 features
 4. **RandomForest** — 50 trees, depth 5, bootstrap, sqrt(n) features, Gini impurity
@@ -117,10 +117,14 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 8. **ESN** — Echo State Network wrapper; dynamically adjusts washout for small windows, uniform fallback on error
 9. **TakensKNN** — Phase-space reconstruction (Takens embedding theorem), K-nearest-neighbor in embedded space (k=5, tau=1, dim=3). Encodes draws as scalar vectors, weights successor draws by inverse distance. 70/30 mix with uniform
 10. **Spectral** — FFT via `rustfft` on binary presence/absence series per number, identifies dominant harmonics, autocorrelation extrapolation (n_harmonics=5, smoothing=0.7, min 30 draws)
-11. **CTW** — Context Tree Weighting: Bayesian universal predictor with Krichevsky-Trofimov estimator, depth-6 context tree over binary presence/absence series per number. Analytically computes predictive probability by traversing context path (O(D) per prediction). Theoretically optimal for finite-memory sources (depth=6, smoothing=0.5, min 10 draws)
+11. **CTW** **(S×3)** — Context Tree Weighting: Bayesian universal predictor with Krichevsky-Trofimov estimator, depth-6 context tree over binary presence/absence series per number. Analytically computes predictive probability by traversing context path (O(D) per prediction). Theoretically optimal for finite-memory sources (depth=6, smoothing=0.5, min 10 draws)
 12. **NVAR** — Nonlinear Vector Autoregression (Gauthier et al. 2021): deterministic replacement for ESN. Delay embedding (d=5) of summary statistics (sum, spread, parity, centroid, variance) + quadratic cross-products, ridge regression via `lemillion-esn::linalg::ridge_regression`. (poly_degree=2, ridge_lambda=1e-4, smoothing=0.6)
 13. **NVAR-Memo** — Random Fourier Features (Rahimi & Recht 2007) approximating infinite-dimensional RBF kernel. Overparameterized (200 features > N samples) ridge regression for memorization/interpolation. Tests whether RBF kernel extrapolation beats uniform. (n_features=200, bandwidth=1.0, ridge_lambda=1e-6, delay=3, smoothing=0.5, seed=42)
 14. **BME** — Bayesian Mixture of Experts: 6 lightweight experts (frequency, gap, parity, decade balance, sum target, co-occurrence) reweighted online via Hedge algorithm (multiplicative weights update). Proven regret bound: loss ≤ best_expert + sqrt(T×ln(K)). (learning_rate=0.1, smoothing=0.3)
+15. **Transformer** — Reservoir Transformer: self-attention à poids fixes (random frozen) + ridge regression readout. 2 couches, 4 têtes, d_model=32, masque causal, positional encoding sinusoïdal. Capture les dépendances long-range sans backprop. (context_len=50, ridge_lambda=1e-3, smoothing=0.5, seed=42)
+16. **TDA** **(S×3)** — Topological Data Analysis: homologie persistante H0 via Union-Find sur nuages de points 5D. Extrait persistence entropy, max persistence, Betti-0 et corrèle avec apparitions. (window_size=30, correlation_window=50, smoothing=0.6)
+17. **Diffusion** — Denoising Autoencoder multi-échelle: autoencodeurs linéaires entraînés par ridge regression à 5 niveaux de bruit (géométrique 0.1→2.0). Prédiction itérative en 10 pas de débruitage avec contexte des 5 derniers tirages. (ridge_lambda=1e-3, smoothing=0.5, seed=42)
+18. **Physics** **(S×4)** — Simulation de biais mécaniques: fréquences EWMA lentes (α=0.05), biais log-ratio avec shrinkage bayésien, drift temporel, lissage spatial gaussien (σ=3, boules voisines similaires), détection changement de régime CUSUM. (prior_strength=50, drift_window=20, smoothing=0.4)
 
 **Feature engineering** (`features/compute.rs`): 18 features per number — freq_3, freq_5, freq_10, freq_20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count, pair_freq, gap_acceleration, low_half.
 
@@ -141,8 +145,10 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
 - Stride sampling (~100 test points) for calibration performance
 - Weights: `exp(best_ll - uniform_ll)`, normalized to sum to 1.0
-- Default windows: `20,30,40,50,60,80,100` (7 windows)
-- Calibration results saved/loaded as JSON (`calibration.json`)
+- Default windows: `20,30,50,80,100,150,200,300` (8 windows)
+- `SamplingStrategy::Sparse` models are calibrated on both consecutive AND sparse strategies, keeping the best
+- `CalibrationResult` includes `sparse: bool` field; `ModelCalibration` includes `best_sparse: bool`
+- Calibration results saved/loaded as JSON (`calibration.json`) — backward-compatible via `#[serde(default)]`
 
 **Consensus** (`ensemble/consensus.rs`):
 - `build_consensus_map` — 2D classification (prob × median_spread) -> `StrongPick | DivisivePick | StrongAvoid | Uncertain`

@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use lemillion_db::models::{Draw, Pool};
-use crate::models::ForecastModel;
+use crate::models::{ForecastModel, SamplingStrategy};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationResult {
     pub model_name: String,
     pub window: usize,
+    #[serde(default)]
+    pub sparse: bool,
     pub log_likelihood: f64,
     pub n_tests: usize,
 }
@@ -16,6 +18,8 @@ pub struct ModelCalibration {
     pub model_name: String,
     pub results: Vec<CalibrationResult>,
     pub best_window: usize,
+    #[serde(default)]
+    pub best_sparse: bool,
     pub best_ll: f64,
 }
 
@@ -38,7 +42,23 @@ pub fn walk_forward_evaluate(
     window: usize,
     pool: Pool,
 ) -> f64 {
-    let max_t = draws.len().saturating_sub(window + 1);
+    walk_forward_evaluate_with_strategy(model, draws, window, pool, SamplingStrategy::Consecutive)
+}
+
+/// Walk-forward evaluation avec stratégie d'échantillonnage explicite.
+pub fn walk_forward_evaluate_with_strategy(
+    model: &dyn ForecastModel,
+    draws: &[Draw],
+    window: usize,
+    pool: Pool,
+    strategy: SamplingStrategy,
+) -> f64 {
+    let effective_span = match strategy {
+        SamplingStrategy::Consecutive => window,
+        SamplingStrategy::Sparse { span_multiplier } => window * span_multiplier,
+    };
+
+    let max_t = draws.len().saturating_sub(effective_span + 1);
     if max_t == 0 {
         return f64::NEG_INFINITY;
     }
@@ -51,16 +71,43 @@ pub fn walk_forward_evaluate(
     let mut n_tests = 0usize;
 
     for t in (0..max_t).step_by(stride) {
-        // Données d'entraînement : strictement après le tirage test
-        let train_end = (t + 1 + window).min(draws.len());
-        let train_data = &draws[t + 1..train_end];
+        let dist = match strategy {
+            SamplingStrategy::Consecutive => {
+                // Données d'entraînement : strictement après le tirage test
+                let train_end = (t + 1 + window).min(draws.len());
+                let train_data = &draws[t + 1..train_end];
 
-        if train_data.len() < 3 {
-            continue;
-        }
+                if train_data.len() < 3 {
+                    continue;
+                }
 
-        // Prédire
-        let dist = model.predict(train_data, pool);
+                model.predict(train_data, pool)
+            }
+            SamplingStrategy::Sparse { span_multiplier } => {
+                let span = window * span_multiplier;
+                let actual_span = span.min(draws.len() - t - 1);
+                let full_range = &draws[t + 1..t + 1 + actual_span];
+
+                if full_range.len() < 3 {
+                    continue;
+                }
+
+                // Sous-échantillonner : prendre window tirages uniformément répartis
+                let step = (actual_span / window).max(1);
+                let train_data: Vec<Draw> = full_range
+                    .iter()
+                    .step_by(step)
+                    .take(window)
+                    .cloned()
+                    .collect();
+
+                if train_data.len() < 3 {
+                    continue;
+                }
+
+                model.predict(&train_data, pool)
+            }
+        };
 
         // Mesurer la log-likelihood sur le tirage test
         let test_draw = &draws[t];
@@ -135,17 +182,21 @@ pub fn calibrate_model(
     windows: &[usize],
     pool: Pool,
 ) -> ModelCalibration {
+    let strategy = model.sampling_strategy();
     let mut results = Vec::new();
     let mut best_ll = f64::NEG_INFINITY;
     let mut best_window = windows[0];
+    let mut best_sparse = false;
 
     for &window in windows {
+        // Toujours évaluer en mode consécutif
         let ll = walk_forward_evaluate(model, draws, window, pool);
         let max_t = draws.len().saturating_sub(window + 1);
 
         results.push(CalibrationResult {
             model_name: model.name().to_string(),
             window,
+            sparse: false,
             log_likelihood: ll,
             n_tests: max_t,
         });
@@ -153,6 +204,31 @@ pub fn calibrate_model(
         if ll > best_ll {
             best_ll = ll;
             best_window = window;
+            best_sparse = false;
+        }
+
+        // Si le modèle supporte le sparse, évaluer aussi en mode sparse
+        if let SamplingStrategy::Sparse { span_multiplier } = strategy {
+            let sparse_strategy = SamplingStrategy::Sparse { span_multiplier };
+            let span = window * span_multiplier;
+            let ll_sparse = walk_forward_evaluate_with_strategy(
+                model, draws, window, pool, sparse_strategy,
+            );
+            let max_t_sparse = draws.len().saturating_sub(span + 1);
+
+            results.push(CalibrationResult {
+                model_name: model.name().to_string(),
+                window,
+                sparse: true,
+                log_likelihood: ll_sparse,
+                n_tests: max_t_sparse,
+            });
+
+            if ll_sparse > best_ll {
+                best_ll = ll_sparse;
+                best_window = window;
+                best_sparse = true;
+            }
         }
     }
 
@@ -160,6 +236,7 @@ pub fn calibrate_model(
         model_name: model.name().to_string(),
         results,
         best_window,
+        best_sparse,
         best_ll,
     }
 }
@@ -221,12 +298,14 @@ mod tests {
                 model_name: "A".to_string(),
                 results: vec![],
                 best_window: 20,
+                best_sparse: false,
                 best_ll: -15.0,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
                 results: vec![],
                 best_window: 30,
+                best_sparse: false,
                 best_ll: -18.0,
             },
         ];
@@ -243,12 +322,14 @@ mod tests {
                 model_name: "Good".to_string(),
                 results: vec![],
                 best_window: 20,
+                best_sparse: false,
                 best_ll: uniform_ll + 1.0, // Meilleur que l'uniforme
             },
             ModelCalibration {
                 model_name: "Bad".to_string(),
                 results: vec![],
                 best_window: 30,
+                best_sparse: false,
                 best_ll: uniform_ll - 1.0, // Pire que l'uniforme
             },
         ];
@@ -267,18 +348,21 @@ mod tests {
                 model_name: "Best".to_string(),
                 results: vec![],
                 best_window: 20,
+                best_sparse: false,
                 best_ll: uniform_ll + 2.0,
             },
             ModelCalibration {
                 model_name: "Medium".to_string(),
                 results: vec![],
                 best_window: 20,
+                best_sparse: false,
                 best_ll: uniform_ll + 0.5,
             },
             ModelCalibration {
                 model_name: "Worst".to_string(),
                 results: vec![],
                 best_window: 20,
+                best_sparse: false,
                 best_ll: uniform_ll - 3.0,
             },
         ];
@@ -296,8 +380,31 @@ mod tests {
         let model = crate::models::dirichlet::DirichletModel::new(1.0);
         let cal = calibrate_model(&model, &draws, &[10, 20, 30], Pool::Balls);
         assert_eq!(cal.model_name, "Dirichlet");
-        assert_eq!(cal.results.len(), 3);
+        // Dirichlet has Sparse strategy → 3 consecutive + 3 sparse = 6 results
+        assert_eq!(cal.results.len(), 6);
         assert!(cal.best_ll.is_finite() || cal.best_ll == f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_calibrate_model_consecutive_only() {
+        let draws = make_test_draws(50);
+        let model = crate::models::ewma::EwmaModel::new(0.9);
+        let cal = calibrate_model(&model, &draws, &[10, 20], Pool::Balls);
+        assert_eq!(cal.model_name, "EWMA");
+        // EWMA is Consecutive → 2 results only
+        assert_eq!(cal.results.len(), 2);
+        assert!(!cal.best_sparse);
+    }
+
+    #[test]
+    fn test_walk_forward_sparse() {
+        let draws = make_test_draws(100);
+        let model = crate::models::dirichlet::DirichletModel::new(1.0);
+        let ll = walk_forward_evaluate_with_strategy(
+            &model, &draws, 20, Pool::Balls,
+            SamplingStrategy::Sparse { span_multiplier: 3 },
+        );
+        assert!(ll.is_finite(), "Sparse LL should be finite, got {}", ll);
     }
 
     #[test]
