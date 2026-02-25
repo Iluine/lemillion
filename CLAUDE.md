@@ -18,14 +18,19 @@ cargo run -p lemillion-cli -- list --last 5   # show last N draws
 cargo run -p lemillion-cli -- stats --window 20  # frequency & gap statistics
 cargo run -p lemillion-cli -- predict --seed 42  # Dirichlet prediction
 cargo run -p lemillion-cli -- predict --model ewma --alpha 0.9 --seed 42  # EWMA prediction
-cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate ensemble models
+cargo run -p lemillion-ensemble -- calibrate                  # calibrate (7 default windows)
+cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate with custom windows
 cargo run -p lemillion-ensemble -- weights     # show ensemble weights
 cargo run -p lemillion-ensemble -- predict --seed 42  # ensemble prediction (explicit seed)
 cargo run -p lemillion-ensemble -- predict              # ensemble prediction (auto-seed YYYYMMDD)
 cargo run -p lemillion-ensemble -- predict --oversample 50 --min-diff 3  # custom oversampling/diversity
 cargo run -p lemillion-ensemble -- history --last 5   # show recent draws
 cargo run -p lemillion-ensemble -- compare 3 15 27 38 44 2 9  # analyze a grid
-cargo run -p lemillion-ensemble -- interactive              # interactive REPL mode
+cargo run -p lemillion-ensemble -- add-draw 26016 MARDI 2026-02-24 10 27 40 43 47 6 10  # add a draw manually
+cargo run -p lemillion-ensemble -- backtest --last 10 --suggestions 5000  # backtest ensemble
+cargo run -p lemillion-ensemble -- analyze              # non-randomness statistical tests
+cargo run -p lemillion-ensemble -- rebuild              # rebuild DB in chronological order
+cargo run -p lemillion-ensemble -- interactive          # interactive REPL mode
 cargo run -p lemillion-esn -- train                          # train ESN with defaults
 cargo run -p lemillion-esn -- train --reservoir-size 500 --save esn_best.json  # train with custom params
 cargo run -p lemillion-esn -- gridsearch                     # parallel grid search (~34k configs)
@@ -35,7 +40,7 @@ cargo run -p lemillion-esn -- predict --ensemble 5           # multi-reservoir a
 
 ## Architecture
 
-**Cargo workspace** with 4 crates analyzing EuroMillions lottery draws via Bayesian and ML models.
+**Cargo workspace** (resolver 3) with 4 crates analyzing EuroMillions lottery draws via Bayesian and ML models.
 
 ### Workspace structure
 
@@ -49,8 +54,8 @@ lemillion/                          (workspace root)
     src/main.rs, lib.rs, config.rs, encoding.rs, reservoir.rs, training.rs
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
-    src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs
-    src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn}.rs
+    src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs
+    src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn,takens,spectral}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus}.rs
 ```
@@ -64,6 +69,9 @@ lemillion/                          (workspace root)
 - `Suggestion` — struct `{ balls: [u8;5], stars: [u8;2], score: f64 }`
 - `validate_draw` — ensures ranges and no duplicates
 - `db.rs` — SQLite via `rusqlite` (bundled). Single `draws` table keyed by `draw_id`. `INSERT OR IGNORE` handles duplicates. DB at `./data/lemillion.db`
+- `delete_draw(conn, draw_id)` — deletes a draw by ID, returns `bool`
+- `fetch_last_draws_numbers(conn, limit)` — lighter query returning only `Vec<([u8;5], [u8;2])>`
+- Re-exports `rusqlite` as `pub use rusqlite` (used by ensemble crate for `Connection` access)
 
 ### lemillion-cli (original CLI)
 
@@ -97,7 +105,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-8 independent models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0):
+10 independent models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0):
 
 1. **Dirichlet** — Dirichlet-Multinomial prior
 2. **EWMA** — Exponentially Weighted Moving Average
@@ -107,20 +115,29 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 6. **Retard** — `score = (gap/mean_gap)^gamma`, default gamma=1.5
 7. **HotStreak** — Linear decreasing weights over K recent draws
 8. **ESN** — Echo State Network wrapper; dynamically adjusts washout for small windows, uniform fallback on error
+9. **TakensKNN** — Phase-space reconstruction (Takens embedding theorem), K-nearest-neighbor in embedded space (k=5, tau=1, dim=3). Encodes draws as scalar vectors, weights successor draws by inverse distance. 70/30 mix with uniform
+10. **Spectral** — FFT via `rustfft` on binary presence/absence series per number, identifies dominant harmonics, autocorrelation extrapolation (n_harmonics=5, smoothing=0.7, min 30 draws)
 
-**Feature engineering** (`features/compute.rs`): 14 features per number (freq_5/10/20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count).
+**Feature engineering** (`features/compute.rs`): 18 features per number — freq_3, freq_5, freq_10, freq_20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count, pair_freq, gap_acceleration, low_half.
+
+**Analysis** (`analysis.rs`): 5 non-randomness statistical tests — permutation entropy, runs test (Wald-Wolfowitz), auto-mutual information (AMI lag 1-20), correlation dimension (Grassberger-Procaccia, dims 3/5/7), Lempel-Ziv complexity. Each returns `AnalysisResult { test_name, value, expected_random, verdict: Signal|Neutral|Random, detail }`.
 
 **Sampler** (`sampler.rs`):
 - `date_seed()` — deterministic YYYYMMDD seed from local date (via chrono), used when no `--seed` provided
 - `optimal_grid(ball_probs, star_probs)` — deterministic grid: top 5 balls + top 2 stars by ensemble probability, score = product of (prob/uniform)
-- Oversampling: generates `count × oversample` candidates (default 20×), keeps top scores
-- Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair of suggestions
-- Signature: `generate_suggestions_from_probs(ball_probs, star_probs, count, seed: u64, oversample, min_ball_diff)`
+- `generate_suggestions_from_probs(...)` — thin wrapper around `generate_suggestions_filtered`
+- `generate_suggestions_filtered(...)` — oversampling + diversity with optional `StructuralFilter`
+- `generate_suggestions_joint(...)` — **primary production path**. Two-phase: 50% marginal sampling scored with `CoherenceScorer`, 50% template recombination from top-20 historical draws. Score = `bayesian_score * (0.5 + coherence_score)`
+- `StructuralFilter` — rejects candidates outside historical percentile bounds for ball sum, max consecutive run, odd count. Built via `StructuralFilter::from_history(draws, pool)`
+- `CoherenceScorer` — computes historical sum/spread stats and pair co-occurrence frequencies
+- `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
+- Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
 
 **Ensemble** (`ensemble/`):
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
 - Stride sampling (~100 test points) for calibration performance
 - Weights: `exp(best_ll - uniform_ll)`, normalized to sum to 1.0
+- Default windows: `20,30,40,50,60,80,100` (7 windows)
 - Calibration results saved/loaded as JSON (`calibration.json`)
 
 **Consensus** (`ensemble/consensus.rs`):
@@ -132,11 +149,13 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 2. Predict ball/star distributions via `EnsembleCombiner`
 3. Display top-N distributions + consensus maps
 4. Display optimal grid (deterministic, max probability)
-5. Generate sampled suggestions, sort by consensus score (descending, stable on bayesian score), display with consensus column
+5. Generate sampled suggestions via `generate_suggestions_joint`, sort by consensus score (descending, stable on bayesian score), display with consensus column
+
+**CLI subcommands:** `calibrate`, `weights`, `predict`, `history`, `compare`, `add-draw`, `fix-draw`, `rebuild`, `backtest`, `analyze`, `interactive`
 
 **Interactive mode** (`interactive.rs`):
-- REPL loop with menu: add draw, calibrate, predict, history, compare, weights, quit
-- Commands by number (`1`-`7`), French name (`ajouter`), or alias (`add`, `q`, `cal`, `pred`, `hist`, `comp`)
+- REPL loop with menu: add draw, calibrate, predict, history, compare, weights, analyze, quit
+- Commands by number (`1`-`8`), French name (`ajouter`, `analyser`), or alias (`add`, `q`, `cal`, `pred`, `hist`, `comp`, `ana`)
 - Each command prompts for parameters with defaults; errors are caught without exiting the loop
 
 ### Conventions
@@ -147,5 +166,6 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `draws[0]` = most recent draw in all contexts
 - `Pool::numbers_from(draw)` to extract balls/stars from a Draw
 - Display uses `comfy-table` with `UTF8_FULL` preset and `Cell::fg(Color)` for emphasis
+- Progress bars via `indicatif` for calibrate, backtest, and grid search
 - ESN `sparsity` = fraction of zeros in reservoir matrix
 - ESN `leaking_rate`: 1.0 = full update (no memory), 0.0 = no update
