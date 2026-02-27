@@ -1,1 +1,6 @@
 /target
+.idea/
+oracle.json
+esn_best.json
+esn_gridsearch.json
+data/
