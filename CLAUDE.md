@@ -30,6 +30,7 @@ cargo run -p lemillion-ensemble -- add-draw 26016 MARDI 2026-02-24 10 27 40 43 4
 cargo run -p lemillion-ensemble -- backtest --last 10 --suggestions 5000  # backtest ensemble
 cargo run -p lemillion-ensemble -- analyze              # non-randomness statistical tests
 cargo run -p lemillion-ensemble -- rebuild              # rebuild DB in chronological order
+cargo run -p lemillion-ensemble -- coverage --tickets 10 --jackpot 17000000  # coverage optimization
 cargo run -p lemillion-ensemble -- interactive          # interactive REPL mode
 cargo run -p lemillion-esn -- train                          # train ESN with defaults
 cargo run -p lemillion-esn -- train --reservoir-size 500 --save esn_best.json  # train with custom params
@@ -54,7 +55,7 @@ lemillion/                          (workspace root)
     src/main.rs, lib.rs, config.rs, encoding.rs, reservoir.rs, training.rs
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
-    src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs
+    src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
     src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn,takens,spectral,ctw,nvar,nvar_memo,mixture,transformer,tda,diffusion,physics}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus}.rs
@@ -141,6 +142,15 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
 
+**Expected Value** (`expected_value.rs`):
+- `PopularityModel` — models player number selection biases (birthday bias, lucky numbers, recency)
+- `compute_ev(balls, stars, ball_probs, star_probs, popularity, jackpot)` — computes expected value per euro
+- `ScoredSuggestion` — extends `Suggestion` with `bayesian_score`, `anti_popularity`, `ev_per_euro`
+
+**Coverage** (`coverage.rs`):
+- `optimize_coverage(ball_probs, star_probs, draws, n_tickets, jackpot, seed)` — generates a set of tickets optimizing pair/triple coverage across the ticket set
+- `CoverageStats` — tracks ball pair, star pair, and ball triple coverage metrics
+
 **Ensemble** (`ensemble/`):
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
 - Stride sampling (~100 test points) for calibration performance
@@ -161,11 +171,11 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 4. Display optimal grid (deterministic, max probability)
 5. Generate sampled suggestions via `generate_suggestions_joint`, sort by consensus score (descending, stable on bayesian score), display with consensus column
 
-**CLI subcommands:** `calibrate`, `weights`, `predict`, `history`, `compare`, `add-draw`, `fix-draw`, `rebuild`, `backtest`, `analyze`, `interactive`
+**CLI subcommands:** `calibrate`, `weights`, `predict`, `history`, `compare`, `add-draw`, `fix-draw`, `rebuild`, `backtest`, `analyze`, `coverage`, `interactive`
 
 **Interactive mode** (`interactive.rs`):
-- REPL loop with menu: add draw, calibrate, predict, history, compare, weights, analyze, quit
-- Commands by number (`1`-`8`), French name (`ajouter`, `analyser`), or alias (`add`, `q`, `cal`, `pred`, `hist`, `comp`, `ana`)
+- REPL loop with menu: add draw, calibrate, predict, history, compare, weights, analyze, coverage, quit
+- Commands by number (`1`-`9`), French name (`ajouter`, `analyser`, `couverture`), or alias (`add`, `q`, `cal`, `pred`, `hist`, `comp`, `ana`, `cov`)
 - Each command prompts for parameters with defaults; errors are caught without exiting the loop
 
 ### Conventions
