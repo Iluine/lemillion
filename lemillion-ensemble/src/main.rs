@@ -14,7 +14,6 @@ use lemillion_ensemble::ensemble::calibration::{
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
-use lemillion_ensemble::models::oracle::{self, train_oracle, train_oracle_cv, save_oracle, load_oracle, verify_oracle, eval_oracle_single};
 use lemillion_ensemble::sampler::{
     apply_temperature, compute_bayesian_score, generate_suggestions_filtered,
     generate_suggestions_ev, optimal_grid, StructuralFilter,
@@ -84,10 +83,6 @@ enum Command {
         /// Montant du jackpot actuel en EUR
         #[arg(long, default_value = "17000000")]
         jackpot: f64,
-
-        /// Mode hybride: Oracle pour stars, ensemble calibré pour balls
-        #[arg(long)]
-        hybrid: bool,
     },
 
     /// Historique des derniers tirages
@@ -162,99 +157,6 @@ enum Command {
 
     /// Mode interactif (REPL)
     Interactive,
-
-    /// Entraîner le MetaOracle (mémorisation parfaite via RFF + ridge)
-    OracleTrain {
-        /// Nombre de features RFF
-        #[arg(long, default_value = "3000")]
-        n_features: usize,
-
-        /// Largeur du noyau RBF
-        #[arg(long, default_value = "1.0")]
-        bandwidth: f64,
-
-        /// Régularisation ridge (quasi-nulle pour interpolation parfaite)
-        #[arg(long, default_value = "1e-12")]
-        ridge_lambda: f64,
-
-        /// Seed pour les projections RFF
-        #[arg(long, default_value = "42")]
-        seed: u64,
-
-        /// Fichier de sortie pour les poids
-        #[arg(short, long, default_value = "oracle.json")]
-        output: String,
-
-        /// Lancer la vérification après entraînement
-        #[arg(long)]
-        verify: bool,
-
-        /// Nombre de tirages récents à exclure de l'entraînement (validation out-of-sample)
-        #[arg(long, default_value = "0")]
-        holdout: usize,
-
-        /// Grid search CV pour trouver les meilleurs hyperparamètres
-        #[arg(long)]
-        cv: bool,
-
-        /// Nombre de folds pour la CV (défaut: 5)
-        #[arg(long, default_value = "5")]
-        cv_folds: usize,
-
-        /// Mode de grille: default, extended, 2stage
-        #[arg(long, default_value = "default")]
-        grid: String,
-
-        /// Hyperparamètres séparés pour balls et stars
-        #[arg(long)]
-        separate_pools: bool,
-
-        /// PCA pour balls: "auto" (95% variance), ou nombre de composantes
-        #[arg(long)]
-        pca_balls: Option<String>,
-
-        /// PCA pour stars: "auto" ou nombre de composantes
-        #[arg(long)]
-        pca_stars: Option<String>,
-
-        /// Standardiser les features avant PCA/RFF
-        #[arg(long)]
-        standardize: bool,
-
-        /// Label smoothing factor (0.0 = pas de smoothing)
-        #[arg(long, default_value = "0.0")]
-        label_smoothing: f64,
-
-        /// Mode de cross-validation: fold, walkforward
-        #[arg(long, default_value = "fold")]
-        cv_mode: String,
-
-        /// Pondération temporelle (1.0 = pas de pondération, <1 = décroissance)
-        #[arg(long, default_value = "1.0")]
-        temporal_decay: f64,
-
-        /// Nombre de seeds RFF pour l'ensemble (1 = single model)
-        #[arg(long, default_value = "1")]
-        ensemble_seeds: usize,
-    },
-
-    /// Vérifier la mémorisation de l'Oracle
-    OracleVerify {
-        /// Fichier de poids Oracle
-        #[arg(short, long, default_value = "oracle.json")]
-        input: String,
-    },
-
-    /// Évaluer l'Oracle en out-of-sample (holdout)
-    OracleHoldout {
-        /// Fichier de poids Oracle
-        #[arg(short, long, default_value = "oracle.json")]
-        input: String,
-
-        /// Nombre de tirages récents pour le holdout
-        #[arg(long, default_value = "10")]
-        holdout: usize,
-    },
 }
 
 fn main() -> Result<()> {
@@ -266,7 +168,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Calibrate { windows, output, temperature } => cmd_calibrate(&conn, &windows, &output, temperature),
         Command::Weights { calibration } => cmd_weights(&calibration),
-        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, hybrid } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, hybrid),
+        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
         Command::AddDraw { args } => cmd_add_draw(&conn, &args),
@@ -276,9 +178,6 @@ fn main() -> Result<()> {
         Command::Analyze => cmd_analyze(&conn),
         Command::Coverage { tickets, jackpot, seed } => cmd_coverage(&conn, tickets, jackpot, seed),
         Command::Interactive => interactive::run_interactive(&conn),
-        Command::OracleTrain { n_features, bandwidth, ridge_lambda, seed, output, verify, holdout, cv, cv_folds, grid, separate_pools, pca_balls, pca_stars, standardize, label_smoothing, cv_mode, temporal_decay, ensemble_seeds } => cmd_oracle_train(&conn, n_features, bandwidth, ridge_lambda, seed, &output, verify, holdout, cv, cv_folds, &grid, separate_pools, pca_balls.as_deref(), pca_stars.as_deref(), standardize, label_smoothing, &cv_mode, temporal_decay, ensemble_seeds),
-        Command::OracleVerify { input } => cmd_oracle_verify(&conn, &input),
-        Command::OracleHoldout { input, holdout } => cmd_oracle_holdout(&conn, &input, holdout),
     }
 }
 
@@ -361,7 +260,7 @@ pub(crate) fn cmd_weights(calibration_path: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64, hybrid: bool) -> Result<()> {
+pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -376,74 +275,26 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     display::display_ev_summary(&popularity, jackpot);
     display::display_popularity_map(&popularity);
 
-    // Vérifier si un MetaOracle v2 est disponible
-    let loaded_oracle = oracle::OracleModel::load();
-    let is_meta = loaded_oracle.as_ref().map_or(false, |o| o.is_meta());
-
-    // Determine if hybrid mode is active
-    let use_hybrid = hybrid || loaded_oracle.as_ref().map_or(false, |o| o.is_hybrid());
-
-    let (ball_pred, star_pred) = if is_meta && !use_hybrid {
-        let oracle_model = loaded_oracle.unwrap();
-        let (next_date, next_day) = oracle::next_draw_date(&draws[0].date)?;
-        println!("MetaOracle actif — prochain tirage : {} ({})", next_date, next_day);
-
-        let bp = oracle_model.predict_ensemble(&draws, &next_date, Pool::Balls);
-        let sp = oracle_model.predict_ensemble(&draws, &next_date, Pool::Stars);
-        (bp, sp)
-    } else if use_hybrid && is_meta {
-        // Hybrid: Oracle for stars, ensemble calibré for balls
-        let oracle_model = loaded_oracle.unwrap();
-        let (next_date, next_day) = oracle::next_draw_date(&draws[0].date)?;
-        println!("Mode HYBRIDE — prochain tirage : {} ({})", next_date, next_day);
-        println!("  Stars: MetaOracle, Balls: Ensemble calibré");
-
-        let sp = oracle_model.predict_ensemble(&draws, &next_date, Pool::Stars);
-
-        // Use calibrated ensemble for balls
-        let models = all_models();
-        let weights = load_weights(&PathBuf::from(calibration_path));
-        let combiner = match weights {
-            Ok(w) => {
-                let ball_w: Vec<f64> = models.iter()
-                    .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
-                    .collect();
-                let star_w: Vec<f64> = models.iter()
-                    .map(|m| w.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
-                    .collect();
-                EnsembleCombiner::with_weights(models, ball_w, star_w)
-            }
-            Err(_) => {
-                println!("(Pas de fichier de calibration, utilisation de poids uniformes pour balls)");
-                EnsembleCombiner::new(models)
-            }
-        };
-        let bp = combiner.predict(&draws, Pool::Balls);
-        (bp, sp)
-    } else {
-        // Chemin EnsembleCombiner existant
-        let models = all_models();
-        let weights = load_weights(&PathBuf::from(calibration_path));
-        let combiner = match weights {
-            Ok(w) => {
-                let ball_w: Vec<f64> = models.iter()
-                    .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
-                    .collect();
-                let star_w: Vec<f64> = models.iter()
-                    .map(|m| w.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
-                    .collect();
-                EnsembleCombiner::with_weights(models, ball_w, star_w)
-            }
-            Err(_) => {
-                println!("(Pas de fichier de calibration, utilisation de poids uniformes)");
-                EnsembleCombiner::new(models)
-            }
-        };
-
-        let bp = combiner.predict(&draws, Pool::Balls);
-        let sp = combiner.predict(&draws, Pool::Stars);
-        (bp, sp)
+    let models = all_models();
+    let weights = load_weights(&PathBuf::from(calibration_path));
+    let combiner = match weights {
+        Ok(w) => {
+            let ball_w: Vec<f64> = models.iter()
+                .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                .collect();
+            let star_w: Vec<f64> = models.iter()
+                .map(|m| w.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                .collect();
+            EnsembleCombiner::with_weights(models, ball_w, star_w)
+        }
+        Err(_) => {
+            println!("(Pas de fichier de calibration, utilisation de poids uniformes)");
+            EnsembleCombiner::new(models)
+        }
     };
+
+    let ball_pred = combiner.predict(&draws, Pool::Balls);
+    let star_pred = combiner.predict(&draws, Pool::Stars);
 
     // Afficher les distributions
     display::display_forecast(&ball_pred, Pool::Balls);
@@ -1067,380 +918,3 @@ fn cmd_rebuild(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
-fn cmd_oracle_train(
-    conn: &lemillion_db::rusqlite::Connection,
-    n_features: usize,
-    bandwidth: f64,
-    ridge_lambda: f64,
-    seed: u64,
-    output: &str,
-    verify: bool,
-    holdout: usize,
-    cv: bool,
-    cv_folds: usize,
-    grid: &str,
-    separate_pools: bool,
-    pca_balls: Option<&str>,
-    pca_stars: Option<&str>,
-    standardize: bool,
-    label_smoothing: f64,
-    cv_mode_str: &str,
-    temporal_decay: f64,
-    ensemble_seeds: usize,
-) -> Result<()> {
-    let n = count_draws(conn)?;
-    if n == 0 {
-        bail!("Base vide. Lancez d'abord : lemillion-cli import");
-    }
-
-    let draws = fetch_last_draws(conn, n)?;
-
-    if holdout >= draws.len() {
-        bail!("Holdout ({}) >= nombre de tirages ({})", holdout, draws.len());
-    }
-
-    let train_draws = if holdout > 0 {
-        &draws[holdout..]
-    } else {
-        &draws[..]
-    };
-
-    let n_base = lemillion_ensemble::models::base_models().len();
-    let ball_dim = n_base * 50 + 7 + 50;
-    let star_dim = n_base * 12 + 7 + 12;
-
-    let pb = ProgressBar::new(0);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("=> "),
-    );
-
-    // Check if v3 features are requested
-    let use_v3 = cv && (grid != "default" || separate_pools || pca_balls.is_some() || pca_stars.is_some()
-        || standardize || label_smoothing > 0.0 || cv_mode_str != "fold"
-        || temporal_decay < 1.0 || ensemble_seeds > 1);
-
-    let weights = if use_v3 {
-        use lemillion_ensemble::models::oracle::{TrainConfig, GridMode, PcaMode, CvMode, train_oracle_cv_v2};
-
-        let grid_mode = match grid {
-            "extended" => GridMode::Extended,
-            "2stage" => GridMode::TwoStage,
-            _ => GridMode::Default,
-        };
-
-        let parse_pca = |s: Option<&str>| -> Option<PcaMode> {
-            match s {
-                Some("auto") => Some(PcaMode::Auto),
-                Some(n) => n.parse::<usize>().ok().map(PcaMode::Fixed),
-                None => None,
-            }
-        };
-
-        let cv_mode = match cv_mode_str {
-            "walkforward" => CvMode::WalkForward,
-            _ => CvMode::Fold,
-        };
-
-        let config = TrainConfig {
-            grid_mode,
-            separate_pools,
-            pca_balls: parse_pca(pca_balls),
-            pca_stars: parse_pca(pca_stars),
-            standardize,
-            label_smoothing,
-            cv_mode,
-            temporal_decay,
-            ensemble_seeds,
-            n_folds: cv_folds,
-            seed,
-        };
-
-        println!(
-            "Entraînement du MetaOracle v3 sur {} tirages{}\n  Features : {} boules, {} étoiles\n  grid={}, separate_pools={}, standardize={}, label_smoothing={}, cv_mode={}, temporal_decay={}, ensemble_seeds={}",
-            train_draws.len(),
-            if holdout > 0 { format!(" (holdout={})", holdout) } else { String::new() },
-            ball_dim, star_dim,
-            grid, separate_pools, standardize, label_smoothing, cv_mode_str, temporal_decay, ensemble_seeds
-        );
-        if let Some(pca) = pca_balls { println!("  PCA boules: {}", pca); }
-        if let Some(pca) = pca_stars { println!("  PCA étoiles: {}", pca); }
-
-        let (weights, grid_result) = train_oracle_cv_v2(train_draws, config, Some(&pb))?;
-        pb.finish_with_message("Entraînement terminé");
-
-        display::display_oracle_grid_search_v2(&grid_result);
-
-        println!(
-            "\nMeilleurs hyperparamètres :"
-        );
-        println!(
-            "  Combined: n_rff={}, bw={}, lambda={:.0e}",
-            grid_result.best_combined.n_rff, grid_result.best_combined.bandwidth, grid_result.best_combined.ridge_lambda
-        );
-        println!(
-            "  Balls:    n_rff={}, bw={}, lambda={:.0e} (LL={:.3})",
-            grid_result.best_balls.n_rff, grid_result.best_balls.bandwidth, grid_result.best_balls.ridge_lambda, grid_result.best_balls.mean_ball_ll
-        );
-        println!(
-            "  Stars:    n_rff={}, bw={}, lambda={:.0e} (LL={:.3})",
-            grid_result.best_stars.n_rff, grid_result.best_stars.bandwidth, grid_result.best_stars.ridge_lambda, grid_result.best_stars.mean_star_ll
-        );
-
-        if weights.hybrid {
-            println!("\n  Mode hybride AUTO-DETECTE");
-        }
-
-        weights
-    } else if cv {
-        println!(
-            "Entraînement du MetaOracle v2 avec Grid Search CV ({}-fold) sur {} tirages{}\n  Features : {} boules ({}×50 base + 7 date + 50 feedback), {} étoiles\n  seed={}",
-            cv_folds,
-            train_draws.len(),
-            if holdout > 0 { format!(" (holdout={})", holdout) } else { String::new() },
-            ball_dim, n_base, star_dim, seed
-        );
-
-        let (weights, grid_result) = train_oracle_cv(train_draws, cv_folds, seed, Some(&pb))?;
-        pb.finish_with_message("Entraînement terminé");
-
-        display::display_oracle_grid_search(&grid_result);
-
-        println!(
-            "\nMeilleurs hyperparamètres : n_rff={}, bandwidth={}, lambda={:.0e}",
-            grid_result.best.n_rff, grid_result.best.bandwidth, grid_result.best.ridge_lambda
-        );
-
-        weights
-    } else {
-        println!(
-            "Entraînement du MetaOracle v2 sur {} tirages{}\n  Features : {} boules ({}×50 base + 7 date + 50 feedback), {} étoiles\n  RFF={}, bandwidth={}, lambda={:.0e}, seed={}",
-            train_draws.len(),
-            if holdout > 0 { format!(" (holdout={})", holdout) } else { String::new() },
-            ball_dim, n_base, star_dim,
-            n_features, bandwidth, ridge_lambda, seed
-        );
-
-        let weights = train_oracle(train_draws, n_features, bandwidth, ridge_lambda, seed, Some(&pb))?;
-        pb.finish_with_message("Entraînement terminé");
-
-        weights
-    };
-
-    let output_path = std::path::PathBuf::from(output);
-    save_oracle(&weights, &output_path)?;
-
-    let file_size = std::fs::metadata(&output_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    println!(
-        "\nOracle sauvegardé dans : {} ({:.1} MB)",
-        output,
-        file_size as f64 / 1_000_000.0
-    );
-
-    if verify {
-        let label = if cv { "Vérification fit in-sample" } else { "Vérification in-sample" };
-        println!("\n── {} ──\n", label);
-        run_oracle_verify(train_draws, &weights)?;
-    }
-
-    if holdout > 0 {
-        println!("\n── Évaluation out-of-sample ({} tirages) ──\n", holdout);
-        run_oracle_holdout_eval(&draws, &weights, holdout)?;
-    }
-
-    Ok(())
-}
-
-fn cmd_oracle_verify(conn: &lemillion_db::rusqlite::Connection, input: &str) -> Result<()> {
-    let n = count_draws(conn)?;
-    if n == 0 {
-        bail!("Base vide. Lancez d'abord : lemillion-cli import");
-    }
-
-    let draws = fetch_last_draws(conn, n)?;
-    let weights = load_oracle(&std::path::PathBuf::from(input))
-        .context("Impossible de charger le fichier Oracle. Lancez d'abord : oracle-train")?;
-
-    println!("Vérification de l'Oracle sur {} tirages\n", draws.len());
-    run_oracle_verify(&draws, &weights)
-}
-
-fn cmd_oracle_holdout(conn: &lemillion_db::rusqlite::Connection, input: &str, holdout: usize) -> Result<()> {
-    let n = count_draws(conn)?;
-    if n == 0 {
-        bail!("Base vide. Lancez d'abord : lemillion-cli import");
-    }
-
-    let draws = fetch_last_draws(conn, n)?;
-
-    if holdout == 0 || holdout >= draws.len() {
-        bail!("Holdout ({}) doit être entre 1 et {} (nombre de tirages - 1)", holdout, draws.len() - 1);
-    }
-
-    let weights = load_oracle(&std::path::PathBuf::from(input))
-        .context("Impossible de charger le fichier Oracle. Lancez d'abord : oracle-train")?;
-
-    println!(
-        "Évaluation out-of-sample de l'Oracle v{} ({}) sur {} tirages holdout\n",
-        weights.version, input, holdout
-    );
-
-    run_oracle_holdout_eval(&draws, &weights, holdout)
-}
-
-fn run_oracle_verify(
-    draws: &[Draw],
-    weights: &lemillion_ensemble::models::oracle::OracleWeights,
-) -> Result<()> {
-    let pb = ProgressBar::new(0);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("=> "),
-    );
-
-    let (n_perfect, n_total, misses) = verify_oracle(draws, weights, Some(&pb));
-    pb.finish_and_clear();
-
-    println!(
-        "Résultat : {}/{} tirages parfaitement mémorisés ({:.1}%)\n",
-        n_perfect,
-        n_total,
-        100.0 * n_perfect as f64 / n_total.max(1) as f64,
-    );
-
-    if misses.is_empty() {
-        println!("Mémorisation PARFAITE !");
-    } else {
-        println!("{} MISS :\n", misses.len());
-
-        let mut table = comfy_table::Table::new();
-        table
-            .load_preset(comfy_table::presets::UTF8_FULL)
-            .set_header(vec!["#", "Date", "Réel", "Prédit", "Match"]);
-
-        for miss in &misses {
-            let actual = format!(
-                "{:?} + {:?}",
-                miss.actual_balls, miss.actual_stars
-            );
-            let predicted = format!(
-                "{:?} + {:?}",
-                miss.predicted_balls, miss.predicted_stars
-            );
-            let match_str = format!("{}B+{}S", miss.ball_match, miss.star_match);
-            table.add_row(vec![
-                &miss.index.to_string(),
-                &miss.date,
-                &actual,
-                &predicted,
-                &match_str,
-            ]);
-        }
-
-        println!("{table}");
-    }
-
-    Ok(())
-}
-
-fn run_oracle_holdout_eval(
-    draws: &[Draw],
-    weights: &lemillion_ensemble::models::oracle::OracleWeights,
-    holdout: usize,
-) -> Result<()> {
-    use comfy_table::{Table, presets::UTF8_FULL, Cell, Color};
-
-    // LL uniforme (somme sur les numéros tirés)
-    let uniform_ball_ll = 5.0 * (1.0 / 50.0f64).ln(); // -19.56
-    let uniform_star_ll = 2.0 * (1.0 / 12.0f64).ln(); // -4.97
-
-    let pb = ProgressBar::new(holdout as u64);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("=> "),
-    );
-    pb.set_message("Évaluation out-of-sample...");
-
-    let mut results = Vec::with_capacity(holdout);
-
-    for t in 0..holdout {
-        let target = &draws[t];
-        let context = &draws[t + 1..];
-
-        let eval = eval_oracle_single(weights, target, context);
-        results.push(eval);
-        pb.inc(1);
-    }
-
-    pb.finish_and_clear();
-
-    // Tableau détaillé
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .set_header(vec![
-            "Date", "Boules", "Étoiles", "Match B", "Match S", "LL Boules", "LL Étoiles",
-        ]);
-
-    for r in &results {
-        let balls_str = r.actual_balls.iter().map(|b| format!("{:2}", b)).collect::<Vec<_>>().join(" ");
-        let stars_str = r.actual_stars.iter().map(|s| format!("{:2}", s)).collect::<Vec<_>>().join(" ");
-
-        let bm_cell = if r.ball_match == 5 {
-            Cell::new(format!("{}/5", r.ball_match)).fg(Color::Green)
-        } else {
-            Cell::new(format!("{}/5", r.ball_match)).fg(Color::Red)
-        };
-        let sm_cell = if r.star_match == 2 {
-            Cell::new(format!("{}/2", r.star_match)).fg(Color::Green)
-        } else {
-            Cell::new(format!("{}/2", r.star_match)).fg(Color::Red)
-        };
-
-        let bll_color = if r.ball_ll > uniform_ball_ll { Color::Green } else { Color::Red };
-        let sll_color = if r.star_ll > uniform_star_ll { Color::Green } else { Color::Red };
-
-        table.add_row(vec![
-            Cell::new(&r.date),
-            Cell::new(&balls_str),
-            Cell::new(&stars_str),
-            bm_cell,
-            sm_cell,
-            Cell::new(format!("{:.2}", r.ball_ll)).fg(bll_color),
-            Cell::new(format!("{:.2}", r.star_ll)).fg(sll_color),
-        ]);
-    }
-
-    println!("{table}");
-
-    // Résumé
-    let n = results.len() as f64;
-    let avg_ball_ll = results.iter().map(|r| r.ball_ll).sum::<f64>() / n;
-    let avg_star_ll = results.iter().map(|r| r.star_ll).sum::<f64>() / n;
-    let n_perfect = results.iter().filter(|r| r.ball_match == 5 && r.star_match == 2).count();
-    let avg_ball_match: f64 = results.iter().map(|r| r.ball_match as f64).sum::<f64>() / n;
-    let avg_star_match: f64 = results.iter().map(|r| r.star_match as f64).sum::<f64>() / n;
-
-    println!("\n── Résumé holdout ({} tirages) ──", holdout);
-    println!("  Matches parfaits out-of-sample : {}/{}", n_perfect, holdout);
-    println!("  Match moyen : {:.2}B + {:.2}S", avg_ball_match, avg_star_match);
-    println!("  LL boules  moy : {:.3}  (uniforme : {:.3})", avg_ball_ll, uniform_ball_ll);
-    println!("  LL étoiles moy : {:.3}  (uniforme : {:.3})", avg_star_ll, uniform_star_ll);
-
-    let ball_gain = avg_ball_ll - uniform_ball_ll;
-    let star_gain = avg_star_ll - uniform_star_ll;
-    println!(
-        "  Gain LL vs uniforme : boules {:+.3}, étoiles {:+.3}",
-        ball_gain, star_gain
-    );
-
-    Ok(())
-}

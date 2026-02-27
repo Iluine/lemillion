@@ -180,7 +180,7 @@ fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
     let jackpot_str = prompt_with_default("Jackpot en EUR", "17000000")?;
     let jackpot: f64 = jackpot_str.parse().context("Jackpot invalide")?;
 
-    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, false)
+    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot)
 }
 
 fn cmd_history_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
