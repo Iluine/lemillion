@@ -137,6 +137,7 @@ pub fn pca_svd(
 
 /// PCA with automatic component selection to reach target_variance (0..1).
 /// Returns (components [K × d], eigenvalues [K], mean [d], explained_ratio).
+#[allow(clippy::type_complexity)]
 pub fn pca_svd_auto(
     data: &[Vec<f64>],
     target_variance: f64,

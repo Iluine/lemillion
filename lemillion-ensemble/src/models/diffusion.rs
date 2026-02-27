@@ -27,6 +27,7 @@ pub struct DiffusionModel {
 }
 
 impl DiffusionModel {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_noise_levels: usize,
         sigma_min: f64,

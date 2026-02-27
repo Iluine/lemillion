@@ -3,7 +3,7 @@ mod display;
 mod import;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_import(conn: &lemillion_db::rusqlite::Connection, file: &PathBuf) -> Result<()> {
+fn cmd_import(conn: &lemillion_db::rusqlite::Connection, file: &Path) -> Result<()> {
     let result = import::import_csv(conn, file)?;
     display_import_summary(&result);
     Ok(())
@@ -217,7 +217,7 @@ fn cmd_add(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     };
 
     println!("\nTirage à insérer :");
-    display_draws(&[draw.clone()]);
+    display_draws(std::slice::from_ref(&draw));
 
     let confirm = prompt("\nConfirmer l'insertion ? (o/n) : ")?;
     if confirm.trim().to_lowercase() == "o" {

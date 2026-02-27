@@ -81,12 +81,12 @@ pub struct Suggestion {
 
 pub fn validate_draw(balls: &[u8; 5], stars: &[u8; 2]) -> Result<()> {
     for &b in balls {
-        if b < 1 || b > 50 {
+        if !(1..=50).contains(&b) {
             bail!("Boule {} hors limites (1-50)", b);
         }
     }
     for &s in stars {
-        if s < 1 || s > 12 {
+        if !(1..=12).contains(&s) {
             bail!("Étoile {} hors limites (1-12)", s);
         }
     }

@@ -89,7 +89,7 @@ fn build_delay_vector(encoded: &[Vec<f64>], t: usize, delay: usize) -> Vec<f64> 
         if t >= d {
             vec.extend_from_slice(&encoded[t - d]);
         } else {
-            vec.extend(std::iter::repeat(0.0).take(encoded[0].len()));
+            vec.extend(std::iter::repeat_n(0.0, encoded[0].len()));
         }
     }
     vec

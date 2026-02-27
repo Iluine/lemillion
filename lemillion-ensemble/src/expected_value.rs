@@ -59,22 +59,22 @@ impl PopularityModel {
         let mut star_pop = [1.0f64; 12];
 
         // Biais anniversaire (boules)
-        for i in 0..50 {
+        for (i, pop) in ball_pop.iter_mut().enumerate() {
             let num = i + 1;
             if num <= 12 {
-                ball_pop[i] *= 1.30; // mois
+                *pop *= 1.30; // mois
             } else if num <= 31 {
-                ball_pop[i] *= 1.15; // jours
+                *pop *= 1.15; // jours
             } else {
-                ball_pop[i] *= 0.85; // hors dates
+                *pop *= 0.85; // hors dates
             }
         }
 
         // Biais anniversaire (etoiles) - 1-12 sont aussi des mois
-        for i in 0..12 {
+        for (i, pop) in star_pop.iter_mut().enumerate() {
             let num = i + 1;
             if num <= 7 {
-                star_pop[i] *= 1.20; // jours de la semaine populaires
+                *pop *= 1.20; // jours de la semaine populaires
             }
         }
 

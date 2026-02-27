@@ -849,8 +849,8 @@ pub fn display_backtest_ev_results(rows: &[BacktestRow]) {
         // Compter les gains par rang
         let mut total_tier_hits = [0u32; 13];
         for row in rows {
-            for i in 0..13 {
-                total_tier_hits[i] += row.tier_hits[i];
+            for (i, total) in total_tier_hits.iter_mut().enumerate() {
+                *total += row.tier_hits[i];
             }
         }
 

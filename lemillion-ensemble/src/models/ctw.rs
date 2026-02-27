@@ -114,7 +114,7 @@ fn predict_from_tree(node: &CtNode, context: &[u8], current_depth: usize, max_de
     // Poids du modèle KT local vs sous-arbre
     let log_ratio = node.log_pe - node.log_pw;
     let weight_e = if log_ratio.is_finite() {
-        (0.5 * log_ratio.exp()).min(1.0).max(0.0)
+        (0.5 * log_ratio.exp()).clamp(0.0, 1.0)
     } else {
         0.5
     };

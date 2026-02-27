@@ -162,6 +162,7 @@ pub fn display_prediction(ball_probs: &[f64], star_probs: &[f64]) {
     println!("{table}");
 }
 
+#[allow(clippy::type_complexity)]
 pub fn display_ensemble_metrics(results: &[EsnResult]) {
     let n = results.len() as f64;
     println!("\n== Metriques Ensemble ({} membres) ==\n", results.len());

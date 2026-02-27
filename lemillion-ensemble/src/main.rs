@@ -260,6 +260,7 @@ pub(crate) fn cmd_weights(calibration_path: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
@@ -530,10 +531,10 @@ fn cmd_backtest(
     let weights = load_weights(&PathBuf::from(calibration_path));
 
     // Validation de la température
-    if let Some(t) = temperature {
-        if t <= 0.0 {
-            bail!("La température doit être > 0 (reçu : {t})");
-        }
+    if let Some(t) = temperature
+        && t <= 0.0
+    {
+        bail!("La température doit être > 0 (reçu : {t})");
     }
 
     // Sweep de température
@@ -615,7 +616,7 @@ fn run_backtest_inner(
         let training_draws = &draws[i + 1..];
 
         if let Some(pb) = pb {
-            pb.set_message(format!("{}", test_draw.date));
+            pb.set_message(test_draw.date.to_string());
         }
 
         let models = all_models();

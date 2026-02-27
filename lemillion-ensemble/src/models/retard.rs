@@ -36,7 +36,7 @@ impl ForecastModel for RetardModel {
 
         // Calculer le gap moyen pour chaque numéro
         let mut mean_gaps = vec![0.0f64; size];
-        for i in 0..size {
+        for (i, mean_gap) in mean_gaps.iter_mut().enumerate() {
             let mut gap_list = Vec::new();
             let mut last_seen: Option<usize> = None;
 
@@ -50,7 +50,7 @@ impl ForecastModel for RetardModel {
                 }
             }
 
-            mean_gaps[i] = if gap_list.is_empty() {
+            *mean_gap = if gap_list.is_empty() {
                 // Estimation par le ratio théorique
                 size as f64 / pool.pick_count() as f64
             } else {

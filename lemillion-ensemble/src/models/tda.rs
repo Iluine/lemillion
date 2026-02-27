@@ -277,7 +277,7 @@ impl ForecastModel for TdaModel {
             let mut appearances: Vec<f64> = Vec::with_capacity(end - start);
             let mut feat_means = [0.0f64; 4];
 
-            for t in start..end {
+            for (t, topo_feat) in topo_features.iter().enumerate().take(end).skip(start) {
                 let target_idx = t + self.window_size;
                 if target_idx < n {
                     let appeared = if pool
@@ -290,7 +290,7 @@ impl ForecastModel for TdaModel {
                     };
                     appearances.push(appeared);
                     for (k, m) in feat_means.iter_mut().enumerate() {
-                        *m += topo_features[t][k];
+                        *m += topo_feat[k];
                     }
                 }
             }

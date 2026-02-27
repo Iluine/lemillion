@@ -148,17 +148,17 @@ fn spatial_smooth(bias: &[f64], sigma: f64) -> Vec<f64> {
     let size = bias.len();
     let mut smoothed = vec![0.0; size];
 
-    for i in 0..size {
+    for (i, smoothed_val) in smoothed.iter_mut().enumerate() {
         let mut weighted_sum = 0.0;
         let mut weight_sum = 0.0;
-        for j in 0..size {
+        for (j, &b) in bias.iter().enumerate() {
             let dist = (i as f64 - j as f64).abs();
             let w = (-dist * dist / (2.0 * sigma * sigma)).exp();
-            weighted_sum += w * bias[j];
+            weighted_sum += w * b;
             weight_sum += w;
         }
         if weight_sum > 0.0 {
-            smoothed[i] = weighted_sum / weight_sum;
+            *smoothed_val = weighted_sum / weight_sum;
         }
     }
     smoothed

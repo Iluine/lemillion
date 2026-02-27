@@ -105,11 +105,11 @@ pub fn make_test_draws(n: usize) -> Vec<Draw> {
                 day: if i % 2 == 0 { "MARDI".to_string() } else { "VENDREDI".to_string() },
                 date: format!("2024-01-{:02}", (i % 28) + 1),
                 balls: [
-                    (base * 5 + 1).min(50).max(1),
-                    (base * 5 + 2).min(50).max(1),
-                    (base * 5 + 3).min(50).max(1),
-                    (base * 5 + 4).min(50).max(1),
-                    (base * 5 + 5).min(50).max(1),
+                    (base * 5 + 1).clamp(1, 50),
+                    (base * 5 + 2).clamp(1, 50),
+                    (base * 5 + 3).clamp(1, 50),
+                    (base * 5 + 4).clamp(1, 50),
+                    (base * 5 + 5).clamp(1, 50),
                 ],
                 stars: [
                     (base % 12 + 1).min(12),

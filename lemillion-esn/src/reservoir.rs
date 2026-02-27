@@ -14,6 +14,7 @@ pub struct Reservoir {
 }
 
 impl Reservoir {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         input_dim: usize,
         reservoir_size: usize,

@@ -4,6 +4,12 @@ use super::ForecastModel;
 
 pub struct MarkovModel;
 
+impl Default for MarkovModel {
+    fn default() -> Self {
+        Self
+    }
+}
+
 impl MarkovModel {
     pub fn new() -> Self {
         Self
@@ -55,14 +61,11 @@ impl ForecastModel for MarkovModel {
         // Normaliser les transitions
         for i in 0..n_ranges {
             if from_counts[i] > 0.0 {
-                for j in 0..n_ranges {
-                    transition[i][j] /= from_counts[i];
+                for val in &mut transition[i] {
+                    *val /= from_counts[i];
                 }
             } else {
-                // Uniforme si pas de données
-                for j in 0..n_ranges {
-                    transition[i][j] = 1.0 / n_ranges as f64;
-                }
+                transition[i].fill(1.0 / n_ranges as f64);
             }
         }
 

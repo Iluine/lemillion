@@ -175,10 +175,10 @@ fn generate_candidate_pool(
         balls.sort();
 
         // Filtre structurel
-        if let Some(f) = filter {
-            if !f.accept_balls(&balls) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !f.accept_balls(&balls)
+        {
+            continue;
         }
 
         let mut stars = [0u8; 2];

@@ -249,10 +249,10 @@ pub fn generate_suggestions_filtered(
         balls_arr.sort();
 
         // Appliquer le filtre structurel
-        if let Some(f) = filter {
-            if !f.accept_balls(&balls_arr) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !f.accept_balls(&balls_arr)
+        {
+            continue;
         }
 
         let mut stars_arr = [0u8; 2];
@@ -435,6 +435,7 @@ impl CoherenceScorer {
 }
 
 /// Génère des suggestions avec scoring conjoint (cohérence historique).
+#[allow(clippy::too_many_arguments)]
 pub fn generate_suggestions_joint(
     ball_probs: &[f64],
     star_probs: &[f64],
@@ -471,10 +472,10 @@ pub fn generate_suggestions_joint(
         }
         balls_arr.sort();
 
-        if let Some(f) = filter {
-            if !f.accept_balls(&balls_arr) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !f.accept_balls(&balls_arr)
+        {
+            continue;
         }
 
         let mut stars_arr = [0u8; 2];
@@ -581,7 +582,7 @@ fn generate_template_candidates(
             let replace_pos = ball_dist.sample(rng) % 5;
             loop {
                 let new_ball = (ball_dist.sample(rng) + 1) as u8;
-                if new_ball >= 1 && new_ball <= 50 && !balls.contains(&new_ball) {
+                if (1..=50).contains(&new_ball) && !balls.contains(&new_ball) {
                     balls[replace_pos] = new_ball;
                     break;
                 }
@@ -589,10 +590,10 @@ fn generate_template_candidates(
         }
         balls.sort();
 
-        if let Some(f) = filter {
-            if !f.accept_balls(&balls) {
-                continue;
-            }
+        if let Some(f) = filter
+            && !f.accept_balls(&balls)
+        {
+            continue;
         }
 
         // Étoiles : échantillonnage marginal
@@ -642,6 +643,7 @@ pub struct ScoredSuggestion {
 ///
 /// Utilise les distributions ensemble avec T=2.0 (quasi-uniforme) pour la generation,
 /// puis score par anti-popularite au lieu de score bayesien.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_suggestions_ev(
     ball_probs: &[f64],
     star_probs: &[f64],
@@ -683,10 +685,10 @@ pub fn generate_suggestions_ev(
         }
         balls_arr.sort();
 
-        if let Some(ref f) = filter {
-            if !f.accept_balls(&balls_arr) {
-                continue;
-            }
+        if let Some(ref f) = filter
+            && !f.accept_balls(&balls_arr)
+        {
+            continue;
         }
 
         let mut stars_arr = [0u8; 2];
@@ -735,7 +737,7 @@ pub fn generate_suggestions_ev(
                 .iter()
                 .find(|c| c.balls == s.balls && c.stars == s.stars)
                 .cloned()
-                .unwrap_or_else(|| ScoredSuggestion {
+                .unwrap_or(ScoredSuggestion {
                     balls: s.balls,
                     stars: s.stars,
                     bayesian_score: s.score,
