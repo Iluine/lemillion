@@ -13,6 +13,7 @@ enum InteractiveCommand {
     Compare,
     Weights,
     Analyze,
+    Coverage,
     Quit,
 }
 
@@ -25,7 +26,8 @@ fn parse_command(input: &str) -> Option<InteractiveCommand> {
         "5" | "comparer" | "compare" | "comp" => Some(InteractiveCommand::Compare),
         "6" | "poids" | "weights" => Some(InteractiveCommand::Weights),
         "7" | "analyser" | "analyze" | "ana" => Some(InteractiveCommand::Analyze),
-        "8" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
+        "8" | "couverture" | "coverage" | "cov" => Some(InteractiveCommand::Coverage),
+        "9" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
         _ => None,
     }
 }
@@ -35,12 +37,13 @@ fn display_menu() {
     println!("── Mode interactif ──");
     println!("  1. ajouter    Ajouter un tirage");
     println!("  2. calibrer   Calibrer les modèles");
-    println!("  3. predire    Prédictions ensemble");
+    println!("  3. predire    Prédictions EV-aware");
     println!("  4. historique Derniers tirages");
     println!("  5. comparer   Analyser une grille");
     println!("  6. poids      Afficher les poids");
     println!("  7. analyser   Tests de non-aléatoire");
-    println!("  8. quitter    Quitter");
+    println!("  8. couverture Optimiser la couverture");
+    println!("  9. quitter    Quitter");
     println!();
 }
 
@@ -151,7 +154,9 @@ fn cmd_add_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> 
 fn cmd_calibrate_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     let windows = prompt_with_default("Fenêtres (séparées par des virgules)", "20,30,50,80,100,150,200,300")?;
     let output = prompt_with_default("Fichier de sortie", "calibration.json")?;
-    super::cmd_calibrate(conn, &windows, &output)
+    let temp_str = prompt_with_default("Température", "0.5")?;
+    let temperature: f64 = temp_str.parse().context("Température invalide")?;
+    super::cmd_calibrate(conn, &windows, &output, temperature)
 }
 
 fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -165,7 +170,17 @@ fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
         Some(seed_str.parse().context("Seed invalide")?)
     };
 
-    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2)
+    let temp_str = prompt_with_default("Température (vide = aucune)", "")?;
+    let temperature: Option<f64> = if temp_str.is_empty() {
+        None
+    } else {
+        Some(temp_str.parse().context("Température invalide")?)
+    };
+
+    let jackpot_str = prompt_with_default("Jackpot en EUR", "17000000")?;
+    let jackpot: f64 = jackpot_str.parse().context("Jackpot invalide")?;
+
+    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, false)
 }
 
 fn cmd_history_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -179,6 +194,23 @@ fn cmd_compare_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
     let stars = prompt_stars()?;
     let numbers: Vec<u8> = balls.iter().chain(stars.iter()).copied().collect();
     super::cmd_compare(conn, &numbers)
+}
+
+fn cmd_coverage_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    let n_str = prompt_with_default("Nombre de tickets", "10")?;
+    let n: usize = n_str.parse().context("Nombre invalide")?;
+
+    let jackpot_str = prompt_with_default("Jackpot en EUR", "17000000")?;
+    let jackpot: f64 = jackpot_str.parse().context("Jackpot invalide")?;
+
+    let seed_str = prompt_with_default("Seed (vide = date du jour)", "")?;
+    let seed: Option<u64> = if seed_str.is_empty() {
+        None
+    } else {
+        Some(seed_str.parse().context("Seed invalide")?)
+    };
+
+    super::cmd_coverage(conn, n, jackpot, seed)
 }
 
 fn cmd_analyze_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -249,8 +281,13 @@ pub fn run_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> 
                     println!("Erreur: {e:#}");
                 }
             }
+            Some(InteractiveCommand::Coverage) => {
+                if let Err(e) = cmd_coverage_interactive(conn) {
+                    println!("Erreur: {e:#}");
+                }
+            }
             None => {
-                println!("Commande inconnue : '{}'. Tapez un numéro (1-7) ou un nom de commande.", input);
+                println!("Commande inconnue : '{}'. Tapez un numéro (1-9) ou un nom de commande.", input);
             }
         }
     }
@@ -271,7 +308,8 @@ mod tests {
         assert_eq!(parse_command("5"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("6"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("7"), Some(InteractiveCommand::Analyze));
-        assert_eq!(parse_command("8"), Some(InteractiveCommand::Quit));
+        assert_eq!(parse_command("8"), Some(InteractiveCommand::Coverage));
+        assert_eq!(parse_command("9"), Some(InteractiveCommand::Quit));
     }
 
     #[test]
@@ -283,6 +321,7 @@ mod tests {
         assert_eq!(parse_command("comparer"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("poids"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("analyser"), Some(InteractiveCommand::Analyze));
+        assert_eq!(parse_command("couverture"), Some(InteractiveCommand::Coverage));
         assert_eq!(parse_command("quitter"), Some(InteractiveCommand::Quit));
     }
 
@@ -295,6 +334,7 @@ mod tests {
         assert_eq!(parse_command("comp"), Some(InteractiveCommand::Compare));
         assert_eq!(parse_command("weights"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("ana"), Some(InteractiveCommand::Analyze));
+        assert_eq!(parse_command("cov"), Some(InteractiveCommand::Coverage));
         assert_eq!(parse_command("q"), Some(InteractiveCommand::Quit));
         assert_eq!(parse_command("exit"), Some(InteractiveCommand::Quit));
     }
@@ -306,13 +346,14 @@ mod tests {
         assert_eq!(parse_command("CALIBRER"), Some(InteractiveCommand::Calibrate));
         assert_eq!(parse_command("Predire"), Some(InteractiveCommand::Predict));
         assert_eq!(parse_command("ANALYSER"), Some(InteractiveCommand::Analyze));
+        assert_eq!(parse_command("COUVERTURE"), Some(InteractiveCommand::Coverage));
     }
 
     #[test]
     fn test_parse_command_unknown() {
         assert_eq!(parse_command("foo"), None);
         assert_eq!(parse_command(""), None);
-        assert_eq!(parse_command("9"), None);
+        assert_eq!(parse_command("10"), None);
         assert_eq!(parse_command("hello"), None);
     }
 }

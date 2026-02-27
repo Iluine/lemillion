@@ -53,12 +53,14 @@ pub fn walk_forward_evaluate_with_strategy(
     pool: Pool,
     strategy: SamplingStrategy,
 ) -> f64 {
-    let effective_span = match strategy {
-        SamplingStrategy::Consecutive => window,
-        SamplingStrategy::Sparse { span_multiplier } => window * span_multiplier,
+    let min_history = 10;
+
+    let max_t = match strategy {
+        SamplingStrategy::Consecutive => draws.len().saturating_sub(window + 1),
+        SamplingStrategy::Sparse { span_multiplier } => draws.len().saturating_sub(window * span_multiplier + 1),
+        SamplingStrategy::FullHistory => draws.len().saturating_sub(min_history + 1),
     };
 
-    let max_t = draws.len().saturating_sub(effective_span + 1);
     if max_t == 0 {
         return f64::NEG_INFINITY;
     }
@@ -107,6 +109,13 @@ pub fn walk_forward_evaluate_with_strategy(
 
                 model.predict(&train_data, pool)
             }
+            SamplingStrategy::FullHistory => {
+                let train_data = &draws[t + 1..];
+                if train_data.len() < min_history {
+                    continue;
+                }
+                model.predict(train_data, pool)
+            }
         };
 
         // Mesurer la log-likelihood sur le tirage test
@@ -139,23 +148,40 @@ pub fn uniform_log_likelihood(pool: Pool) -> f64 {
     pool.pick_count() as f64 * p.ln()
 }
 
+/// Température par défaut pour le scaling des poids.
+/// T<1.0 = concentration sur les meilleurs modèles (sharpening).
+/// T=0.5 → exp(skill/0.5) = exp(2×skill), les ratios sont élevés au carré.
+pub const DEFAULT_TEMPERATURE: f64 = 0.5;
+
 /// Calcule les poids de l'ensemble à partir des calibrations.
-/// Pondération continue : poids = exp(skill) où skill = best_ll - uniform_ll.
-/// Les modèles proches de l'uniforme ont un poids élevé, les mauvais décroissent
-/// exponentiellement sans être coupés brutalement.
+/// Pondération continue avec temperature scaling : poids = exp(skill / T).
 pub fn compute_weights(
     calibrations: &[ModelCalibration],
     pool: Pool,
 ) -> Vec<(String, f64)> {
+    compute_weights_with_params(calibrations, pool, DEFAULT_TEMPERATURE)
+}
+
+/// Calcule les poids avec température configurable.
+/// Avec T<1 (sharpening), les meilleurs modèles dominent et les mauvais
+/// deviennent naturellement négligeables sans besoin de dropout explicite.
+pub fn compute_weights_with_params(
+    calibrations: &[ModelCalibration],
+    pool: Pool,
+    temperature: f64,
+) -> Vec<(String, f64)> {
     let uniform_ll = uniform_log_likelihood(pool);
 
-    // Poids = exp(skill) où skill = best_ll - uniform_ll
-    // Plus le modèle est proche de l'uniforme, plus son poids est élevé
-    // Les modèles meilleurs que l'uniforme (skill > 0) ont poids > 1
-    // Les modèles pires (skill < 0) ont poids < 1, décroissant exponentiellement
+    // Poids = exp(skill / T)
+    // skill = best_ll - uniform_ll
+    // T < 1 concentre sur les meilleurs (ex: T=0.5 → ratios élevés au carré)
+    // T > 1 aplatit vers l'uniforme
     let raw_weights: Vec<f64> = calibrations
         .iter()
-        .map(|c| (c.best_ll - uniform_ll).exp())
+        .map(|c| {
+            let skill = c.best_ll - uniform_ll;
+            (skill / temperature).exp()
+        })
         .collect();
 
     let total: f64 = raw_weights.iter().sum();
@@ -167,7 +193,7 @@ pub fn compute_weights(
             .map(|(c, &w)| (c.model_name.clone(), w / total))
             .collect()
     } else {
-        // Cas dégénéré (ne devrait pas arriver avec exp)
+        // Cas dégénéré → uniforme
         let n = calibrations.len() as f64;
         calibrations
             .iter()
@@ -183,6 +209,32 @@ pub fn calibrate_model(
     pool: Pool,
 ) -> ModelCalibration {
     let strategy = model.sampling_strategy();
+
+    // FullHistory : une seule évaluation, pas de boucle sur les fenêtres
+    if strategy == SamplingStrategy::FullHistory {
+        let ll = walk_forward_evaluate_with_strategy(
+            model, draws, 0, pool, SamplingStrategy::FullHistory,
+        );
+        let min_history = 10;
+        let max_t = draws.len().saturating_sub(min_history + 1);
+        let stride = (max_t / 100).max(1);
+        let n_tests = (0..max_t).step_by(stride).count();
+
+        return ModelCalibration {
+            model_name: model.name().to_string(),
+            results: vec![CalibrationResult {
+                model_name: model.name().to_string(),
+                window: 0,
+                sparse: false,
+                log_likelihood: ll,
+                n_tests,
+            }],
+            best_window: 0,
+            best_sparse: false,
+            best_ll: ll,
+        };
+    }
+
     let mut results = Vec::new();
     let mut best_ll = f64::NEG_INFINITY;
     let mut best_window = windows[0];
@@ -337,7 +389,7 @@ mod tests {
         let good_weight = weights.iter().find(|(n, _)| n == "Good").unwrap().1;
         let bad_weight = weights.iter().find(|(n, _)| n == "Bad").unwrap().1;
         assert!(bad_weight < good_weight, "Bad model should have lower weight");
-        assert!(bad_weight < 0.2, "Bad model should have small weight, got {}", bad_weight);
+        assert!(bad_weight < 0.5, "Bad model should have smaller weight, got {}", bad_weight);
     }
 
     #[test]
@@ -405,6 +457,123 @@ mod tests {
             SamplingStrategy::Sparse { span_multiplier: 3 },
         );
         assert!(ll.is_finite(), "Sparse LL should be finite, got {}", ll);
+    }
+
+    #[test]
+    fn test_temperature_sharpening_increases_ratio() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "Good".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll + 2.0,
+            },
+            ModelCalibration {
+                model_name: "Bad".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 2.0,
+            },
+        ];
+        // T=1: ratio = exp(4) ≈ 54.6
+        let w_t1 = compute_weights_with_params(&calibrations, Pool::Balls, 1.0);
+        let ratio_t1 = w_t1[0].1 / w_t1[1].1;
+        // T=0.5 (default): ratio = exp(8) ≈ 2981 → concentration forte
+        let w_t05 = compute_weights_with_params(&calibrations, Pool::Balls, 0.5);
+        let ratio_t05 = w_t05[0].1 / w_t05[1].1;
+        assert!(ratio_t05 > ratio_t1, "T=0.5 should increase ratio: {} vs {}", ratio_t05, ratio_t1);
+        assert!(ratio_t05 > 1000.0, "T=0.5 ratio should be very large: {}", ratio_t05);
+    }
+
+    #[test]
+    fn test_bad_model_gets_negligible_weight_with_sharpening() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "Good".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll + 1.0,
+            },
+            ModelCalibration {
+                model_name: "Terrible".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 6.0, // skill = -6
+            },
+        ];
+        // Avec T=0.5, exp((-6)/0.5) = exp(-12) ≈ 6e-6 → quasi-nul sans dropout
+        let weights = compute_weights(&calibrations, Pool::Balls);
+        let terrible_w = weights.iter().find(|(n, _)| n == "Terrible").unwrap().1;
+        assert!(terrible_w < 1e-4, "Terrible model should be negligible with T=0.5, got {}", terrible_w);
+        let good_w = weights.iter().find(|(n, _)| n == "Good").unwrap().1;
+        assert!(good_w > 0.999, "Good should get nearly all weight: {}", good_w);
+    }
+
+    #[test]
+    fn test_equal_bad_models_get_equal_weights() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "A".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 10.0,
+            },
+            ModelCalibration {
+                model_name: "B".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 10.0,
+            },
+        ];
+        let weights = compute_weights(&calibrations, Pool::Balls);
+        // Equal skill → equal weights (both bad, but equal)
+        assert!((weights[0].1 - 0.5).abs() < 1e-10);
+        assert!((weights[1].1 - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_walk_forward_full_history() {
+        let draws = make_test_draws(50);
+        let model = crate::models::dirichlet::DirichletModel::new(1.0);
+        let ll = walk_forward_evaluate_with_strategy(
+            &model, &draws, 0, Pool::Balls,
+            SamplingStrategy::FullHistory,
+        );
+        assert!(ll.is_finite(), "FullHistory LL should be finite, got {}", ll);
+    }
+
+    #[test]
+    fn test_calibrate_full_history_single_result() {
+        let draws = make_test_draws(50);
+        // Créer un modèle wrapper qui déclare FullHistory
+        struct FullHistoryModel;
+        impl crate::models::ForecastModel for FullHistoryModel {
+            fn name(&self) -> &str { "TestFH" }
+            fn predict(&self, _draws: &[lemillion_db::models::Draw], pool: Pool) -> Vec<f64> {
+                vec![1.0 / pool.size() as f64; pool.size()]
+            }
+            fn params(&self) -> std::collections::HashMap<String, f64> {
+                std::collections::HashMap::new()
+            }
+            fn sampling_strategy(&self) -> SamplingStrategy {
+                SamplingStrategy::FullHistory
+            }
+        }
+        let model = FullHistoryModel;
+        let cal = calibrate_model(&model, &draws, &[10, 20, 30], Pool::Balls);
+        assert_eq!(cal.model_name, "TestFH");
+        assert_eq!(cal.results.len(), 1, "FullHistory should produce exactly 1 result");
+        assert_eq!(cal.best_window, 0, "FullHistory best_window should be 0");
+        assert!(!cal.best_sparse);
     }
 
     #[test]

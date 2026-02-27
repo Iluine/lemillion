@@ -26,10 +26,11 @@ pub struct ConsensusEntry {
     pub probability: f64,
     pub spread: f64,
     pub category: ConsensusCategory,
+    /// Score continu : deviation × confidence. Positif = favorable, négatif = défavorable.
+    pub consensus_value: f64,
 }
 
 pub fn build_consensus_map(prediction: &EnsemblePrediction, pool: Pool) -> Vec<ConsensusEntry> {
-    // Stub - sera implémenté en Phase 4
     let uniform = 1.0 / pool.size() as f64;
 
     let mut spreads: Vec<f64> = prediction.spread.clone();
@@ -56,39 +57,43 @@ pub fn build_consensus_map(prediction: &EnsemblePrediction, pool: Pool) -> Vec<C
                 (false, false) => ConsensusCategory::Uncertain,
             };
 
+            // Score continu : déviation relative × confiance (inverse du spread)
+            let deviation = (prob - uniform) / uniform; // -1 à +∞
+            let confidence = if median_spread > 0.0 {
+                1.0 / (1.0 + spread / median_spread)
+            } else {
+                1.0
+            };
+            let consensus_value = deviation * confidence;
+
             ConsensusEntry {
                 number: (i + 1) as u8,
                 probability: prob,
                 spread,
                 category,
+                consensus_value,
             }
         })
         .collect()
 }
 
-/// Score une grille contre la consensus map.
-/// StrongPick=+2, DivisivePick=+1, Uncertain=0, StrongAvoid=-1.
-/// Plage : -7 (tout avoid) à +14 (tout strong pick).
+/// Score continu d'une grille contre la consensus map.
+/// Somme des consensus_value pour chaque numéro sélectionné.
 pub fn consensus_score(
     balls: &[u8; 5],
     stars: &[u8; 2],
     ball_consensus: &[ConsensusEntry],
     star_consensus: &[ConsensusEntry],
-) -> i32 {
-    let score_entry = |number: u8, entries: &[ConsensusEntry]| -> i32 {
+) -> f64 {
+    let score_entry = |number: u8, entries: &[ConsensusEntry]| -> f64 {
         entries
             .iter()
             .find(|e| e.number == number)
-            .map(|e| match e.category {
-                ConsensusCategory::StrongPick => 2,
-                ConsensusCategory::DivisivePick => 1,
-                ConsensusCategory::Uncertain => 0,
-                ConsensusCategory::StrongAvoid => -1,
-            })
-            .unwrap_or(0)
+            .map(|e| e.consensus_value)
+            .unwrap_or(0.0)
     };
-    balls.iter().map(|&b| score_entry(b, ball_consensus)).sum::<i32>()
-        + stars.iter().map(|&s| score_entry(s, star_consensus)).sum::<i32>()
+    balls.iter().map(|&b| score_entry(b, ball_consensus)).sum::<f64>()
+        + stars.iter().map(|&s| score_entry(s, star_consensus)).sum::<f64>()
 }
 
 #[cfg(test)]
@@ -106,41 +111,114 @@ mod tests {
         assert_eq!(map.len(), 50);
     }
 
-    fn make_entries(numbers: &[u8], category: ConsensusCategory) -> Vec<ConsensusEntry> {
-        numbers
-            .iter()
-            .map(|&n| ConsensusEntry {
-                number: n,
-                probability: 0.03,
-                spread: 0.001,
-                category: category.clone(),
-            })
-            .collect()
+    #[test]
+    fn test_consensus_value_positive_for_high_prob() {
+        // Prob above uniform, low spread → positive consensus_value
+        let mut dist = vec![1.0 / 50.0; 50];
+        dist[0] = 0.05; // 2.5× uniform
+        // Renormalize
+        let total: f64 = dist.iter().sum();
+        let dist: Vec<f64> = dist.iter().map(|&p| p / total).collect();
+
+        let pred = EnsemblePrediction {
+            distribution: dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 50],
+        };
+        let map = build_consensus_map(&pred, Pool::Balls);
+        assert!(map[0].consensus_value > 0.0, "High prob should have positive value: {}", map[0].consensus_value);
     }
 
     #[test]
-    fn test_consensus_score_all_strong_pick() {
-        let ball_entries = make_entries(&(1..=50).collect::<Vec<u8>>(), ConsensusCategory::StrongPick);
-        let star_entries = make_entries(&(1..=12).collect::<Vec<u8>>(), ConsensusCategory::StrongPick);
-        let score = consensus_score(&[1, 2, 3, 4, 5], &[1, 2], &ball_entries, &star_entries);
-        assert_eq!(score, 14); // 5×2 + 2×2
+    fn test_consensus_value_negative_for_low_prob() {
+        let mut dist = vec![1.0 / 50.0; 50];
+        dist[0] = 0.005; // 0.25× uniform
+        let total: f64 = dist.iter().sum();
+        let dist: Vec<f64> = dist.iter().map(|&p| p / total).collect();
+
+        let pred = EnsemblePrediction {
+            distribution: dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 50],
+        };
+        let map = build_consensus_map(&pred, Pool::Balls);
+        assert!(map[0].consensus_value < 0.0, "Low prob should have negative value: {}", map[0].consensus_value);
     }
 
     #[test]
-    fn test_consensus_score_all_avoid() {
-        let ball_entries = make_entries(&(1..=50).collect::<Vec<u8>>(), ConsensusCategory::StrongAvoid);
-        let star_entries = make_entries(&(1..=12).collect::<Vec<u8>>(), ConsensusCategory::StrongAvoid);
-        let score = consensus_score(&[1, 2, 3, 4, 5], &[1, 2], &ball_entries, &star_entries);
-        assert_eq!(score, -7); // 5×(-1) + 2×(-1)
+    fn test_consensus_score_positive_for_good_picks() {
+        // Create a prediction where numbers 1-5 have high prob, rest low
+        let mut dist = vec![0.01; 50];
+        for i in 0..5 { dist[i] = 0.05; }
+        let total: f64 = dist.iter().sum();
+        let dist: Vec<f64> = dist.iter().map(|&p| p / total).collect();
+
+        let pred = EnsemblePrediction {
+            distribution: dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 50],
+        };
+        let ball_consensus = build_consensus_map(&pred, Pool::Balls);
+
+        let star_dist = vec![1.0 / 12.0; 12];
+        let star_pred = EnsemblePrediction {
+            distribution: star_dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 12],
+        };
+        let star_consensus = build_consensus_map(&star_pred, Pool::Stars);
+
+        let score = consensus_score(&[1, 2, 3, 4, 5], &[1, 2], &ball_consensus, &star_consensus);
+        assert!(score > 0.0, "Good picks should have positive score: {}", score);
     }
 
     #[test]
-    fn test_consensus_score_mixed() {
-        let mut entries = make_entries(&[1, 2, 3], ConsensusCategory::StrongPick);
-        entries.extend(make_entries(&[4, 5], ConsensusCategory::StrongAvoid));
-        let star_entries = make_entries(&[1, 2], ConsensusCategory::DivisivePick);
-        let score = consensus_score(&[1, 2, 3, 4, 5], &[1, 2], &entries, &star_entries);
-        // 3×2 + 2×(-1) + 2×1 = 6 - 2 + 2 = 6
-        assert_eq!(score, 6);
+    fn test_consensus_score_negative_for_bad_picks() {
+        let mut dist = vec![0.025; 50];
+        for i in 0..5 { dist[i] = 0.005; } // These are bad
+        let total: f64 = dist.iter().sum();
+        let dist: Vec<f64> = dist.iter().map(|&p| p / total).collect();
+
+        let pred = EnsemblePrediction {
+            distribution: dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 50],
+        };
+        let ball_consensus = build_consensus_map(&pred, Pool::Balls);
+
+        let star_dist = vec![1.0 / 12.0; 12];
+        let star_pred = EnsemblePrediction {
+            distribution: star_dist,
+            model_distributions: vec![],
+            spread: vec![0.001; 12],
+        };
+        let star_consensus = build_consensus_map(&star_pred, Pool::Stars);
+
+        let score = consensus_score(&[1, 2, 3, 4, 5], &[1, 2], &ball_consensus, &star_consensus);
+        assert!(score < 0.0, "Bad picks should have negative score: {}", score);
+    }
+
+    #[test]
+    fn test_high_spread_reduces_confidence() {
+        // Two numbers with same prob above uniform, but different spreads
+        let mut dist = vec![1.0 / 50.0; 50];
+        dist[0] = 0.04;
+        dist[1] = 0.04;
+        let total: f64 = dist.iter().sum();
+        let dist: Vec<f64> = dist.iter().map(|&p| p / total).collect();
+
+        let mut spread = vec![0.001; 50];
+        spread[0] = 0.001; // Low spread → high confidence
+        spread[1] = 0.010; // High spread → low confidence
+
+        let pred = EnsemblePrediction {
+            distribution: dist,
+            model_distributions: vec![],
+            spread,
+        };
+        let map = build_consensus_map(&pred, Pool::Balls);
+        assert!(map[0].consensus_value > map[1].consensus_value,
+            "Low spread should give higher consensus value: {} vs {}",
+            map[0].consensus_value, map[1].consensus_value);
     }
 }

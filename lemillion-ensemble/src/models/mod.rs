@@ -16,6 +16,8 @@ pub mod transformer;
 pub mod tda;
 pub mod diffusion;
 pub mod physics;
+pub mod oracle;
+pub mod reduction;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -28,6 +30,8 @@ pub enum SamplingStrategy {
     /// Fenêtre éparse : on pioche `window` tirages uniformément dans un span de `span_multiplier * window` tirages.
     /// Préserve l'ordre chronologique.
     Sparse { span_multiplier: usize },
+    /// Historique complet : draws[t+1..] pour les modèles entraînés walk-forward.
+    FullHistory,
 }
 
 pub trait ForecastModel: Send + Sync {
@@ -54,7 +58,8 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
+/// Les 18 modèles de base (sans Oracle). Utilisé par Oracle en interne.
+pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
         Box::new(dirichlet::DirichletModel::with_window(0.1, Some(30))),
         Box::new(ewma::EwmaModel::new(0.9)),
@@ -86,6 +91,19 @@ pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(diffusion::DiffusionModel::default()),
         Box::new(physics::PhysicsModel::default()),
     ]
+}
+
+/// Tous les modèles : base + Oracle v1 (si entraîné et fichier présent).
+/// Oracle v2 (MetaOracle) n'est PAS inclus ici — il remplace l'ensemble.
+pub fn all_models() -> Vec<Box<dyn ForecastModel>> {
+    let mut models = base_models();
+    if let Some(oracle) = oracle::OracleModel::load() {
+        if !oracle.is_meta() {
+            models.push(Box::new(oracle)); // v1 : modèle parmi d'autres
+        }
+        // v2 : pas ajouté, il remplace l'ensemble
+    }
+    models
 }
 
 pub fn make_test_draws(n: usize) -> Vec<Draw> {

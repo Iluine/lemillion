@@ -4,13 +4,13 @@ use faer::prelude::Solve;
 use ndarray::Array2;
 
 /// Convert ndarray Array2 to faer Mat (column-major).
-fn ndarray_to_faer(arr: &Array2<f64>) -> Mat<f64> {
+pub fn ndarray_to_faer(arr: &Array2<f64>) -> Mat<f64> {
     let (rows, cols) = (arr.nrows(), arr.ncols());
     Mat::from_fn(rows, cols, |i, j| arr[[i, j]])
 }
 
 /// Convert faer Mat back to ndarray Array2.
-fn faer_to_ndarray(mat: &Mat<f64>) -> Array2<f64> {
+pub fn faer_to_ndarray(mat: &Mat<f64>) -> Array2<f64> {
     let (rows, cols) = (mat.nrows(), mat.ncols());
     Array2::from_shape_fn((rows, cols), |(i, j)| mat[(i, j)])
 }
@@ -76,6 +76,101 @@ pub fn ridge_regression(h: &Array2<f64>, y: &Array2<f64>, lambda: f64) -> Result
         // w_out_t is [d, output_dim], transpose to get [output_dim, d]
         Ok(w_out_t.t().to_owned())
     }
+}
+
+/// PCA via Thin SVD.
+/// data: slice of N rows, each of dimension d.
+/// n_components: number of principal components to keep (K ≤ min(N, d)).
+/// Returns (components [K × d], eigenvalues [K], mean [d]).
+pub fn pca_svd(
+    data: &[Vec<f64>],
+    n_components: usize,
+) -> Result<(Array2<f64>, Vec<f64>, Vec<f64>)> {
+    let n = data.len();
+    if n < 2 {
+        bail!("PCA requires at least 2 samples, got {}", n);
+    }
+    let d = data[0].len();
+    if d == 0 {
+        bail!("PCA: zero-dimensional data");
+    }
+    if n_components == 0 || n_components > d.min(n) {
+        bail!("PCA: n_components={} must be in [1, min(N={}, d={})]", n_components, n, d);
+    }
+
+    // Compute mean
+    let mut mean = vec![0.0f64; d];
+    for row in data {
+        for (j, &v) in row.iter().enumerate() {
+            mean[j] += v;
+        }
+    }
+    for m in &mut mean {
+        *m /= n as f64;
+    }
+
+    // Build centered matrix [N × d]
+    let centered = Array2::from_shape_fn((n, d), |(i, j)| data[i][j] - mean[j]);
+
+    // Convert to faer and compute thin SVD
+    let faer_mat = ndarray_to_faer(&centered);
+    let svd = faer_mat.thin_svd().map_err(|e| anyhow::anyhow!("SVD failed: {:?}", e))?;
+
+    // Singular values are already sorted in decreasing order
+    let s = svd.S(); // DiagRef
+    let v = svd.V(); // [d × min(N,d)]
+
+    let k = n_components;
+    let mut components = Array2::<f64>::zeros((k, d));
+    let mut eigenvalues = Vec::with_capacity(k);
+
+    for i in 0..k {
+        let sv = s[i];
+        eigenvalues.push(sv * sv / (n as f64 - 1.0));
+        for j in 0..d {
+            components[[i, j]] = v[(j, i)];
+        }
+    }
+
+    Ok((components, eigenvalues, mean))
+}
+
+/// PCA with automatic component selection to reach target_variance (0..1).
+/// Returns (components [K × d], eigenvalues [K], mean [d], explained_ratio).
+pub fn pca_svd_auto(
+    data: &[Vec<f64>],
+    target_variance: f64,
+) -> Result<(Array2<f64>, Vec<f64>, Vec<f64>, f64)> {
+    let n = data.len();
+    if n < 2 {
+        bail!("PCA requires at least 2 samples, got {}", n);
+    }
+    let d = data[0].len();
+    let max_k = d.min(n);
+
+    // First compute all components to find the right K
+    let (all_components, all_eigenvalues, mean) = pca_svd(data, max_k)?;
+
+    let total_var: f64 = all_eigenvalues.iter().sum();
+    if total_var <= 0.0 {
+        bail!("PCA: total variance is zero");
+    }
+
+    let mut cumsum = 0.0;
+    let mut k = max_k;
+    for (i, &ev) in all_eigenvalues.iter().enumerate() {
+        cumsum += ev;
+        if cumsum / total_var >= target_variance {
+            k = i + 1;
+            break;
+        }
+    }
+
+    let explained_ratio = all_eigenvalues[..k].iter().sum::<f64>() / total_var;
+    let components = all_components.slice(ndarray::s![..k, ..]).to_owned();
+    let eigenvalues = all_eigenvalues[..k].to_vec();
+
+    Ok((components, eigenvalues, mean, explained_ratio))
 }
 
 #[cfg(test)]
@@ -187,5 +282,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_pca_svd_basic() {
+        // 5 samples of 3D data with clear dominant axis
+        let data = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![2.0, 0.1, 0.0],
+            vec![3.0, 0.0, 0.1],
+            vec![4.0, 0.1, 0.1],
+            vec![5.0, 0.0, 0.0],
+        ];
+        let (components, eigenvalues, mean) = pca_svd(&data, 2).unwrap();
+        assert_eq!(components.shape(), &[2, 3]);
+        assert_eq!(eigenvalues.len(), 2);
+        assert_eq!(mean.len(), 3);
+        // First eigenvalue should dominate
+        assert!(eigenvalues[0] > eigenvalues[1] * 10.0);
+        // Mean should be (3.0, ~0.04, ~0.04)
+        assert!((mean[0] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_pca_svd_auto() {
+        let data = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![2.0, 0.1, 0.0],
+            vec![3.0, 0.0, 0.1],
+            vec![4.0, 0.1, 0.1],
+            vec![5.0, 0.0, 0.0],
+        ];
+        let (components, eigenvalues, _mean, ratio) = pca_svd_auto(&data, 0.95).unwrap();
+        // Should keep 1 component (dominant axis explains >95%)
+        assert!(components.nrows() >= 1);
+        assert!(ratio >= 0.95);
+        assert_eq!(eigenvalues.len(), components.nrows());
     }
 }

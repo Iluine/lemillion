@@ -6,6 +6,10 @@ use crate::analysis::{AnalysisResult, Verdict};
 use crate::ensemble::EnsemblePrediction;
 use crate::ensemble::calibration::{EnsembleWeights, ModelCalibration};
 use crate::ensemble::consensus::{ConsensusCategory, ConsensusEntry};
+use crate::expected_value::{PopularityModel, PRIZE_TIERS, jackpot_threshold, compute_ev};
+use crate::sampler::ScoredSuggestion;
+use crate::coverage::CoverageStats;
+use crate::models::oracle::{GridSearchResult, GridSearchResultV2};
 
 pub fn display_calibration_results(calibrations: &[ModelCalibration], windows: &[usize]) {
     println!("\n== Résultats de calibration ==\n");
@@ -47,8 +51,13 @@ pub fn display_calibration_results(calibrations: &[ModelCalibration], windows: &
                 row.push(ll_sparse);
             }
         }
-        let sparse_tag = if cal.best_sparse { "(S)" } else { "" };
-        row.push(format!("w={}{} ({:.3})", cal.best_window, sparse_tag, cal.best_ll));
+        let best_tag = if cal.best_window == 0 {
+            "(FH)".to_string()
+        } else {
+            let sparse_tag = if cal.best_sparse { "(S)" } else { "" };
+            format!("w={}{}", cal.best_window, sparse_tag)
+        };
+        row.push(format!("{} ({:.3})", best_tag, cal.best_ll));
         table.add_row(row);
     }
 
@@ -63,7 +72,7 @@ pub fn display_calibration_chart(calibrations: &[ModelCalibration], windows: &[u
     let x_max = *windows.iter().max().unwrap_or(&100) as f32;
 
     let mut all_lls: Vec<f64> = calibrations.iter()
-        .flat_map(|c| c.results.iter().filter(|r| !r.sparse).map(|r| r.log_likelihood))
+        .flat_map(|c| c.results.iter().filter(|r| !r.sparse && r.window > 0).map(|r| r.log_likelihood))
         .filter(|ll| ll.is_finite())
         .collect();
     if all_lls.is_empty() {
@@ -76,7 +85,7 @@ pub fn display_calibration_chart(calibrations: &[ModelCalibration], windows: &[u
 
     for cal in calibrations {
         let points: Vec<(f32, f32)> = cal.results.iter()
-            .filter(|r| !r.sparse && r.log_likelihood.is_finite())
+            .filter(|r| !r.sparse && r.window > 0 && r.log_likelihood.is_finite())
             .map(|r| (r.window as f32, r.log_likelihood as f32))
             .collect();
 
@@ -197,7 +206,7 @@ pub fn display_consensus(entries: &[ConsensusEntry], pool: Pool) {
     }
 }
 
-pub fn display_optimal_grid(grid: &Suggestion, consensus: i32) {
+pub fn display_optimal_grid(grid: &Suggestion, consensus: f64) {
     println!("\n== Grille optimale (consensus max) ==\n");
 
     let mut table = Table::new();
@@ -222,12 +231,12 @@ pub fn display_optimal_grid(grid: &Suggestion, consensus: i32) {
         Cell::new(&balls_str).fg(Color::Green),
         Cell::new(&stars_str).fg(Color::Yellow),
         Cell::new(format!("{:.4}", grid.score)),
-        Cell::new(format!("{:+}", consensus)),
+        Cell::new(format!("{:+.2}", consensus)),
     ]);
     println!("{table}");
 }
 
-pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[i32]) {
+pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[f64]) {
     println!("\n== Suggestions de grilles ==\n");
 
     let mut table = Table::new();
@@ -249,7 +258,7 @@ pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[i32])
             .collect::<Vec<_>>()
             .join(" - ");
 
-        let cs = consensus_scores.get(i).copied().unwrap_or(0);
+        let cs = consensus_scores.get(i).copied().unwrap_or(0.0);
 
         if i == 0 {
             table.add_row(vec![
@@ -257,7 +266,7 @@ pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[i32])
                 Cell::new(&balls_str).fg(Color::Green),
                 Cell::new(&stars_str).fg(Color::Green),
                 Cell::new(format!("{:.4}", sug.score)).fg(Color::Green),
-                Cell::new(format!("{:+}", cs)).fg(Color::Green),
+                Cell::new(format!("{:+.2}", cs)).fg(Color::Green),
             ]);
         } else {
             table.add_row(vec![
@@ -265,7 +274,7 @@ pub fn display_suggestions(suggestions: &[Suggestion], consensus_scores: &[i32])
                 Cell::new(&balls_str),
                 Cell::new(&stars_str),
                 Cell::new(format!("{:.4}", sug.score)),
-                Cell::new(format!("{:+}", cs)),
+                Cell::new(format!("{:+.2}", cs)),
             ]);
         }
     }
@@ -417,8 +426,16 @@ pub struct BacktestRow {
     pub percentile: f64,
     pub optimal_ball_match: u8,
     pub optimal_star_match: u8,
-    pub consensus: i32,
+    pub consensus: f64,
     pub bits_info: f64,
+    /// Nombre de suggestions ayant touche chaque rang de prix (13 rangs)
+    pub tier_hits: [u32; 13],
+    /// Meilleur rang atteint (0=jackpot, None=aucun gain)
+    pub best_tier: Option<u8>,
+    /// Gain total sur toutes les suggestions
+    pub total_payout: f64,
+    /// ROI = total_payout / (n_suggestions * TICKET_PRICE)
+    pub roi: f64,
 }
 
 pub fn display_backtest_results(rows: &[BacktestRow]) {
@@ -475,7 +492,7 @@ pub fn display_backtest_results(rows: &[BacktestRow]) {
             Cell::new(format!("{:.1}%", row.percentile)).fg(pct_color),
             Cell::new(format!("{:+.2}", row.bits_info)).fg(bits_color),
             Cell::new(&match_str),
-            Cell::new(format!("{:+}", row.consensus)),
+            Cell::new(format!("{:+.2}", row.consensus)),
         ]);
     }
     println!("{table}");
@@ -533,4 +550,529 @@ pub fn display_backtest_results(rows: &[BacktestRow]) {
             avg_rank, total_combinations
         );
     }
+}
+
+/// Résultat d'un sweep de température.
+pub struct TemperatureSweepRow {
+    pub temperature: f64,
+    pub avg_score: f64,
+    pub avg_bits: f64,
+    pub avg_percentile: f64,
+}
+
+pub fn display_temperature_sweep(rows: &[TemperatureSweepRow]) {
+    println!("\n== Sweep de température ==\n");
+
+    if rows.is_empty() {
+        println!("  (Aucun résultat)");
+        return;
+    }
+
+    let best_bits_idx = rows.iter().enumerate()
+        .max_by(|a, b| a.1.avg_bits.partial_cmp(&b.1.avg_bits).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let best_score_idx = rows.iter().enumerate()
+        .max_by(|a, b| a.1.avg_score.partial_cmp(&b.1.avg_score).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["T", "Score moyen", "Bits d'info moy.", "Percentile moy."]);
+
+    for (i, row) in rows.iter().enumerate() {
+        if i == best_bits_idx {
+            table.add_row(vec![
+                Cell::new(format!("{:.1}", row.temperature)).fg(Color::Green),
+                Cell::new(format!("{:.4}", row.avg_score)).fg(Color::Green),
+                Cell::new(format!("{:+.3}", row.avg_bits)).fg(Color::Green),
+                Cell::new(format!("{:.1}%", row.avg_percentile)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{:.1}", row.temperature)),
+                Cell::new(format!("{:.4}", row.avg_score)),
+                Cell::new(format!("{:+.3}", row.avg_bits)),
+                Cell::new(format!("{:.1}%", row.avg_percentile)),
+            ]);
+        }
+    }
+
+    println!("{table}");
+
+    println!("\n── Résumé ──");
+    println!("  Meilleure T (bits)  : {:.1}", rows[best_bits_idx].temperature);
+    println!("  Meilleure T (score) : {:.1}", rows[best_score_idx].temperature);
+}
+
+/// Affiche le resume EV : jackpot, seuil, recommendation jouer/ne pas jouer.
+pub fn display_ev_summary(popularity: &PopularityModel, jackpot: f64) {
+    println!("\n== Analyse Esperance de Gain ==\n");
+
+    let threshold = jackpot_threshold();
+
+    // EV pour une grille moyenne et une grille impopulaire
+    let avg_grid_balls = [10, 20, 25, 35, 45];
+    let avg_grid_stars = [4, 9];
+    let ev_avg = compute_ev(&avg_grid_balls, &avg_grid_stars, popularity, jackpot);
+
+    let unpop_grid_balls = [33, 38, 42, 47, 50];
+    let unpop_grid_stars = [10, 12];
+    let ev_unpop = compute_ev(&unpop_grid_balls, &unpop_grid_stars, popularity, jackpot);
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Metrique", "Valeur"]);
+
+    table.add_row(vec![
+        Cell::new("Jackpot actuel"),
+        Cell::new(format!("{:.0} EUR", jackpot)).fg(Color::Cyan),
+    ]);
+    table.add_row(vec![
+        Cell::new("Seuil EV positive"),
+        Cell::new(format!("{:.0} EUR", threshold)),
+    ]);
+    table.add_row(vec![
+        Cell::new("EV/EUR (grille moyenne)"),
+        Cell::new(format!("{:.4}", ev_avg.ev_per_euro)).fg(
+            if ev_avg.ev_per_euro >= 1.0 { Color::Green } else { Color::Red }
+        ),
+    ]);
+    table.add_row(vec![
+        Cell::new("EV/EUR (grille impopulaire)"),
+        Cell::new(format!("{:.4}", ev_unpop.ev_per_euro)).fg(
+            if ev_unpop.ev_per_euro >= 1.0 { Color::Green } else { Color::Red }
+        ),
+    ]);
+
+    println!("{table}");
+
+    // Recommendation
+    if jackpot >= threshold * 0.8 {
+        println!("\n  --> Le jackpot est proche ou au-dessus du seuil. Jouer avec des grilles IMPOPULAIRES.");
+    } else {
+        println!("\n  --> EV negative. Si vous jouez, privilegiez les grilles impopulaires pour minimiser les pertes.");
+    }
+}
+
+/// Affiche la carte de popularite : numeros a favoriser (impopulaires) et eviter (populaires).
+pub fn display_popularity_map(popularity: &PopularityModel) {
+    println!("\n== Carte de popularite ==\n");
+
+    // Boules : trier par popularite
+    let mut ball_indices: Vec<(usize, f64)> = popularity.ball_popularity
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (i, p))
+        .collect();
+    ball_indices.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Top impopulaires (a favoriser)
+    let unpopular_balls: Vec<String> = ball_indices
+        .iter()
+        .take(10)
+        .map(|(i, p)| format!("{:2} ({:.2})", i + 1, p))
+        .collect();
+
+    // Top populaires (a eviter)
+    let popular_balls: Vec<String> = ball_indices
+        .iter()
+        .rev()
+        .take(10)
+        .map(|(i, p)| format!("{:2} ({:.2})", i + 1, p))
+        .collect();
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("A FAVORISER (impopulaires)").fg(Color::Green),
+            Cell::new("A EVITER (populaires)").fg(Color::Red),
+        ]);
+    table.add_row(vec![unpopular_balls.join("  "), popular_balls.join("  ")]);
+    println!("── Boules ──");
+    println!("{table}");
+
+    // Etoiles
+    let mut star_indices: Vec<(usize, f64)> = popularity.star_popularity
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (i, p))
+        .collect();
+    star_indices.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let unpopular_stars: Vec<String> = star_indices
+        .iter()
+        .take(4)
+        .map(|(i, p)| format!("{:2} ({:.2})", i + 1, p))
+        .collect();
+    let popular_stars: Vec<String> = star_indices
+        .iter()
+        .rev()
+        .take(4)
+        .map(|(i, p)| format!("{:2} ({:.2})", i + 1, p))
+        .collect();
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            Cell::new("A FAVORISER (impopulaires)").fg(Color::Green),
+            Cell::new("A EVITER (populaires)").fg(Color::Red),
+        ]);
+    table.add_row(vec![unpopular_stars.join("  "), popular_stars.join("  ")]);
+    println!("\n── Etoiles ──");
+    println!("{table}");
+}
+
+/// Affiche les suggestions EV-aware.
+pub fn display_suggestions_ev(suggestions: &[ScoredSuggestion], consensus_scores: &[f64]) {
+    println!("\n== Suggestions (mode EV) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["#", "Boules", "Etoiles", "EV/EUR", "Anti-Pop", "Consensus"]);
+
+    for (i, sug) in suggestions.iter().enumerate() {
+        let balls_str = sug.balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join(" - ");
+        let stars_str = sug.stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join(" - ");
+
+        let cs = consensus_scores.get(i).copied().unwrap_or(0.0);
+
+        let ev_color = if sug.ev_per_euro >= 1.0 { Color::Green } else { Color::Yellow };
+
+        if i == 0 {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)).fg(Color::Green),
+                Cell::new(&balls_str).fg(Color::Green),
+                Cell::new(&stars_str).fg(Color::Green),
+                Cell::new(format!("{:.4}", sug.ev_per_euro)).fg(Color::Green),
+                Cell::new(format!("{:.2}", sug.anti_popularity)).fg(Color::Green),
+                Cell::new(format!("{:+.2}", cs)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)),
+                Cell::new(&balls_str),
+                Cell::new(&stars_str),
+                Cell::new(format!("{:.4}", sug.ev_per_euro)).fg(ev_color),
+                Cell::new(format!("{:.2}", sug.anti_popularity)),
+                Cell::new(format!("{:+.2}", cs)),
+            ]);
+        }
+    }
+    println!("{table}");
+}
+
+/// Affiche les resultats de backtest avec matches partiels et ROI.
+pub fn display_backtest_ev_results(rows: &[BacktestRow]) {
+    println!("\n== Backtest (mode EV) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            "Date", "Tirage", "Best", "2+0", "2+1", "3+0", "1+2", "Gain", "ROI",
+        ]);
+
+    for row in rows {
+        let balls_str = row.actual_balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join("-");
+        let stars_str = row.actual_stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join("-");
+        let draw_str = format!("{} + {}", balls_str, stars_str);
+
+        let best_str = match row.best_tier {
+            Some(t) => PRIZE_TIERS[t as usize].name.to_string(),
+            None => "—".to_string(),
+        };
+
+        let roi_color = if row.roi >= 1.0 {
+            Color::Green
+        } else if row.roi >= 0.5 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        table.add_row(vec![
+            Cell::new(&row.date),
+            Cell::new(&draw_str),
+            Cell::new(&best_str),
+            Cell::new(format!("{}", row.tier_hits[12])), // 2+0
+            Cell::new(format!("{}", row.tier_hits[11])), // 2+1
+            Cell::new(format!("{}", row.tier_hits[9])),  // 3+0
+            Cell::new(format!("{}", row.tier_hits[10])), // 1+2
+            Cell::new(format!("{:.2}", row.total_payout)),
+            Cell::new(format!("{:.3}", row.roi)).fg(roi_color),
+        ]);
+    }
+    println!("{table}");
+
+    // Resume
+    if !rows.is_empty() {
+        let n = rows.len() as f64;
+        let avg_roi = rows.iter().map(|r| r.roi).sum::<f64>() / n;
+        let total_payout: f64 = rows.iter().map(|r| r.total_payout).sum();
+        let total_cost: f64 = rows.iter().map(|r| {
+            // Estimer le nombre de suggestions a partir du ROI et du payout
+            if r.roi > 0.0 { r.total_payout / r.roi } else { 0.0 }
+        }).sum();
+
+        let best_roi_row = rows.iter().max_by(|a, b| {
+            a.roi.partial_cmp(&b.roi).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Compter les gains par rang
+        let mut total_tier_hits = [0u32; 13];
+        for row in rows {
+            for i in 0..13 {
+                total_tier_hits[i] += row.tier_hits[i];
+            }
+        }
+
+        let any_wins = rows.iter().filter(|r| r.best_tier.is_some()).count();
+
+        println!("\n── Resume EV ──");
+        println!("  ROI moyen         : {:.4}", avg_roi);
+        println!("  Gain total        : {:.2} EUR", total_payout);
+        if total_cost > 0.0 {
+            println!("  Cout total        : {:.2} EUR", total_cost);
+        }
+        println!("  Tirages avec gain : {}/{}", any_wins, rows.len());
+
+        if let Some(best) = best_roi_row {
+            println!("  Meilleur ROI      : {:.4} ({})", best.roi, best.date);
+        }
+
+        println!("\n── Repartition des gains ──");
+        let mut gain_table = Table::new();
+        gain_table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec!["Rang", "Hits", "Gain/hit"]);
+
+        for (i, tier) in PRIZE_TIERS.iter().enumerate() {
+            if total_tier_hits[i] > 0 {
+                let gain_per = if tier.is_parimutuel { "variable".to_string() } else { format!("{:.0} EUR", tier.fixed_prize) };
+                gain_table.add_row(vec![
+                    Cell::new(tier.name),
+                    Cell::new(format!("{}", total_tier_hits[i])),
+                    Cell::new(gain_per),
+                ]);
+            }
+        }
+        println!("{gain_table}");
+    }
+}
+
+/// Affiche les statistiques de couverture.
+pub fn display_coverage_stats(stats: &CoverageStats, n_tickets: usize) {
+    println!("\n== Statistiques de couverture ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Metrique", "Valeur"]);
+
+    table.add_row(vec![
+        Cell::new("Tickets"),
+        Cell::new(format!("{}", n_tickets)),
+    ]);
+    table.add_row(vec![
+        Cell::new("Cout total"),
+        Cell::new(format!("{:.2} EUR", stats.total_cost)),
+    ]);
+    table.add_row(vec![
+        Cell::new("Boules couvertes"),
+        Cell::new(format!("{}/50", stats.unique_balls)).fg(
+            if stats.unique_balls >= 40 { Color::Green } else { Color::Yellow }
+        ),
+    ]);
+    table.add_row(vec![
+        Cell::new("Etoiles couvertes"),
+        Cell::new(format!("{}/12", stats.unique_stars)).fg(
+            if stats.unique_stars >= 10 { Color::Green } else { Color::Yellow }
+        ),
+    ]);
+    table.add_row(vec![
+        Cell::new("P(au moins 1 gain)"),
+        Cell::new(format!("{:.2}%", stats.any_win_probability * 100.0)),
+    ]);
+    table.add_row(vec![
+        Cell::new("EV totale"),
+        Cell::new(format!("{:.4} EUR", stats.total_ev)),
+    ]);
+    table.add_row(vec![
+        Cell::new("EV/EUR"),
+        Cell::new(format!("{:.4}", stats.total_ev / stats.total_cost)).fg(
+            if stats.total_ev >= stats.total_cost { Color::Green } else { Color::Red }
+        ),
+    ]);
+
+    println!("{table}");
+
+    // Probabilites par rang
+    println!("\n── Probabilites par rang ({} tickets) ──", n_tickets);
+    let mut tier_table = Table::new();
+    tier_table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Rang", "P(1 ticket)", "P({} tickets)", "Gain"]);
+
+    for (i, tier) in PRIZE_TIERS.iter().enumerate() {
+        let gain_str = if tier.is_parimutuel {
+            "variable".to_string()
+        } else {
+            format!("{:.0} EUR", tier.fixed_prize)
+        };
+        tier_table.add_row(vec![
+            Cell::new(tier.name),
+            Cell::new(format!("1/{:.0}", 1.0 / tier.probability)),
+            Cell::new(format!("{:.6}%", stats.tier_probabilities[i] * 100.0)),
+            Cell::new(gain_str),
+        ]);
+    }
+    println!("{tier_table}");
+}
+
+/// Affiche les résultats du grid search CV Oracle (top 10).
+pub fn display_oracle_grid_search(result: &GridSearchResult) {
+    println!("\n== Grid Search CV — Top 10 ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["#", "n_rff", "bandwidth", "lambda", "LL boules", "LL étoiles", "LL combiné"]);
+
+    let n_show = result.entries.len().min(10);
+    for (i, entry) in result.entries.iter().take(n_show).enumerate() {
+        let lambda_str = format!("{:.0e}", entry.ridge_lambda);
+        if i == 0 {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)).fg(Color::Green),
+                Cell::new(format!("{}", entry.n_rff)).fg(Color::Green),
+                Cell::new(format!("{:.1}", entry.bandwidth)).fg(Color::Green),
+                Cell::new(&lambda_str).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.mean_ball_ll)).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.mean_star_ll)).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.combined_ll)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)),
+                Cell::new(format!("{}", entry.n_rff)),
+                Cell::new(format!("{:.1}", entry.bandwidth)),
+                Cell::new(&lambda_str),
+                Cell::new(format!("{:.3}", entry.mean_ball_ll)),
+                Cell::new(format!("{:.3}", entry.mean_star_ll)),
+                Cell::new(format!("{:.3}", entry.combined_ll)),
+            ]);
+        }
+    }
+
+    println!("{table}");
+
+    // LL uniforme de référence
+    let uniform_ball_ll = 5.0 * (1.0 / 50.0f64).ln();
+    let uniform_star_ll = 2.0 * (1.0 / 12.0f64).ln();
+    let uniform_combined = (5.0 * uniform_ball_ll + 2.0 * uniform_star_ll) / 7.0;
+    println!(
+        "  Référence uniforme : LL boules={:.3}, LL étoiles={:.3}, combiné={:.3}",
+        uniform_ball_ll, uniform_star_ll, uniform_combined
+    );
+    let gain = result.best.combined_ll - uniform_combined;
+    println!("  Gain vs uniforme   : {:+.3}", gain);
+}
+
+/// Affiche les résultats du grid search CV v2 (top 10 + best per-pool).
+pub fn display_oracle_grid_search_v2(result: &GridSearchResultV2) {
+    println!("\n== Grid Search CV v2 — Top 10 Combined ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["#", "n_rff", "bandwidth", "lambda", "LL boules", "LL étoiles", "LL combiné"]);
+
+    let n_show = result.entries.len().min(10);
+    for (i, entry) in result.entries.iter().take(n_show).enumerate() {
+        let lambda_str = format!("{:.0e}", entry.ridge_lambda);
+        if i == 0 {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)).fg(Color::Green),
+                Cell::new(format!("{}", entry.n_rff)).fg(Color::Green),
+                Cell::new(format!("{:.1}", entry.bandwidth)).fg(Color::Green),
+                Cell::new(&lambda_str).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.mean_ball_ll)).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.mean_star_ll)).fg(Color::Green),
+                Cell::new(format!("{:.3}", entry.combined_ll)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)),
+                Cell::new(format!("{}", entry.n_rff)),
+                Cell::new(format!("{:.1}", entry.bandwidth)),
+                Cell::new(&lambda_str),
+                Cell::new(format!("{:.3}", entry.mean_ball_ll)),
+                Cell::new(format!("{:.3}", entry.mean_star_ll)),
+                Cell::new(format!("{:.3}", entry.combined_ll)),
+            ]);
+        }
+    }
+    println!("{table}");
+
+    // Best per-pool
+    println!("\n── Best per-pool ──");
+    println!(
+        "  Best Balls:    n_rff={}, bw={:.1}, lambda={:.0e}, LL={:.3}",
+        result.best_balls.n_rff, result.best_balls.bandwidth,
+        result.best_balls.ridge_lambda, result.best_balls.mean_ball_ll
+    );
+    println!(
+        "  Best Stars:    n_rff={}, bw={:.1}, lambda={:.0e}, LL={:.3}",
+        result.best_stars.n_rff, result.best_stars.bandwidth,
+        result.best_stars.ridge_lambda, result.best_stars.mean_star_ll
+    );
+
+    // Uniform reference
+    let uniform_ball_ll = 5.0 * (1.0 / 50.0f64).ln();
+    let uniform_star_ll = 2.0 * (1.0 / 12.0f64).ln();
+    let uniform_combined = (5.0 * uniform_ball_ll + 2.0 * uniform_star_ll) / 7.0;
+    println!(
+        "\n  Référence uniforme : LL boules={:.3}, LL étoiles={:.3}, combiné={:.3}",
+        uniform_ball_ll, uniform_star_ll, uniform_combined
+    );
+    println!(
+        "  Gain balls: {:+.3}, stars: {:+.3}, combined: {:+.3}",
+        result.best_balls.mean_ball_ll - uniform_ball_ll,
+        result.best_stars.mean_star_ll - uniform_star_ll,
+        result.best_combined.combined_ll - uniform_combined
+    );
 }

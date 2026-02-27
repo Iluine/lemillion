@@ -69,7 +69,7 @@ impl EnsembleCombiner {
     }
 }
 
-fn compute_spread(model_dists: &[(String, Vec<f64>)], size: usize) -> Vec<f64> {
+pub fn compute_spread(model_dists: &[(String, Vec<f64>)], size: usize) -> Vec<f64> {
     let n = model_dists.len() as f64;
     (0..size)
         .map(|j| {

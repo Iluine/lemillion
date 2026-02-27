@@ -4,3 +4,5 @@ pub mod features;
 pub mod ensemble;
 pub mod sampler;
 pub mod display;
+pub mod expected_value;
+pub mod coverage;

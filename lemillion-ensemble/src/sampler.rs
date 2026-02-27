@@ -7,6 +7,7 @@ use rand::prelude::Distribution;
 use rand::rngs::StdRng;
 
 use lemillion_db::models::{Draw, Pool, Suggestion};
+use crate::expected_value::{PopularityModel, anti_popularity, compute_ev};
 
 /// Filtre structurel rejetant les candidats implausibles avant scoring.
 pub struct StructuralFilter {
@@ -124,7 +125,18 @@ fn ball_distance(a: &[u8; 5], b: &[u8; 5]) -> usize {
     a.iter().filter(|x| !b.contains(x)).count()
 }
 
+/// Nombre d'étoiles dans `a` absentes de `b`.
+fn star_distance(a: &[u8; 2], b: &[u8; 2]) -> usize {
+    a.iter().filter(|x| !b.contains(x)).count()
+}
+
+/// Distance combinée balls+stars. Les étoiles comptent double (seulement 2 à choisir).
+fn combined_distance(a: &Suggestion, b: &Suggestion) -> usize {
+    ball_distance(&a.balls, &b.balls) + 2 * star_distance(&a.stars, &b.stars)
+}
+
 /// Sélection gloutonne : meilleur score + diversité minimum entre paires.
+/// Le seuil `min_ball_diff` s'applique à la distance combinée (balls + 2×stars).
 fn select_diverse(candidates: &[Suggestion], count: usize, min_ball_diff: usize) -> Vec<Suggestion> {
     // candidates doit déjà être trié par score décroissant
     let mut selected: Vec<Suggestion> = Vec::with_capacity(count);
@@ -133,7 +145,7 @@ fn select_diverse(candidates: &[Suggestion], count: usize, min_ball_diff: usize)
         if selected.len() >= count {
             break;
         }
-        let dominated = selected.iter().any(|s| ball_distance(&candidate.balls, &s.balls) < min_ball_diff);
+        let dominated = selected.iter().any(|s| combined_distance(candidate, s) < min_ball_diff);
         if !dominated {
             selected.push(candidate.clone());
         }
@@ -152,6 +164,19 @@ fn select_diverse(candidates: &[Suggestion], count: usize, min_ball_diff: usize)
     }
 
     selected
+}
+
+/// Applique un scaling température aux probabilités.
+/// T < 1 : concentration (sharpening), T > 1 : aplatissement vers l'uniforme.
+pub fn apply_temperature(probs: &[f64], temperature: f64) -> Vec<f64> {
+    let inv_t = 1.0 / temperature;
+    let scaled: Vec<f64> = probs.iter().map(|&p| p.powf(inv_t)).collect();
+    let total: f64 = scaled.iter().sum();
+    if total > 0.0 {
+        scaled.iter().map(|&s| s / total).collect()
+    } else {
+        vec![1.0 / probs.len() as f64; probs.len()]
+    }
 }
 
 /// Grille déterministe : top 5 boules + top 2 étoiles par probabilité ensemble.
@@ -459,13 +484,16 @@ pub fn generate_suggestions_joint(
         stars_arr.sort();
 
         let bayesian_score = ball_score * star_score;
+        let log_bayesian = bayesian_score.max(1e-15).ln();
         let coherence_score = coherence.score_balls(&balls_arr);
-        let score = bayesian_score * (0.5 + coherence_score);
+        // Score en log-espace pour le tri : log(bayesian) + coherence
+        // Cela évite que des bayesian_scores énormes noient la cohérence
+        let sort_score = log_bayesian + coherence_score;
 
         candidates.push(Suggestion {
             balls: balls_arr,
             stars: stars_arr,
-            score,
+            score: sort_score,
         });
     }
 
@@ -477,14 +505,21 @@ pub fn generate_suggestions_joint(
         candidates.extend(template_candidates);
     }
 
-    // Trier par score décroissant
+    // Trier par sort_score (log-espace) décroissant
     candidates.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    Ok(select_diverse(&candidates, count, min_ball_diff))
+    let mut selected = select_diverse(&candidates, count, min_ball_diff);
+
+    // Recalculer le score linéaire (bayésien) pour l'affichage
+    for s in &mut selected {
+        s.score = compute_bayesian_score(&s.balls, &s.stars, ball_probs, star_probs);
+    }
+
+    Ok(selected)
 }
 
 /// Génère des candidats par recombinaison de templates historiques.
@@ -579,17 +614,138 @@ fn generate_template_candidates(
             .map(|&s| star_probs[(s - 1) as usize] / uniform_star)
             .product();
         let bayesian_score = ball_score * star_score;
+        let log_bayesian = bayesian_score.max(1e-15).ln();
         let coherence_score = coherence.score_balls(&balls);
-        let score = bayesian_score * (0.5 + coherence_score);
+        let sort_score = log_bayesian + coherence_score;
 
         candidates.push(Suggestion {
             balls,
             stars,
-            score,
+            score: sort_score,
         });
     }
 
     candidates
+}
+
+/// Suggestion enrichie avec scores multiples pour le mode EV.
+#[derive(Debug, Clone)]
+pub struct ScoredSuggestion {
+    pub balls: [u8; 5],
+    pub stars: [u8; 2],
+    pub bayesian_score: f64,
+    pub anti_popularity: f64,
+    pub ev_per_euro: f64,
+}
+
+/// Genere des suggestions optimisees pour l'esperance de gain (anti-popularite).
+///
+/// Utilise les distributions ensemble avec T=2.0 (quasi-uniforme) pour la generation,
+/// puis score par anti-popularite au lieu de score bayesien.
+pub fn generate_suggestions_ev(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    draws: &[Draw],
+    count: usize,
+    seed: u64,
+    oversample: usize,
+    min_ball_diff: usize,
+    popularity: &PopularityModel,
+    jackpot: f64,
+) -> Result<Vec<ScoredSuggestion>> {
+    // Aplatir les distributions (T=2.0) pour generer quasi-uniformement
+    let flat_ball = apply_temperature(ball_probs, 2.0);
+    let flat_star = apply_temperature(star_probs, 2.0);
+
+    let filter = if !draws.is_empty() {
+        Some(StructuralFilter::from_history(draws, Pool::Balls))
+    } else {
+        None
+    };
+
+    let uniform_ball = 1.0 / flat_ball.len() as f64;
+    let uniform_star = 1.0 / flat_star.len() as f64;
+
+    let mut rng = StdRng::seed_from_u64(seed);
+    let n_candidates = count * oversample;
+    let max_attempts = n_candidates * 3;
+    let mut candidates: Vec<ScoredSuggestion> = Vec::with_capacity(n_candidates);
+    let mut attempts = 0;
+
+    while candidates.len() < n_candidates && attempts < max_attempts {
+        attempts += 1;
+        let (balls, ball_score) = sample_without_replacement(&flat_ball, 5, uniform_ball, &mut rng)?;
+        let (stars, star_score) = sample_without_replacement(&flat_star, 2, uniform_star, &mut rng)?;
+
+        let mut balls_arr = [0u8; 5];
+        for (i, &b) in balls.iter().enumerate() {
+            balls_arr[i] = b;
+        }
+        balls_arr.sort();
+
+        if let Some(ref f) = filter {
+            if !f.accept_balls(&balls_arr) {
+                continue;
+            }
+        }
+
+        let mut stars_arr = [0u8; 2];
+        for (i, &s) in stars.iter().enumerate() {
+            stars_arr[i] = s;
+        }
+        stars_arr.sort();
+
+        let bayesian_score = ball_score * star_score;
+        let ap = anti_popularity(&balls_arr, &stars_arr, popularity);
+        let ev = compute_ev(&balls_arr, &stars_arr, popularity, jackpot);
+
+        candidates.push(ScoredSuggestion {
+            balls: balls_arr,
+            stars: stars_arr,
+            bayesian_score,
+            anti_popularity: ap,
+            ev_per_euro: ev.ev_per_euro,
+        });
+    }
+
+    // Trier par anti-popularite decroissante (= grilles les moins jouees)
+    candidates.sort_by(|a, b| {
+        b.anti_popularity
+            .partial_cmp(&a.anti_popularity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Selection diversifiee via conversion temporaire en Suggestion
+    let as_suggestions: Vec<Suggestion> = candidates
+        .iter()
+        .map(|c| Suggestion {
+            balls: c.balls,
+            stars: c.stars,
+            score: c.anti_popularity,
+        })
+        .collect();
+
+    let diverse = select_diverse(&as_suggestions, count, min_ball_diff);
+
+    // Reconstruire les ScoredSuggestion correspondantes
+    let result: Vec<ScoredSuggestion> = diverse
+        .iter()
+        .map(|s| {
+            candidates
+                .iter()
+                .find(|c| c.balls == s.balls && c.stars == s.stars)
+                .cloned()
+                .unwrap_or_else(|| ScoredSuggestion {
+                    balls: s.balls,
+                    stars: s.stars,
+                    bayesian_score: s.score,
+                    anti_popularity: s.score,
+                    ev_per_euro: 0.0,
+                })
+        })
+        .collect();
+
+    Ok(result)
 }
 
 fn sample_without_replacement(
