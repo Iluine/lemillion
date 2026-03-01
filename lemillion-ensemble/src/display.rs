@@ -239,7 +239,11 @@ pub fn display_optimal_grid(grid: &Suggestion, consensus: f64) {
 pub fn display_diverse_grids(diverse: &DiverseGrids, ball_consensus: &[ConsensusEntry], star_consensus: &[ConsensusEntry]) {
     use crate::ensemble::consensus::consensus_score;
 
-    println!("\n== 3 Grilles Diversifiées (profils mod-4 distincts) ==\n");
+    let star_pairs_str: Vec<String> = diverse.star_pairs.iter()
+        .map(|p| format!("{}-{}", p[0], p[1]))
+        .collect();
+    println!("\n== 3 Grilles Diversifiées (profils mod-4 distincts, étoiles {} : {}) ==\n",
+        diverse.star_strategy, star_pairs_str.join(" | "));
 
     let mut table = Table::new();
     table

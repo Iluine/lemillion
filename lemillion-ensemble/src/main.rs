@@ -10,7 +10,8 @@ use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::EnsembleCombiner;
 use lemillion_ensemble::ensemble::calibration::{
-    EnsembleWeights, calibrate_model, compute_weights_with_params, load_weights, save_weights,
+    EnsembleWeights, calibrate_model, collect_detailed_ll, compute_weights_with_params,
+    detect_redundancy, load_weights, save_weights,
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
@@ -286,16 +287,56 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     // Afficher le graphique
     display::display_calibration_chart(&ball_calibrations, &windows);
 
+    // Collecter les detailed_ll pour le meta-predictor (boules uniquement)
+    println!("\nCollecte des LL détaillés pour le méta-apprentissage...");
+    let mut detailed_ll: Vec<(String, Vec<f64>)> = Vec::new();
+    for (model, ball_cal) in models.iter().zip(ball_calibrations.iter()) {
+        let strategy = model.sampling_strategy();
+        let lls = collect_detailed_ll(
+            model.as_ref(), &draws, ball_cal.best_window, Pool::Balls, strategy,
+        );
+        detailed_ll.push((model.name().to_string(), lls));
+    }
+
+    // Détection de redondance
+    let redundancies = detect_redundancy(&detailed_ll, 0.90);
+    if !redundancies.is_empty() {
+        println!("\n── Redondance détectée (corrélation LL > 0.90) ──");
+        for r in &redundancies {
+            let severity = if r.correlation > 0.95 { " [HALVING]" } else { "" };
+            println!("  {} <-> {} : {:.3}{}", r.model_a, r.model_b, r.correlation, severity);
+        }
+    }
+
     // Calculer et afficher les poids
     println!("\nTempérature : {:.2}", temperature);
-    let ball_weights = compute_weights_with_params(&ball_calibrations, Pool::Balls, temperature);
+    let mut ball_weights = compute_weights_with_params(&ball_calibrations, Pool::Balls, temperature);
     let star_weights = compute_weights_with_params(&star_calibrations, Pool::Stars, temperature);
+
+    // Halver le poids du modèle le plus faible pour les paires > 0.95
+    for r in &redundancies {
+        if r.correlation > 0.95 {
+            let w_a = ball_weights.iter().find(|(n, _)| *n == r.model_a).map(|(_, w)| *w).unwrap_or(0.0);
+            let w_b = ball_weights.iter().find(|(n, _)| *n == r.model_b).map(|(_, w)| *w).unwrap_or(0.0);
+            let weaker = if w_a <= w_b { &r.model_a } else { &r.model_b };
+            if let Some((_, w)) = ball_weights.iter_mut().find(|(n, _)| n == weaker) {
+                *w *= 0.5;
+            }
+        }
+    }
+    // Renormaliser les poids boules après halving
+    let total_bw: f64 = ball_weights.iter().map(|(_, w)| w).sum();
+    if total_bw > 0.0 {
+        for (_, w) in ball_weights.iter_mut() {
+            *w /= total_bw;
+        }
+    }
 
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
         calibrations: ball_calibrations.into_iter().chain(star_calibrations).collect(),
-        detailed_ll: Vec::new(),
+        detailed_ll,
     };
 
     display::display_weights(&ensemble_weights);
@@ -388,7 +429,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let models = all_models();
     let weights = load_weights(&PathBuf::from(calibration_path));
     let mut combiner = match weights {
-        Ok(w) => {
+        Ok(ref w) => {
             let ball_w: Vec<f64> = models.iter()
                 .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
                 .collect();
@@ -402,6 +443,36 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             EnsembleCombiner::new(models)
         }
     };
+
+    // MetaPredictor : ajuster les poids boules selon le régime courant
+    if let Ok(ref w) = weights
+        && !w.detailed_ll.is_empty()
+    {
+        use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+        let features = RegimeFeatures::from_draws(&draws);
+        if let Some(meta) = MetaPredictor::train(&draws, &w.detailed_ll, 1e-3) {
+            let adjustments = meta.weight_adjustments(&features);
+            let mut n_adjusted = 0;
+            for (name, adj) in &adjustments {
+                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                    && idx < combiner.ball_weights.len()
+                {
+                    combiner.ball_weights[idx] *= adj;
+                    n_adjusted += 1;
+                }
+            }
+            // Renormaliser
+            let total: f64 = combiner.ball_weights.iter().sum();
+            if total > 0.0 {
+                for w in combiner.ball_weights.iter_mut() {
+                    *w /= total;
+                }
+            }
+            println!("(MetaPredictor : {} poids boules ajustés pour le régime courant)", n_adjusted);
+            println!("  Régime: sum={:.2} spread={:.2} mod4_cos={:.2} entropy={:.2}",
+                features.sum_norm, features.spread_norm, features.mod4_cosine, features.recent_entropy);
+        }
+    }
 
     // Filtrer les top modèles si demandé
     if top_models > 0 {

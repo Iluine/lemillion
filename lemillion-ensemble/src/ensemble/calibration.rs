@@ -77,8 +77,9 @@ pub fn walk_forward_evaluate_with_strategy(
         return f64::NEG_INFINITY;
     }
 
-    // Limiter à ~100 points de test avec un stride pour la performance
-    let max_tests = 100;
+    // Limiter à ~500 points de test avec un stride pour la performance
+    // SE passe de ~0.2 nats (100 pts) à ~0.09 nats, rendant les skills de 0.01 détectables
+    let max_tests = 500;
     let stride = (max_t / max_tests).max(1);
 
     let mut total_ll = 0.0f64;
@@ -184,15 +185,21 @@ pub fn compute_weights_with_params(
 ) -> Vec<(String, f64)> {
     let uniform_ll = uniform_log_likelihood(pool);
 
-    // Poids = exp(skill / T)
+    // Poids = exp(skill / T) avec hard dropout pour skill <= 0
     // skill = best_ll - uniform_ll
+    // Hard dropout : les modèles au niveau ou sous l'uniforme (skill <= 0)
+    // reçoivent un poids de 0 — ils diluent ou dégradent le signal.
     // T < 1 concentre sur les meilleurs (ex: T=0.5 → ratios élevés au carré)
     // T > 1 aplatit vers l'uniforme
     let raw_weights: Vec<f64> = calibrations
         .iter()
         .map(|c| {
             let skill = c.best_ll - uniform_ll;
-            (skill / temperature).exp()
+            if skill <= 0.0 {
+                0.0 // Hard dropout : sous-uniforme ou uniforme
+            } else {
+                (skill / temperature).exp()
+            }
         })
         .collect();
 
@@ -339,7 +346,7 @@ pub fn collect_detailed_ll(
         return vec![];
     }
 
-    let max_tests = 100;
+    let max_tests = 500;
     let stride = (max_t / max_tests).max(1);
     let mut lls = Vec::new();
 
@@ -612,6 +619,8 @@ mod tests {
     #[test]
     fn test_temperature_sharpening_increases_ratio() {
         let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        // Utiliser deux modèles POSITIFS (au-dessus de l'uniforme) pour tester le sharpening,
+        // car les modèles sous-uniformes sont droppés (poids = 0) par le hard dropout.
         let calibrations = vec![
             ModelCalibration {
                 model_name: "Good".to_string(),
@@ -621,21 +630,21 @@ mod tests {
                 best_ll: uniform_ll + 2.0,
             },
             ModelCalibration {
-                model_name: "Bad".to_string(),
+                model_name: "Mediocre".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll - 2.0,
+                best_ll: uniform_ll + 0.5,
             },
         ];
-        // T=1: ratio = exp(4) ≈ 54.6
+        // T=1: ratio = exp(1.5) ≈ 4.5
         let w_t1 = compute_weights_with_params(&calibrations, Pool::Balls, 1.0);
         let ratio_t1 = w_t1[0].1 / w_t1[1].1;
-        // T=0.5 (default): ratio = exp(8) ≈ 2981 → concentration forte
+        // T=0.5 (default): ratio = exp(3) ≈ 20 → concentration forte
         let w_t05 = compute_weights_with_params(&calibrations, Pool::Balls, 0.5);
         let ratio_t05 = w_t05[0].1 / w_t05[1].1;
         assert!(ratio_t05 > ratio_t1, "T=0.5 should increase ratio: {} vs {}", ratio_t05, ratio_t1);
-        assert!(ratio_t05 > 1000.0, "T=0.5 ratio should be very large: {}", ratio_t05);
+        assert!(ratio_t05 > 10.0, "T=0.5 ratio should be significant: {}", ratio_t05);
     }
 
     #[test]
