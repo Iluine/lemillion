@@ -2,197 +2,149 @@
   "ball_weights": [
     [
       "Dirichlet",
-      0.008845424475364861
-    ],
-    [
-      "EWMA",
-      0.0019263893867525485
+      0.010631911827390072
     ],
     [
       "Logistic",
-      0.06698721287280508
+      0.062430823489623775
     ],
     [
       "RandomForest",
-      0.0651354666351484
+      0.0582610107948581
     ],
     [
       "Markov",
-      0.03382146625134598
-    ],
-    [
-      "Retard",
-      0.00001130846832914342
-    ],
-    [
-      "HotStreak",
-      4.597720986648745e-17
+      0.036350791326844635
     ],
     [
       "ESN",
-      0.05505344885577631
-    ],
-    [
-      "TakensKNN",
-      0.0011718284765637305
+      0.04579922635148165
     ],
     [
       "Spectral",
-      0.06675809409546647
+      0.06215701985291849
     ],
     [
       "CTW",
-      0.061496198842303895
-    ],
-    [
-      "NVAR",
-      1.5931602581076385e-6
-    ],
-    [
-      "NVAR-Memo",
-      0.000010900323746488064
+      0.058501404144331935
     ],
     [
       "BME",
-      0.06586759578611648
+      0.06311747129375561
     ],
     [
       "Transformer",
-      0.06675809409546647
+      0.06215701985291849
     ],
     [
       "TDA",
-      0.06675809409546647
-    ],
-    [
-      "Diffusion",
-      0.0006653654381537708
+      0.06215701985291849
     ],
     [
       "Physics",
-      0.05494713995134074
+      0.05323391882918487
     ],
     [
       "Mod4Trans",
-      0.06781612568078729
+      0.06335616668705307
+    ],
+    [
+      "Mod4Profile",
+      0.061055802447682
     ],
     [
       "TripletBoost",
-      0.06675809409546647
+      0.06215701985291849
     ],
     [
       "CondSummary",
-      0.06100523662248485
+      0.055352118053274384
     ],
     [
       "StresaSGD",
-      0.06154532913664571
+      0.06103556330143544
     ],
     [
       "StresaSMC",
-      0.05990149915874422
+      0.06008869218849225
     ],
     [
       "StresaChaos",
-      0.06675809409546647
+      0.06215701985291849
     ]
   ],
   "star_weights": [
     [
       "Dirichlet",
-      0.046080199178630044
-    ],
-    [
-      "EWMA",
-      0.03166933153656705
+      0.04545394861603495
     ],
     [
       "Logistic",
-      0.05393415012729702
+      0.05724470881020409
     ],
     [
       "RandomForest",
-      0.054379204597054205
+      0.055776203688629254
     ],
     [
       "Markov",
-      0.04704196233009972
-    ],
-    [
-      "Retard",
-      0.0028882325193896846
-    ],
-    [
-      "HotStreak",
-      0.00001238230134476369
+      0.049388520624656755
     ],
     [
       "ESN",
-      0.04371659695981642
-    ],
-    [
-      "TakensKNN",
-      0.02177958918523923
+      0.04731945928146119
     ],
     [
       "Spectral",
-      0.05384797126771253
+      0.05654912290317487
     ],
     [
       "CTW",
-      0.05291205222996806
-    ],
-    [
-      "NVAR",
-      0.010879343943191531
-    ],
-    [
-      "NVAR-Memo",
-      0.010155803351610815
+      0.05625944387418536
     ],
     [
       "BME",
-      0.05317093835289228
+      0.05688019438922218
     ],
     [
       "Transformer",
-      0.05384797126771253
+      0.05654912290317487
     ],
     [
       "TDA",
-      0.054453039892327325
-    ],
-    [
-      "Diffusion",
-      0.027158398443905125
+      0.05654912290317487
     ],
     [
       "Physics",
-      0.054743632017199444
+      0.05845334918421882
     ],
     [
       "Mod4Trans",
-      0.054023502223451814
+      0.05599603938052183
+    ],
+    [
+      "Mod4Profile",
+      0.0567562207707109
     ],
     [
       "TripletBoost",
-      0.05384797126771253
+      0.05654912290317487
     ],
     [
       "CondSummary",
-      0.05135139668881913
+      0.05109570091411038
     ],
     [
       "StresaSGD",
-      0.05603544343935303
+      0.06105990628444827
     ],
     [
       "StresaSMC",
-      0.05603544343935303
+      0.06105990628444827
     ],
     [
       "StresaChaos",
-      0.05603544343935303
+      0.06105990628444827
     ]
   ],
   "calibrations": [
@@ -203,106 +155,106 @@
           "model_name": "Dirichlet",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -21.421253394561447,
-          "n_tests": 612
+          "log_likelihood": -21.319423261883045,
+          "n_tests": 613
         },
         {
           "model_name": "Dirichlet",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -21.417890140128033,
-          "n_tests": 572
+          "log_likelihood": -21.218610453327752,
+          "n_tests": 573
         },
         {
           "model_name": "Dirichlet",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -20.81343528903177,
-          "n_tests": 602
+          "log_likelihood": -20.516703820773092,
+          "n_tests": 603
         },
         {
           "model_name": "Dirichlet",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -20.840523563288365,
-          "n_tests": 542
+          "log_likelihood": -20.710587551906816,
+          "n_tests": 543
         },
         {
           "model_name": "Dirichlet",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -20.779075324186685,
-          "n_tests": 582
+          "log_likelihood": -20.487421252906653,
+          "n_tests": 583
         },
         {
           "model_name": "Dirichlet",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -20.570702643588,
-          "n_tests": 482
+          "log_likelihood": -20.60466292596679,
+          "n_tests": 483
         },
         {
           "model_name": "Dirichlet",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -20.77955921918155,
-          "n_tests": 552
+          "log_likelihood": -20.49924451836785,
+          "n_tests": 553
         },
         {
           "model_name": "Dirichlet",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -20.68527539881183,
-          "n_tests": 392
+          "log_likelihood": -20.812871386982692,
+          "n_tests": 393
         },
         {
           "model_name": "Dirichlet",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -20.816777487173464,
-          "n_tests": 532
+          "log_likelihood": -20.443016893892835,
+          "n_tests": 533
         },
         {
           "model_name": "Dirichlet",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -20.775380427274488,
-          "n_tests": 332
+          "log_likelihood": -20.77842746702108,
+          "n_tests": 333
         },
         {
           "model_name": "Dirichlet",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -20.66184115929615,
-          "n_tests": 482
+          "log_likelihood": -20.62607005069575,
+          "n_tests": 483
         },
         {
           "model_name": "Dirichlet",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -20.61725232665274,
-          "n_tests": 182
+          "log_likelihood": -20.607785016728506,
+          "n_tests": 183
         },
         {
           "model_name": "Dirichlet",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -20.64763343045167,
-          "n_tests": 432
+          "log_likelihood": -20.652644997826098,
+          "n_tests": 433
         },
         {
           "model_name": "Dirichlet",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -20.584956895046126,
-          "n_tests": 32
+          "log_likelihood": -20.53343500763617,
+          "n_tests": 33
         },
         {
           "model_name": "Dirichlet",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -20.643143529841605,
-          "n_tests": 332
+          "log_likelihood": -20.72347373472012,
+          "n_tests": 333
         },
         {
           "model_name": "Dirichlet",
@@ -312,73 +264,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 50,
-      "best_sparse": true,
-      "best_ll": -20.570702643588
-    },
-    {
-      "model_name": "EWMA",
-      "results": [
-        {
-          "model_name": "EWMA",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -21.43497121097538,
-          "n_tests": 612
-        },
-        {
-          "model_name": "EWMA",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -21.538487274955884,
-          "n_tests": 602
-        },
-        {
-          "model_name": "EWMA",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -21.38534851213948,
-          "n_tests": 582
-        },
-        {
-          "model_name": "EWMA",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -21.351742879851837,
-          "n_tests": 552
-        },
-        {
-          "model_name": "EWMA",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -21.37749860874028,
-          "n_tests": 532
-        },
-        {
-          "model_name": "EWMA",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -21.33282906865942,
-          "n_tests": 482
-        },
-        {
-          "model_name": "EWMA",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -21.396037621348917,
-          "n_tests": 432
-        },
-        {
-          "model_name": "EWMA",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -21.365753584109655,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 150,
+      "best_window": 100,
       "best_sparse": false,
-      "best_ll": -21.33282906865942
+      "best_ll": -20.443016893892835
     },
     {
       "model_name": "Logistic",
@@ -387,62 +275,62 @@
           "model_name": "Logistic",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.55840192776798,
-          "n_tests": 612
+          "log_likelihood": -19.569112993824678,
+          "n_tests": 613
         },
         {
           "model_name": "Logistic",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.560159036628143,
-          "n_tests": 602
+          "log_likelihood": -19.565764479075973,
+          "n_tests": 603
         },
         {
           "model_name": "Logistic",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.563003490967926,
-          "n_tests": 582
+          "log_likelihood": -19.559580044195215,
+          "n_tests": 583
         },
         {
           "model_name": "Logistic",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.561478243826496,
-          "n_tests": 552
+          "log_likelihood": -19.55918135632379,
+          "n_tests": 553
         },
         {
           "model_name": "Logistic",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.56138106828601,
-          "n_tests": 532
+          "log_likelihood": -19.55791734821662,
+          "n_tests": 533
         },
         {
           "model_name": "Logistic",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.56063664274787,
-          "n_tests": 482
+          "log_likelihood": -19.559300737278797,
+          "n_tests": 483
         },
         {
           "model_name": "Logistic",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.561111809020176,
-          "n_tests": 432
+          "log_likelihood": -19.558681085255902,
+          "n_tests": 433
         },
         {
           "model_name": "Logistic",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.560938832197756,
-          "n_tests": 332
+          "log_likelihood": -19.55936450494156,
+          "n_tests": 333
         }
       ],
-      "best_window": 20,
+      "best_window": 100,
       "best_sparse": false,
-      "best_ll": -19.55840192776798
+      "best_ll": -19.55791734821662
     },
     {
       "model_name": "RandomForest",
@@ -451,62 +339,62 @@
           "model_name": "RandomForest",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.85162099315588,
-          "n_tests": 612
+          "log_likelihood": -19.975474921653042,
+          "n_tests": 613
         },
         {
           "model_name": "RandomForest",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.83580584161427,
-          "n_tests": 602
+          "log_likelihood": -19.924878139253043,
+          "n_tests": 603
         },
         {
           "model_name": "RandomForest",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.730916417865917,
-          "n_tests": 582
+          "log_likelihood": -19.685168911869273,
+          "n_tests": 583
         },
         {
           "model_name": "RandomForest",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.652463901477567,
-          "n_tests": 552
+          "log_likelihood": -19.647220111757466,
+          "n_tests": 553
         },
         {
           "model_name": "RandomForest",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.634124307817967,
-          "n_tests": 532
+          "log_likelihood": -19.610861428467206,
+          "n_tests": 533
         },
         {
           "model_name": "RandomForest",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.572418200410365,
-          "n_tests": 482
+          "log_likelihood": -19.592513206223934,
+          "n_tests": 483
         },
         {
           "model_name": "RandomForest",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.579894240833568,
-          "n_tests": 432
+          "log_likelihood": -19.59248035746182,
+          "n_tests": 433
         },
         {
           "model_name": "RandomForest",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.620362773803485,
-          "n_tests": 332
+          "log_likelihood": -19.61669368353441,
+          "n_tests": 333
         }
       ],
-      "best_window": 150,
+      "best_window": 200,
       "best_sparse": false,
-      "best_ll": -19.572418200410365
+      "best_ll": -19.59248035746182
     },
     {
       "model_name": "Markov",
@@ -515,190 +403,62 @@
           "model_name": "Markov",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -20.285750823069662,
-          "n_tests": 612
+          "log_likelihood": -20.30058127782326,
+          "n_tests": 613
         },
         {
           "model_name": "Markov",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -20.16668078381491,
-          "n_tests": 602
+          "log_likelihood": -20.02954426889548,
+          "n_tests": 603
         },
         {
           "model_name": "Markov",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -20.02522482831346,
-          "n_tests": 582
+          "log_likelihood": -19.88329503309886,
+          "n_tests": 583
         },
         {
           "model_name": "Markov",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.98670342610117,
-          "n_tests": 552
+          "log_likelihood": -19.86097628209101,
+          "n_tests": 553
         },
         {
           "model_name": "Markov",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -20.008581840328258,
-          "n_tests": 532
+          "log_likelihood": -19.845003192983704,
+          "n_tests": 533
         },
         {
           "model_name": "Markov",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.95681772939582,
-          "n_tests": 482
+          "log_likelihood": -19.82833892131647,
+          "n_tests": 483
         },
         {
           "model_name": "Markov",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.966096188230424,
-          "n_tests": 432
+          "log_likelihood": -19.833729390716552,
+          "n_tests": 433
         },
         {
           "model_name": "Markov",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.900104953486572,
-          "n_tests": 332
+          "log_likelihood": -20.026526339182062,
+          "n_tests": 333
         }
       ],
-      "best_window": 300,
+      "best_window": 150,
       "best_sparse": false,
-      "best_ll": -19.900104953486572
-    },
-    {
-      "model_name": "Retard",
-      "results": [
-        {
-          "model_name": "Retard",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -25.213997779158014,
-          "n_tests": 612
-        },
-        {
-          "model_name": "Retard",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -26.62452995868049,
-          "n_tests": 602
-        },
-        {
-          "model_name": "Retard",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -26.627858606617487,
-          "n_tests": 582
-        },
-        {
-          "model_name": "Retard",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -25.172057667096325,
-          "n_tests": 552
-        },
-        {
-          "model_name": "Retard",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -24.810350167714613,
-          "n_tests": 532
-        },
-        {
-          "model_name": "Retard",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -24.245144720348446,
-          "n_tests": 482
-        },
-        {
-          "model_name": "Retard",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -23.90175451416994,
-          "n_tests": 432
-        },
-        {
-          "model_name": "Retard",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -23.91850800659891,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 200,
-      "best_sparse": false,
-      "best_ll": -23.90175451416994
-    },
-    {
-      "model_name": "HotStreak",
-      "results": [
-        {
-          "model_name": "HotStreak",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -37.60751976718122,
-          "n_tests": 612
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -37.52683193687542,
-          "n_tests": 602
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -37.015968081471996,
-          "n_tests": 582
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -37.099701386053475,
-          "n_tests": 552
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -37.152669413872815,
-          "n_tests": 532
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -37.89228270580522,
-          "n_tests": 482
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -38.25383988377171,
-          "n_tests": 432
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -37.415260436561624,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 50,
-      "best_sparse": false,
-      "best_ll": -37.015968081471996
+      "best_ll": -19.82833892131647
     },
     {
       "model_name": "ESN",
@@ -707,126 +467,62 @@
           "model_name": "ESN",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.870549089214627,
-          "n_tests": 612
+          "log_likelihood": -19.845707587642885,
+          "n_tests": 613
         },
         {
           "model_name": "ESN",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.842708316038376,
-          "n_tests": 602
+          "log_likelihood": -19.75501861265398,
+          "n_tests": 603
         },
         {
           "model_name": "ESN",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.836258297098873,
-          "n_tests": 582
+          "log_likelihood": -19.83321739153536,
+          "n_tests": 583
         },
         {
           "model_name": "ESN",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.741136477918218,
-          "n_tests": 552
+          "log_likelihood": -19.85252248469124,
+          "n_tests": 553
         },
         {
           "model_name": "ESN",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.804962509301017,
-          "n_tests": 532
+          "log_likelihood": -19.7584638494667,
+          "n_tests": 533
         },
         {
           "model_name": "ESN",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.65650054667335,
-          "n_tests": 482
+          "log_likelihood": -19.712813308469467,
+          "n_tests": 483
         },
         {
           "model_name": "ESN",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.96524689566602,
-          "n_tests": 432
+          "log_likelihood": -19.884647289074593,
+          "n_tests": 433
         },
         {
           "model_name": "ESN",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -20.509654894245973,
-          "n_tests": 332
+          "log_likelihood": -20.367352700367245,
+          "n_tests": 333
         }
       ],
       "best_window": 150,
       "best_sparse": false,
-      "best_ll": -19.65650054667335
-    },
-    {
-      "model_name": "TakensKNN",
-      "results": [
-        {
-          "model_name": "TakensKNN",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -21.72672269676353,
-          "n_tests": 612
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -21.75623131362984,
-          "n_tests": 602
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -21.754245898682786,
-          "n_tests": 582
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -21.894587846622347,
-          "n_tests": 552
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -21.847610577266114,
-          "n_tests": 532
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -21.594066196233484,
-          "n_tests": 482
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -21.58137013733896,
-          "n_tests": 432
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -21.776102731246393,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 200,
-      "best_sparse": false,
-      "best_ll": -21.58137013733896
+      "best_ll": -19.712813308469467
     },
     {
       "model_name": "Spectral",
@@ -836,56 +532,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "Spectral",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -20.602023041247204,
-          "n_tests": 602
+          "log_likelihood": -20.394812685695786,
+          "n_tests": 603
         },
         {
           "model_name": "Spectral",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -20.10221101391546,
-          "n_tests": 582
+          "log_likelihood": -19.995681074228333,
+          "n_tests": 583
         },
         {
           "model_name": "Spectral",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.874110629167003,
-          "n_tests": 552
+          "log_likelihood": -19.745180953217854,
+          "n_tests": 553
         },
         {
           "model_name": "Spectral",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.821439913934896,
-          "n_tests": 532
+          "log_likelihood": -19.7129524190161,
+          "n_tests": 533
         },
         {
           "model_name": "Spectral",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.726764992620833,
-          "n_tests": 482
+          "log_likelihood": -19.64716734875251,
+          "n_tests": 483
         },
         {
           "model_name": "Spectral",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.66807486107081,
-          "n_tests": 432
+          "log_likelihood": -19.62904543700662,
+          "n_tests": 433
         },
         {
           "model_name": "Spectral",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.65879528482836,
-          "n_tests": 332
+          "log_likelihood": -19.629824339147987,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -899,106 +595,106 @@
           "model_name": "CTW",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -20.407314021532887,
-          "n_tests": 612
+          "log_likelihood": -20.468750953249327,
+          "n_tests": 613
         },
         {
           "model_name": "CTW",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -20.396413757311517,
-          "n_tests": 572
+          "log_likelihood": -20.262557659448174,
+          "n_tests": 573
         },
         {
           "model_name": "CTW",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -20.236554987466356,
-          "n_tests": 602
+          "log_likelihood": -20.134009814917217,
+          "n_tests": 603
         },
         {
           "model_name": "CTW",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -20.217465836803278,
-          "n_tests": 542
+          "log_likelihood": -20.122477656521355,
+          "n_tests": 543
         },
         {
           "model_name": "CTW",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.959619868679884,
-          "n_tests": 582
+          "log_likelihood": -19.886304019642875,
+          "n_tests": 583
         },
         {
           "model_name": "CTW",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.890257433864768,
-          "n_tests": 482
+          "log_likelihood": -19.95306225284087,
+          "n_tests": 483
         },
         {
           "model_name": "CTW",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.82984150522119,
-          "n_tests": 552
+          "log_likelihood": -19.752017034413264,
+          "n_tests": 553
         },
         {
           "model_name": "CTW",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.889560005196397,
-          "n_tests": 392
+          "log_likelihood": -19.82102590854388,
+          "n_tests": 393
         },
         {
           "model_name": "CTW",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.810343129960092,
-          "n_tests": 532
+          "log_likelihood": -19.71199842317961,
+          "n_tests": 533
         },
         {
           "model_name": "CTW",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.841910159052553,
-          "n_tests": 332
+          "log_likelihood": -19.715238495073226,
+          "n_tests": 333
         },
         {
           "model_name": "CTW",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.721392163954185,
-          "n_tests": 482
+          "log_likelihood": -19.63756952333609,
+          "n_tests": 483
         },
         {
           "model_name": "CTW",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.70992436445371,
-          "n_tests": 182
+          "log_likelihood": -19.70593660959328,
+          "n_tests": 183
         },
         {
           "model_name": "CTW",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.67574083856527,
-          "n_tests": 432
+          "log_likelihood": -19.64908039477572,
+          "n_tests": 433
         },
         {
           "model_name": "CTW",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -19.601165119303722,
-          "n_tests": 32
+          "log_likelihood": -19.590421529805194,
+          "n_tests": 33
         },
         {
           "model_name": "CTW",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.66001395000496,
-          "n_tests": 332
+          "log_likelihood": -19.596664308637173,
+          "n_tests": 333
         },
         {
           "model_name": "CTW",
@@ -1010,135 +706,7 @@
       ],
       "best_window": 200,
       "best_sparse": true,
-      "best_ll": -19.601165119303722
-    },
-    {
-      "model_name": "NVAR",
-      "results": [
-        {
-          "model_name": "NVAR",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -26.145221078972064,
-          "n_tests": 612
-        },
-        {
-          "model_name": "NVAR",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -25.178182629924308,
-          "n_tests": 602
-        },
-        {
-          "model_name": "NVAR",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -25.460428724532477,
-          "n_tests": 582
-        },
-        {
-          "model_name": "NVAR",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -25.43974796337255,
-          "n_tests": 552
-        },
-        {
-          "model_name": "NVAR",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -25.704018226911614,
-          "n_tests": 532
-        },
-        {
-          "model_name": "NVAR",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -26.62386057742228,
-          "n_tests": 482
-        },
-        {
-          "model_name": "NVAR",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -25.428366151029362,
-          "n_tests": 432
-        },
-        {
-          "model_name": "NVAR",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -24.881670627866573,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 300,
-      "best_sparse": false,
-      "best_ll": -24.881670627866573
-    },
-    {
-      "model_name": "NVAR-Memo",
-      "results": [
-        {
-          "model_name": "NVAR-Memo",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -24.419871864391848,
-          "n_tests": 612
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -23.9201341963715,
-          "n_tests": 602
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -25.110560327604777,
-          "n_tests": 582
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -25.2768202513085,
-          "n_tests": 552
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -25.027507092235606,
-          "n_tests": 532
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -26.26815382815511,
-          "n_tests": 482
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -26.30400205388115,
-          "n_tests": 432
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -24.117351106673862,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 30,
-      "best_sparse": false,
-      "best_ll": -23.9201341963715
+      "best_ll": -19.590421529805194
     },
     {
       "model_name": "BME",
@@ -1147,62 +715,62 @@
           "model_name": "BME",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.57344367323898,
-          "n_tests": 612
+          "log_likelihood": -19.56650145434861,
+          "n_tests": 613
         },
         {
           "model_name": "BME",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.578470768791487,
-          "n_tests": 602
+          "log_likelihood": -19.554246102553645,
+          "n_tests": 603
         },
         {
           "model_name": "BME",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.585043222713704,
-          "n_tests": 582
+          "log_likelihood": -19.56757304283051,
+          "n_tests": 583
         },
         {
           "model_name": "BME",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.578926781883137,
-          "n_tests": 552
+          "log_likelihood": -19.56398741515233,
+          "n_tests": 553
         },
         {
           "model_name": "BME",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.582269386992326,
-          "n_tests": 532
+          "log_likelihood": -19.561151870798906,
+          "n_tests": 533
         },
         {
           "model_name": "BME",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.573131694556132,
-          "n_tests": 482
+          "log_likelihood": -19.556268759453943,
+          "n_tests": 483
         },
         {
           "model_name": "BME",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.572986477997933,
-          "n_tests": 432
+          "log_likelihood": -19.55244810108912,
+          "n_tests": 433
         },
         {
           "model_name": "BME",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.566829500728428,
-          "n_tests": 332
+          "log_likelihood": -19.561881447129117,
+          "n_tests": 333
         }
       ],
-      "best_window": 300,
+      "best_window": 200,
       "best_sparse": false,
-      "best_ll": -19.566829500728428
+      "best_ll": -19.55244810108912
     },
     {
       "model_name": "Transformer",
@@ -1212,56 +780,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "Transformer",
           "window": 30,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 602
+          "n_tests": 603
         },
         {
           "model_name": "Transformer",
           "window": 50,
           "sparse": false,
           "log_likelihood": -19.560115027140718,
-          "n_tests": 582
+          "n_tests": 583
         },
         {
           "model_name": "Transformer",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -22.798347009250882,
-          "n_tests": 552
+          "log_likelihood": -23.125107752271813,
+          "n_tests": 553
         },
         {
           "model_name": "Transformer",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -22.447800882403246,
-          "n_tests": 532
+          "log_likelihood": -22.334486632581854,
+          "n_tests": 533
         },
         {
           "model_name": "Transformer",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -21.30455623793452,
-          "n_tests": 482
+          "log_likelihood": -21.73242792516747,
+          "n_tests": 483
         },
         {
           "model_name": "Transformer",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -21.036703701778652,
-          "n_tests": 432
+          "log_likelihood": -21.494990457899597,
+          "n_tests": 433
         },
         {
           "model_name": "Transformer",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -21.686848596914068,
-          "n_tests": 332
+          "log_likelihood": -21.15567056787878,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -1276,105 +844,105 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "TDA",
           "window": 20,
           "sparse": true,
           "log_likelihood": -19.560115027140714,
-          "n_tests": 572
+          "n_tests": 573
         },
         {
           "model_name": "TDA",
           "window": 30,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 602
+          "n_tests": 603
         },
         {
           "model_name": "TDA",
           "window": 30,
           "sparse": true,
           "log_likelihood": -19.560115027140704,
-          "n_tests": 542
+          "n_tests": 543
         },
         {
           "model_name": "TDA",
           "window": 50,
           "sparse": false,
           "log_likelihood": -19.560115027140718,
-          "n_tests": 582
+          "n_tests": 583
         },
         {
           "model_name": "TDA",
           "window": 50,
           "sparse": true,
           "log_likelihood": -19.560115027140725,
-          "n_tests": 482
+          "n_tests": 483
         },
         {
           "model_name": "TDA",
           "window": 80,
           "sparse": false,
           "log_likelihood": -19.560115027140707,
-          "n_tests": 552
+          "n_tests": 553
         },
         {
           "model_name": "TDA",
           "window": 80,
           "sparse": true,
           "log_likelihood": -19.56011502714074,
-          "n_tests": 392
+          "n_tests": 393
         },
         {
           "model_name": "TDA",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.84436021655446,
-          "n_tests": 532
+          "log_likelihood": -19.747539978939017,
+          "n_tests": 533
         },
         {
           "model_name": "TDA",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.888443927809085,
-          "n_tests": 332
+          "log_likelihood": -19.84630631334327,
+          "n_tests": 333
         },
         {
           "model_name": "TDA",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.80367596534206,
-          "n_tests": 482
+          "log_likelihood": -19.7492088386098,
+          "n_tests": 483
         },
         {
           "model_name": "TDA",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.80449221902289,
-          "n_tests": 182
+          "log_likelihood": -19.79930322355566,
+          "n_tests": 183
         },
         {
           "model_name": "TDA",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.81620208688678,
-          "n_tests": 432
+          "log_likelihood": -19.765031057574134,
+          "n_tests": 433
         },
         {
           "model_name": "TDA",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -19.81891786175133,
-          "n_tests": 32
+          "log_likelihood": -19.789705382562484,
+          "n_tests": 33
         },
         {
           "model_name": "TDA",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.762426420161074,
-          "n_tests": 332
+          "log_likelihood": -19.893170326097522,
+          "n_tests": 333
         },
         {
           "model_name": "TDA",
@@ -1389,162 +957,98 @@
       "best_ll": -19.560115027140696
     },
     {
-      "model_name": "Diffusion",
-      "results": [
-        {
-          "model_name": "Diffusion",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -21.874774940772433,
-          "n_tests": 612
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -21.864362231136212,
-          "n_tests": 602
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -21.97508727922017,
-          "n_tests": 582
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -22.17837755011665,
-          "n_tests": 552
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -22.52497732368461,
-          "n_tests": 532
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -22.73857319099332,
-          "n_tests": 482
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -23.57118971432904,
-          "n_tests": 432
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -25.662187249324205,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 30,
-      "best_sparse": false,
-      "best_ll": -21.864362231136212
-    },
-    {
       "model_name": "Physics",
       "results": [
         {
           "model_name": "Physics",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.685414229041193,
-          "n_tests": 612
+          "log_likelihood": -19.66547171963689,
+          "n_tests": 613
         },
         {
           "model_name": "Physics",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -19.690292864185786,
-          "n_tests": 552
+          "log_likelihood": -19.64194839717064,
+          "n_tests": 553
         },
         {
           "model_name": "Physics",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.68402566378378,
-          "n_tests": 602
+          "log_likelihood": -19.66577047828393,
+          "n_tests": 603
         },
         {
           "model_name": "Physics",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -19.694391084225327,
-          "n_tests": 512
+          "log_likelihood": -19.637599025432632,
+          "n_tests": 513
         },
         {
           "model_name": "Physics",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.66286955331577,
-          "n_tests": 582
+          "log_likelihood": -19.655361714945556,
+          "n_tests": 583
         },
         {
           "model_name": "Physics",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.690965297756243,
-          "n_tests": 432
+          "log_likelihood": -19.714307554757728,
+          "n_tests": 433
         },
         {
           "model_name": "Physics",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.668127415263363,
-          "n_tests": 552
+          "log_likelihood": -19.654818664353822,
+          "n_tests": 553
         },
         {
           "model_name": "Physics",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.708002991770403,
-          "n_tests": 312
+          "log_likelihood": -19.67547281245031,
+          "n_tests": 313
         },
         {
           "model_name": "Physics",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.678432849270163,
-          "n_tests": 532
+          "log_likelihood": -19.649891693749836,
+          "n_tests": 533
         },
         {
           "model_name": "Physics",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.680936344373517,
-          "n_tests": 232
+          "log_likelihood": -19.665389014722287,
+          "n_tests": 233
         },
         {
           "model_name": "Physics",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.657466986386865,
-          "n_tests": 482
+          "log_likelihood": -19.66183363565471,
+          "n_tests": 483
         },
         {
           "model_name": "Physics",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.824360436629135,
-          "n_tests": 32
+          "log_likelihood": -19.787561532083178,
+          "n_tests": 33
         },
         {
           "model_name": "Physics",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.66929202727842,
-          "n_tests": 432
+          "log_likelihood": -19.673927363001845,
+          "n_tests": 433
         },
         {
           "model_name": "Physics",
@@ -1557,8 +1061,8 @@
           "model_name": "Physics",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.668887759496485,
-          "n_tests": 332
+          "log_likelihood": -19.74909154517344,
+          "n_tests": 333
         },
         {
           "model_name": "Physics",
@@ -1568,9 +1072,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 150,
-      "best_sparse": false,
-      "best_ll": -19.657466986386865
+      "best_window": 30,
+      "best_sparse": true,
+      "best_ll": -19.637599025432632
     },
     {
       "model_name": "Mod4Trans",
@@ -1579,106 +1083,106 @@
           "model_name": "Mod4Trans",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.717069253050447,
-          "n_tests": 612
+          "log_likelihood": -19.67036137929569,
+          "n_tests": 613
         },
         {
           "model_name": "Mod4Trans",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -19.67659287344379,
-          "n_tests": 572
+          "log_likelihood": -19.610213333946703,
+          "n_tests": 573
         },
         {
           "model_name": "Mod4Trans",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.685100946130927,
-          "n_tests": 602
+          "log_likelihood": -19.595176703666013,
+          "n_tests": 603
         },
         {
           "model_name": "Mod4Trans",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -19.70955248419312,
-          "n_tests": 542
+          "log_likelihood": -19.6567114120228,
+          "n_tests": 543
         },
         {
           "model_name": "Mod4Trans",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.655387046802378,
-          "n_tests": 582
+          "log_likelihood": -19.591444709838637,
+          "n_tests": 583
         },
         {
           "model_name": "Mod4Trans",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.65452053835447,
-          "n_tests": 482
+          "log_likelihood": -19.654128678119623,
+          "n_tests": 483
         },
         {
           "model_name": "Mod4Trans",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.62691228944322,
-          "n_tests": 552
+          "log_likelihood": -19.563727228707577,
+          "n_tests": 553
         },
         {
           "model_name": "Mod4Trans",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.659654029278684,
-          "n_tests": 392
+          "log_likelihood": -19.612233584314964,
+          "n_tests": 393
         },
         {
           "model_name": "Mod4Trans",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.62587150995395,
-          "n_tests": 532
+          "log_likelihood": -19.572181199227934,
+          "n_tests": 533
         },
         {
           "model_name": "Mod4Trans",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.662821957391323,
-          "n_tests": 332
+          "log_likelihood": -19.57196190170629,
+          "n_tests": 333
         },
         {
           "model_name": "Mod4Trans",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.6018732924936,
-          "n_tests": 482
+          "log_likelihood": -19.56507708377117,
+          "n_tests": 483
         },
         {
           "model_name": "Mod4Trans",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.593908460723362,
-          "n_tests": 182
+          "log_likelihood": -19.592439075513933,
+          "n_tests": 183
         },
         {
           "model_name": "Mod4Trans",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.585036099322764,
-          "n_tests": 432
+          "log_likelihood": -19.565639714244565,
+          "n_tests": 433
         },
         {
           "model_name": "Mod4Trans",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -19.55225279775079,
-          "n_tests": 32
+          "log_likelihood": -19.550560785435707,
+          "n_tests": 33
         },
         {
           "model_name": "Mod4Trans",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.58900622456175,
-          "n_tests": 332
+          "log_likelihood": -19.576872292641802,
+          "n_tests": 333
         },
         {
           "model_name": "Mod4Trans",
@@ -1690,7 +1194,127 @@
       ],
       "best_window": 200,
       "best_sparse": true,
-      "best_ll": -19.55225279775079
+      "best_ll": -19.550560785435707
+    },
+    {
+      "model_name": "Mod4Profile",
+      "results": [
+        {
+          "model_name": "Mod4Profile",
+          "window": 20,
+          "sparse": false,
+          "log_likelihood": -19.734859258154156,
+          "n_tests": 613
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 20,
+          "sparse": true,
+          "log_likelihood": -19.636029145328756,
+          "n_tests": 573
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 30,
+          "sparse": false,
+          "log_likelihood": -19.642735145339238,
+          "n_tests": 603
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 30,
+          "sparse": true,
+          "log_likelihood": -19.699361315143427,
+          "n_tests": 543
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 50,
+          "sparse": false,
+          "log_likelihood": -19.614034643102805,
+          "n_tests": 583
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 50,
+          "sparse": true,
+          "log_likelihood": -19.681974218564196,
+          "n_tests": 483
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 80,
+          "sparse": false,
+          "log_likelihood": -19.57662486729294,
+          "n_tests": 553
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 80,
+          "sparse": true,
+          "log_likelihood": -19.63994005454281,
+          "n_tests": 393
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 100,
+          "sparse": false,
+          "log_likelihood": -19.59116721852674,
+          "n_tests": 533
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 100,
+          "sparse": true,
+          "log_likelihood": -19.58826121073506,
+          "n_tests": 333
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 150,
+          "sparse": false,
+          "log_likelihood": -19.57711192981536,
+          "n_tests": 483
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 150,
+          "sparse": true,
+          "log_likelihood": -19.597891327689315,
+          "n_tests": 183
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 200,
+          "sparse": false,
+          "log_likelihood": -19.56905278789949,
+          "n_tests": 433
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 200,
+          "sparse": true,
+          "log_likelihood": -19.572755878002532,
+          "n_tests": 33
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 300,
+          "sparse": false,
+          "log_likelihood": -19.6001759711618,
+          "n_tests": 333
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 300,
+          "sparse": true,
+          "log_likelihood": null,
+          "n_tests": 0
+        }
+      ],
+      "best_window": 200,
+      "best_sparse": false,
+      "best_ll": -19.56905278789949
     },
     {
       "model_name": "TripletBoost",
@@ -1700,56 +1324,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "TripletBoost",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -21.986870053486015,
-          "n_tests": 602
+          "log_likelihood": -22.019328329839194,
+          "n_tests": 603
         },
         {
           "model_name": "TripletBoost",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -21.916626157542527,
-          "n_tests": 582
+          "log_likelihood": -22.217781931090062,
+          "n_tests": 583
         },
         {
           "model_name": "TripletBoost",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -21.907836946920312,
-          "n_tests": 552
+          "log_likelihood": -22.246239379985578,
+          "n_tests": 553
         },
         {
           "model_name": "TripletBoost",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -21.987816516584598,
-          "n_tests": 532
+          "log_likelihood": -22.274650687757596,
+          "n_tests": 533
         },
         {
           "model_name": "TripletBoost",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -21.993788911069654,
-          "n_tests": 482
+          "log_likelihood": -22.061809442815264,
+          "n_tests": 483
         },
         {
           "model_name": "TripletBoost",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -22.035437039744323,
-          "n_tests": 432
+          "log_likelihood": -22.116945431833447,
+          "n_tests": 433
         },
         {
           "model_name": "TripletBoost",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -22.13997781162617,
-          "n_tests": 332
+          "log_likelihood": -22.18296274264216,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -1763,62 +1387,62 @@
           "model_name": "CondSummary",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.98736774456912,
-          "n_tests": 612
+          "log_likelihood": -19.930316447112368,
+          "n_tests": 613
         },
         {
           "model_name": "CondSummary",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.847213614224952,
-          "n_tests": 602
+          "log_likelihood": -19.739342189062494,
+          "n_tests": 603
         },
         {
           "model_name": "CondSummary",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.68749807693836,
-          "n_tests": 582
+          "log_likelihood": -19.63286319163667,
+          "n_tests": 583
         },
         {
           "model_name": "CondSummary",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.664296120855003,
-          "n_tests": 552
+          "log_likelihood": -19.619830780807792,
+          "n_tests": 553
         },
         {
           "model_name": "CondSummary",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.605172948654285,
-          "n_tests": 532
+          "log_likelihood": -19.61808944552985,
+          "n_tests": 533
         },
         {
           "model_name": "CondSummary",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.639117558149394,
-          "n_tests": 482
+          "log_likelihood": -19.632907671149887,
+          "n_tests": 483
         },
         {
           "model_name": "CondSummary",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.64013516837531,
-          "n_tests": 432
+          "log_likelihood": -19.630588870313005,
+          "n_tests": 433
         },
         {
           "model_name": "CondSummary",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.61968533799949,
-          "n_tests": 332
+          "log_likelihood": -19.701992531953827,
+          "n_tests": 333
         }
       ],
       "best_window": 100,
       "best_sparse": false,
-      "best_ll": -19.605172948654285
+      "best_ll": -19.61808944552985
     },
     {
       "model_name": "StresaSGD",
@@ -1827,92 +1451,92 @@
           "model_name": "StresaSGD",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.783406094656264,
-          "n_tests": 612
+          "log_likelihood": -19.738786243635875,
+          "n_tests": 613
         },
         {
           "model_name": "StresaSGD",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -19.786320578017232,
-          "n_tests": 552
+          "log_likelihood": -19.710875260736984,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSGD",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.75760258755817,
-          "n_tests": 602
+          "log_likelihood": -19.649097198963958,
+          "n_tests": 603
         },
         {
           "model_name": "StresaSGD",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -19.77279115925306,
-          "n_tests": 512
+          "log_likelihood": -19.71373254454836,
+          "n_tests": 513
         },
         {
           "model_name": "StresaSGD",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.70730013434158,
-          "n_tests": 582
+          "log_likelihood": -19.627391756144114,
+          "n_tests": 583
         },
         {
           "model_name": "StresaSGD",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.701002336149713,
-          "n_tests": 432
+          "log_likelihood": -19.718836904549185,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSGD",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.656552929446423,
-          "n_tests": 552
+          "log_likelihood": -19.589314661058655,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSGD",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.687953648479848,
-          "n_tests": 312
+          "log_likelihood": -19.657902918615864,
+          "n_tests": 313
         },
         {
           "model_name": "StresaSGD",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.655984952900067,
-          "n_tests": 532
+          "log_likelihood": -19.596795611388725,
+          "n_tests": 533
         },
         {
           "model_name": "StresaSGD",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.639108160540083,
-          "n_tests": 232
+          "log_likelihood": -19.61844543524193,
+          "n_tests": 233
         },
         {
           "model_name": "StresaSGD",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.623682197235393,
-          "n_tests": 482
+          "log_likelihood": -19.571355072083378,
+          "n_tests": 483
         },
         {
           "model_name": "StresaSGD",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.616482536555363,
-          "n_tests": 32
+          "log_likelihood": -19.602141187541452,
+          "n_tests": 33
         },
         {
           "model_name": "StresaSGD",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.600765820808654,
-          "n_tests": 432
+          "log_likelihood": -19.56921855839692,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSGD",
@@ -1925,8 +1549,8 @@
           "model_name": "StresaSGD",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.603209209919505,
-          "n_tests": 332
+          "log_likelihood": -19.588828248284038,
+          "n_tests": 333
         },
         {
           "model_name": "StresaSGD",
@@ -1938,7 +1562,7 @@
       ],
       "best_window": 200,
       "best_sparse": false,
-      "best_ll": -19.600765820808654
+      "best_ll": -19.56921855839692
     },
     {
       "model_name": "StresaSMC",
@@ -1947,92 +1571,92 @@
           "model_name": "StresaSMC",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -19.84203805485134,
-          "n_tests": 612
+          "log_likelihood": -19.780843401989458,
+          "n_tests": 613
         },
         {
           "model_name": "StresaSMC",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -19.85574835464925,
-          "n_tests": 552
+          "log_likelihood": -19.759003711845377,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSMC",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.812232746039825,
-          "n_tests": 602
+          "log_likelihood": -19.681812409812704,
+          "n_tests": 603
         },
         {
           "model_name": "StresaSMC",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -19.82995227324872,
-          "n_tests": 512
+          "log_likelihood": -19.757220377233274,
+          "n_tests": 513
         },
         {
           "model_name": "StresaSMC",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.748258111600858,
-          "n_tests": 582
+          "log_likelihood": -19.659999837234082,
+          "n_tests": 583
         },
         {
           "model_name": "StresaSMC",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.73819074135103,
-          "n_tests": 432
+          "log_likelihood": -19.760145188478187,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSMC",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.685399799640134,
-          "n_tests": 552
+          "log_likelihood": -19.606907363714484,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSMC",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.71904869760226,
-          "n_tests": 312
+          "log_likelihood": -19.685488726250032,
+          "n_tests": 313
         },
         {
           "model_name": "StresaSMC",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.682370003041836,
-          "n_tests": 532
+          "log_likelihood": -19.614233559121775,
+          "n_tests": 533
         },
         {
           "model_name": "StresaSMC",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.659587161381154,
-          "n_tests": 232
+          "log_likelihood": -19.637559142460663,
+          "n_tests": 233
         },
         {
           "model_name": "StresaSMC",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.64259637651561,
-          "n_tests": 482
+          "log_likelihood": -19.581410756194547,
+          "n_tests": 483
         },
         {
           "model_name": "StresaSMC",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.633886269966347,
-          "n_tests": 32
+          "log_likelihood": -19.617675663783793,
+          "n_tests": 33
         },
         {
           "model_name": "StresaSMC",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.614430681357476,
-          "n_tests": 432
+          "log_likelihood": -19.577036071065255,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSMC",
@@ -2045,8 +1669,8 @@
           "model_name": "StresaSMC",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.61430203578372,
-          "n_tests": 332
+          "log_likelihood": -19.59736458283789,
+          "n_tests": 333
         },
         {
           "model_name": "StresaSMC",
@@ -2056,9 +1680,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 300,
+      "best_window": 200,
       "best_sparse": false,
-      "best_ll": -19.61430203578372
+      "best_ll": -19.577036071065255
     },
     {
       "model_name": "StresaChaos",
@@ -2068,91 +1692,91 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -19.560115027140696,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "StresaChaos",
           "window": 20,
           "sparse": true,
           "log_likelihood": -19.560115027140707,
-          "n_tests": 552
+          "n_tests": 553
         },
         {
           "model_name": "StresaChaos",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -19.882413775581238,
-          "n_tests": 602
+          "log_likelihood": -19.734604803730633,
+          "n_tests": 603
         },
         {
           "model_name": "StresaChaos",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -19.91097668901731,
-          "n_tests": 512
+          "log_likelihood": -19.819185976404576,
+          "n_tests": 513
         },
         {
           "model_name": "StresaChaos",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -19.794717858437746,
-          "n_tests": 582
+          "log_likelihood": -19.69767885014656,
+          "n_tests": 583
         },
         {
           "model_name": "StresaChaos",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -19.782939981515966,
-          "n_tests": 432
+          "log_likelihood": -19.811627862237057,
+          "n_tests": 433
         },
         {
           "model_name": "StresaChaos",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -19.713855758724527,
-          "n_tests": 552
+          "log_likelihood": -19.628032526838634,
+          "n_tests": 553
         },
         {
           "model_name": "StresaChaos",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -19.751401262660195,
-          "n_tests": 312
+          "log_likelihood": -19.71717034578421,
+          "n_tests": 313
         },
         {
           "model_name": "StresaChaos",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -19.707999279751164,
-          "n_tests": 532
+          "log_likelihood": -19.631241831638864,
+          "n_tests": 533
         },
         {
           "model_name": "StresaChaos",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -19.681798351340305,
-          "n_tests": 232
+          "log_likelihood": -19.659934208609606,
+          "n_tests": 233
         },
         {
           "model_name": "StresaChaos",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -19.66081689763988,
-          "n_tests": 482
+          "log_likelihood": -19.590896144271067,
+          "n_tests": 483
         },
         {
           "model_name": "StresaChaos",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -19.6555428845927,
-          "n_tests": 32
+          "log_likelihood": -19.637471264804518,
+          "n_tests": 33
         },
         {
           "model_name": "StresaChaos",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -19.6276907266766,
-          "n_tests": 432
+          "log_likelihood": -19.58488916503007,
+          "n_tests": 433
         },
         {
           "model_name": "StresaChaos",
@@ -2165,8 +1789,8 @@
           "model_name": "StresaChaos",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -19.62232643790824,
-          "n_tests": 332
+          "log_likelihood": -19.60395976180077,
+          "n_tests": 333
         },
         {
           "model_name": "StresaChaos",
@@ -2187,106 +1811,106 @@
           "model_name": "Dirichlet",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.209118892017602,
-          "n_tests": 612
+          "log_likelihood": -5.2241596932962295,
+          "n_tests": 613
         },
         {
           "model_name": "Dirichlet",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -5.274744994781096,
-          "n_tests": 572
+          "log_likelihood": -5.202779342182412,
+          "n_tests": 573
         },
         {
           "model_name": "Dirichlet",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.061852848503466,
-          "n_tests": 602
+          "log_likelihood": -5.182367274736508,
+          "n_tests": 603
         },
         {
           "model_name": "Dirichlet",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -5.127646327937118,
-          "n_tests": 542
+          "log_likelihood": -5.101541399667998,
+          "n_tests": 543
         },
         {
           "model_name": "Dirichlet",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.261822245951858,
-          "n_tests": 582
+          "log_likelihood": -5.14321292732467,
+          "n_tests": 583
         },
         {
           "model_name": "Dirichlet",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -5.150097081604831,
-          "n_tests": 482
+          "log_likelihood": -5.133173673410926,
+          "n_tests": 483
         },
         {
           "model_name": "Dirichlet",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.260988828409068,
-          "n_tests": 552
+          "log_likelihood": -5.14204823603863,
+          "n_tests": 553
         },
         {
           "model_name": "Dirichlet",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -5.047703994723871,
-          "n_tests": 392
+          "log_likelihood": -5.202718177192598,
+          "n_tests": 393
         },
         {
           "model_name": "Dirichlet",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.23230810952026,
-          "n_tests": 532
+          "log_likelihood": -5.138877850588495,
+          "n_tests": 533
         },
         {
           "model_name": "Dirichlet",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -5.061234603707509,
-          "n_tests": 332
+          "log_likelihood": -5.184049659655471,
+          "n_tests": 333
         },
         {
           "model_name": "Dirichlet",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.1255283673429,
-          "n_tests": 482
+          "log_likelihood": -5.160678235138315,
+          "n_tests": 483
         },
         {
           "model_name": "Dirichlet",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -5.083978093607263,
-          "n_tests": 182
+          "log_likelihood": -5.079018298195808,
+          "n_tests": 183
         },
         {
           "model_name": "Dirichlet",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.127810718812483,
-          "n_tests": 432
+          "log_likelihood": -5.1321813612621865,
+          "n_tests": 433
         },
         {
           "model_name": "Dirichlet",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -5.19528436133444,
-          "n_tests": 32
+          "log_likelihood": -5.164407124121605,
+          "n_tests": 33
         },
         {
           "model_name": "Dirichlet",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.139084027236764,
-          "n_tests": 332
+          "log_likelihood": -5.26706159533425,
+          "n_tests": 333
         },
         {
           "model_name": "Dirichlet",
@@ -2296,73 +1920,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 80,
+      "best_window": 150,
       "best_sparse": true,
-      "best_ll": -5.047703994723871
-    },
-    {
-      "model_name": "EWMA",
-      "results": [
-        {
-          "model_name": "EWMA",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -5.330412367364177,
-          "n_tests": 612
-        },
-        {
-          "model_name": "EWMA",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -5.235221287550458,
-          "n_tests": 602
-        },
-        {
-          "model_name": "EWMA",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -5.325477989891131,
-          "n_tests": 582
-        },
-        {
-          "model_name": "EWMA",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -5.342758140490553,
-          "n_tests": 552
-        },
-        {
-          "model_name": "EWMA",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -5.314226020848699,
-          "n_tests": 532
-        },
-        {
-          "model_name": "EWMA",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -5.307136558231229,
-          "n_tests": 482
-        },
-        {
-          "model_name": "EWMA",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -5.328634627094053,
-          "n_tests": 432
-        },
-        {
-          "model_name": "EWMA",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -5.289937955639936,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 30,
-      "best_sparse": false,
-      "best_ll": -5.235221287550458
+      "best_ll": -5.079018298195808
     },
     {
       "model_name": "Logistic",
@@ -2371,62 +1931,62 @@
           "model_name": "Logistic",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -4.969013733963135,
-          "n_tests": 612
+          "log_likelihood": -4.963700537924032,
+          "n_tests": 613
         },
         {
           "model_name": "Logistic",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -4.969217006745381,
-          "n_tests": 602
+          "log_likelihood": -4.9649855957991464,
+          "n_tests": 603
         },
         {
           "model_name": "Logistic",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -4.971681429269386,
-          "n_tests": 582
+          "log_likelihood": -4.972194517168065,
+          "n_tests": 583
         },
         {
           "model_name": "Logistic",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -4.972147570354017,
-          "n_tests": 552
+          "log_likelihood": -4.968885265243045,
+          "n_tests": 553
         },
         {
           "model_name": "Logistic",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -4.971826156076257,
-          "n_tests": 532
+          "log_likelihood": -4.968849849983595,
+          "n_tests": 533
         },
         {
           "model_name": "Logistic",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.969604033721242,
-          "n_tests": 482
+          "log_likelihood": -4.971944567401399,
+          "n_tests": 483
         },
         {
           "model_name": "Logistic",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.969221904410257,
-          "n_tests": 432
+          "log_likelihood": -4.972721804950423,
+          "n_tests": 433
         },
         {
           "model_name": "Logistic",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.9720503998779355,
-          "n_tests": 332
+          "log_likelihood": -4.96907920165779,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
       "best_sparse": false,
-      "best_ll": -4.969013733963135
+      "best_ll": -4.963700537924032
     },
     {
       "model_name": "RandomForest",
@@ -2435,62 +1995,62 @@
           "model_name": "RandomForest",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.263644817993001,
-          "n_tests": 612
+          "log_likelihood": -5.091732649089899,
+          "n_tests": 613
         },
         {
           "model_name": "RandomForest",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.137562405421401,
-          "n_tests": 602
+          "log_likelihood": -5.143224228223652,
+          "n_tests": 603
         },
         {
           "model_name": "RandomForest",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.067592477512642,
-          "n_tests": 582
+          "log_likelihood": -5.052912915949152,
+          "n_tests": 583
         },
         {
           "model_name": "RandomForest",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.022285965795276,
-          "n_tests": 552
+          "log_likelihood": -4.976694485123245,
+          "n_tests": 553
         },
         {
           "model_name": "RandomForest",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -4.990481257622804,
-          "n_tests": 532
+          "log_likelihood": -5.008971244472115,
+          "n_tests": 533
         },
         {
           "model_name": "RandomForest",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.998378360850759,
-          "n_tests": 482
+          "log_likelihood": -5.046142018506992,
+          "n_tests": 483
         },
         {
           "model_name": "RandomForest",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.964904757968378,
-          "n_tests": 432
+          "log_likelihood": -5.037180223148086,
+          "n_tests": 433
         },
         {
           "model_name": "RandomForest",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.009565737567466,
-          "n_tests": 332
+          "log_likelihood": -5.006693599305461,
+          "n_tests": 333
         }
       ],
-      "best_window": 200,
+      "best_window": 80,
       "best_sparse": false,
-      "best_ll": -4.964904757968378
+      "best_ll": -4.976694485123245
     },
     {
       "model_name": "Markov",
@@ -2499,190 +2059,62 @@
           "model_name": "Markov",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.1646931749848735,
-          "n_tests": 612
+          "log_likelihood": -5.200167715924927,
+          "n_tests": 613
         },
         {
           "model_name": "Markov",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.086409239452965,
-          "n_tests": 602
+          "log_likelihood": -5.177480902345623,
+          "n_tests": 603
         },
         {
           "model_name": "Markov",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.092263501906672,
-          "n_tests": 582
+          "log_likelihood": -5.097233147983058,
+          "n_tests": 583
         },
         {
           "model_name": "Markov",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.062960850067366,
-          "n_tests": 552
+          "log_likelihood": -5.069770509388583,
+          "n_tests": 553
         },
         {
           "model_name": "Markov",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.05172449929116,
-          "n_tests": 532
+          "log_likelihood": -5.076750060838246,
+          "n_tests": 533
         },
         {
           "model_name": "Markov",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.0404296349412485,
-          "n_tests": 482
+          "log_likelihood": -5.048674896455352,
+          "n_tests": 483
         },
         {
           "model_name": "Markov",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.048971511116548,
-          "n_tests": 432
+          "log_likelihood": -5.0375091351553545,
+          "n_tests": 433
         },
         {
           "model_name": "Markov",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.037375654678785,
-          "n_tests": 332
+          "log_likelihood": -5.118188628014316,
+          "n_tests": 333
         }
       ],
-      "best_window": 300,
+      "best_window": 200,
       "best_sparse": false,
-      "best_ll": -5.037375654678785
-    },
-    {
-      "model_name": "Retard",
-      "results": [
-        {
-          "model_name": "Retard",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -7.136783474688587,
-          "n_tests": 612
-        },
-        {
-          "model_name": "Retard",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -7.0652389100496045,
-          "n_tests": 602
-        },
-        {
-          "model_name": "Retard",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -6.729510287723099,
-          "n_tests": 582
-        },
-        {
-          "model_name": "Retard",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -6.499140212810445,
-          "n_tests": 552
-        },
-        {
-          "model_name": "Retard",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -6.590427433260241,
-          "n_tests": 532
-        },
-        {
-          "model_name": "Retard",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -6.494666077212284,
-          "n_tests": 482
-        },
-        {
-          "model_name": "Retard",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -6.442626299738719,
-          "n_tests": 432
-        },
-        {
-          "model_name": "Retard",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -6.432573299117628,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 300,
-      "best_sparse": false,
-      "best_ll": -6.432573299117628
-    },
-    {
-      "model_name": "HotStreak",
-      "results": [
-        {
-          "model_name": "HotStreak",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -9.24152918733004,
-          "n_tests": 612
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -9.234191163618057,
-          "n_tests": 602
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -9.168475342459866,
-          "n_tests": 582
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -9.230194802722355,
-          "n_tests": 552
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -9.15863923256737,
-          "n_tests": 532
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -9.605040865542682,
-          "n_tests": 482
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -9.69850633603251,
-          "n_tests": 432
-        },
-        {
-          "model_name": "HotStreak",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -9.421845204938842,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 100,
-      "best_sparse": false,
-      "best_ll": -9.15863923256737
+      "best_ll": -5.0375091351553545
     },
     {
       "model_name": "ESN",
@@ -2691,126 +2123,62 @@
           "model_name": "ESN",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.1212907261262055,
-          "n_tests": 612
+          "log_likelihood": -5.088295565844783,
+          "n_tests": 613
         },
         {
           "model_name": "ESN",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.177468959137915,
-          "n_tests": 602
+          "log_likelihood": -5.093658874192333,
+          "n_tests": 603
         },
         {
           "model_name": "ESN",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.096019128032223,
-          "n_tests": 582
+          "log_likelihood": -5.059043744619223,
+          "n_tests": 583
         },
         {
           "model_name": "ESN",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.139563226382455,
-          "n_tests": 552
+          "log_likelihood": -5.160910674814457,
+          "n_tests": 553
         },
         {
           "model_name": "ESN",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.083656869639688,
-          "n_tests": 532
+          "log_likelihood": -5.108525652170886,
+          "n_tests": 533
         },
         {
           "model_name": "ESN",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.074031752574872,
-          "n_tests": 482
+          "log_likelihood": -5.058907339643517,
+          "n_tests": 483
         },
         {
           "model_name": "ESN",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.20330020807127,
-          "n_tests": 432
+          "log_likelihood": -5.217787399197937,
+          "n_tests": 433
         },
         {
           "model_name": "ESN",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.5244074976833435,
-          "n_tests": 332
+          "log_likelihood": -5.5514436584056215,
+          "n_tests": 333
         }
       ],
       "best_window": 150,
       "best_sparse": false,
-      "best_ll": -5.074031752574872
-    },
-    {
-      "model_name": "TakensKNN",
-      "results": [
-        {
-          "model_name": "TakensKNN",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -5.547995588717425,
-          "n_tests": 612
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -5.471683249892134,
-          "n_tests": 602
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -5.532830666241888,
-          "n_tests": 582
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -5.42240903648521,
-          "n_tests": 552
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -5.444182297474685,
-          "n_tests": 532
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -5.5854202922813005,
-          "n_tests": 482
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -5.628540643566851,
-          "n_tests": 432
-        },
-        {
-          "model_name": "TakensKNN",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -5.623914791788342,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 80,
-      "best_sparse": false,
-      "best_ll": -5.42240903648521
+      "best_ll": -5.058907339643517
     },
     {
       "model_name": "Spectral",
@@ -2820,56 +2188,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "Spectral",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.055103181027338,
-          "n_tests": 602
+          "log_likelihood": -5.109094498650211,
+          "n_tests": 603
         },
         {
           "model_name": "Spectral",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.076884865972038,
-          "n_tests": 582
+          "log_likelihood": -5.03033071976167,
+          "n_tests": 583
         },
         {
           "model_name": "Spectral",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.045427707087819,
-          "n_tests": 552
+          "log_likelihood": -5.007929067831969,
+          "n_tests": 553
         },
         {
           "model_name": "Spectral",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.023604890163838,
-          "n_tests": 532
+          "log_likelihood": -5.0053697071536645,
+          "n_tests": 533
         },
         {
           "model_name": "Spectral",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.988138134859208,
-          "n_tests": 482
+          "log_likelihood": -4.984799674242896,
+          "n_tests": 483
         },
         {
           "model_name": "Spectral",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.982368208643145,
-          "n_tests": 432
+          "log_likelihood": -4.982375650705335,
+          "n_tests": 433
         },
         {
           "model_name": "Spectral",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.992211801059312,
-          "n_tests": 332
+          "log_likelihood": -4.974570985147618,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -2883,106 +2251,106 @@
           "model_name": "CTW",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.094161058536136,
-          "n_tests": 612
+          "log_likelihood": -5.11344268113809,
+          "n_tests": 613
         },
         {
           "model_name": "CTW",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -5.079548244880244,
-          "n_tests": 572
+          "log_likelihood": -5.048589438590065,
+          "n_tests": 573
         },
         {
           "model_name": "CTW",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.054783233798694,
-          "n_tests": 602
+          "log_likelihood": -5.051931112148594,
+          "n_tests": 603
         },
         {
           "model_name": "CTW",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -5.039583502323496,
-          "n_tests": 542
+          "log_likelihood": -5.028515369737078,
+          "n_tests": 543
         },
         {
           "model_name": "CTW",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.028991618203125,
-          "n_tests": 582
+          "log_likelihood": -5.018676265811258,
+          "n_tests": 583
         },
         {
           "model_name": "CTW",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -5.004518089733123,
-          "n_tests": 482
+          "log_likelihood": -5.034259470293282,
+          "n_tests": 483
         },
         {
           "model_name": "CTW",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.020410918779473,
-          "n_tests": 552
+          "log_likelihood": -5.011791448497973,
+          "n_tests": 553
         },
         {
           "model_name": "CTW",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.983971434022558,
-          "n_tests": 392
+          "log_likelihood": -5.012539400767353,
+          "n_tests": 393
         },
         {
           "model_name": "CTW",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.008810827823264,
-          "n_tests": 532
+          "log_likelihood": -5.001787251862181,
+          "n_tests": 533
         },
         {
           "model_name": "CTW",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -4.989707284236983,
-          "n_tests": 332
+          "log_likelihood": -5.006347715628479,
+          "n_tests": 333
         },
         {
           "model_name": "CTW",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.9869546469202595,
-          "n_tests": 482
+          "log_likelihood": -4.99271703981505,
+          "n_tests": 483
         },
         {
           "model_name": "CTW",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -5.0086265225281,
-          "n_tests": 182
+          "log_likelihood": -5.007313533009005,
+          "n_tests": 183
         },
         {
           "model_name": "CTW",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.978580092464962,
-          "n_tests": 432
+          "log_likelihood": -4.990759138619292,
+          "n_tests": 433
         },
         {
           "model_name": "CTW",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -4.984730504818655,
-          "n_tests": 32
+          "log_likelihood": -4.981978613497927,
+          "n_tests": 33
         },
         {
           "model_name": "CTW",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.985868700666412,
-          "n_tests": 332
+          "log_likelihood": -4.972381186696488,
+          "n_tests": 333
         },
         {
           "model_name": "CTW",
@@ -2992,137 +2360,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 200,
-      "best_sparse": false,
-      "best_ll": -4.978580092464962
-    },
-    {
-      "model_name": "NVAR",
-      "results": [
-        {
-          "model_name": "NVAR",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -6.060395415960586,
-          "n_tests": 612
-        },
-        {
-          "model_name": "NVAR",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -6.137090639911617,
-          "n_tests": 602
-        },
-        {
-          "model_name": "NVAR",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -6.070782908399503,
-          "n_tests": 582
-        },
-        {
-          "model_name": "NVAR",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -6.160540741991754,
-          "n_tests": 552
-        },
-        {
-          "model_name": "NVAR",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -6.090964932794112,
-          "n_tests": 532
-        },
-        {
-          "model_name": "NVAR",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -7.1138784621312094,
-          "n_tests": 482
-        },
-        {
-          "model_name": "NVAR",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -6.516855866918723,
-          "n_tests": 432
-        },
-        {
-          "model_name": "NVAR",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -5.76946269400412,
-          "n_tests": 332
-        }
-      ],
       "best_window": 300,
       "best_sparse": false,
-      "best_ll": -5.76946269400412
-    },
-    {
-      "model_name": "NVAR-Memo",
-      "results": [
-        {
-          "model_name": "NVAR-Memo",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -5.803873013701765,
-          "n_tests": 612
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -5.829837442114168,
-          "n_tests": 602
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -5.932023541301339,
-          "n_tests": 582
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -5.9098770523909465,
-          "n_tests": 552
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -6.083203824290123,
-          "n_tests": 532
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -6.599111475364344,
-          "n_tests": 482
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -6.797394238699192,
-          "n_tests": 432
-        },
-        {
-          "model_name": "NVAR-Memo",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -6.1761164369838335,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 20,
-      "best_sparse": false,
-      "best_ll": -5.803873013701765
+      "best_ll": -4.972381186696488
     },
     {
       "model_name": "BME",
@@ -3131,62 +2371,62 @@
           "model_name": "BME",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -4.99248238408658,
-          "n_tests": 612
+          "log_likelihood": -4.97707805341062,
+          "n_tests": 613
         },
         {
           "model_name": "BME",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -4.983446490268474,
-          "n_tests": 602
+          "log_likelihood": -4.972881898825122,
+          "n_tests": 603
         },
         {
           "model_name": "BME",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -4.987200907608509,
-          "n_tests": 582
+          "log_likelihood": -4.9820238242912485,
+          "n_tests": 583
         },
         {
           "model_name": "BME",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -4.988479996401151,
-          "n_tests": 552
+          "log_likelihood": -4.982832003362811,
+          "n_tests": 553
         },
         {
           "model_name": "BME",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -4.982678571225442,
-          "n_tests": 532
+          "log_likelihood": -4.985443557565863,
+          "n_tests": 533
         },
         {
           "model_name": "BME",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.9761396763770955,
-          "n_tests": 482
+          "log_likelihood": -4.977305119511113,
+          "n_tests": 483
         },
         {
           "model_name": "BME",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.976430639669194,
-          "n_tests": 432
+          "log_likelihood": -4.975116664440642,
+          "n_tests": 433
         },
         {
           "model_name": "BME",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.987392238429924,
-          "n_tests": 332
+          "log_likelihood": -4.96689454423041,
+          "n_tests": 333
         }
       ],
-      "best_window": 150,
+      "best_window": 300,
       "best_sparse": false,
-      "best_ll": -4.9761396763770955
+      "best_ll": -4.96689454423041
     },
     {
       "model_name": "Transformer",
@@ -3196,56 +2436,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "Transformer",
           "window": 30,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 602
+          "n_tests": 603
         },
         {
           "model_name": "Transformer",
           "window": 50,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 582
+          "n_tests": 583
         },
         {
           "model_name": "Transformer",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.689280016824223,
-          "n_tests": 552
+          "log_likelihood": -5.543778122981285,
+          "n_tests": 553
         },
         {
           "model_name": "Transformer",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.544287257512667,
-          "n_tests": 532
+          "log_likelihood": -5.535230055209459,
+          "n_tests": 533
         },
         {
           "model_name": "Transformer",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.441398733997626,
-          "n_tests": 482
+          "log_likelihood": -5.330069847503721,
+          "n_tests": 483
         },
         {
           "model_name": "Transformer",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.365370762839273,
-          "n_tests": 432
+          "log_likelihood": -5.346932643664669,
+          "n_tests": 433
         },
         {
           "model_name": "Transformer",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.314216484669091,
-          "n_tests": 332
+          "log_likelihood": -5.3299644766996535,
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -3260,105 +2500,105 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "TDA",
           "window": 20,
           "sparse": true,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 572
+          "n_tests": 573
         },
         {
           "model_name": "TDA",
           "window": 30,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 602
+          "n_tests": 603
         },
         {
           "model_name": "TDA",
           "window": 30,
           "sparse": true,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 542
+          "n_tests": 543
         },
         {
           "model_name": "TDA",
           "window": 50,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 582
+          "n_tests": 583
         },
         {
           "model_name": "TDA",
           "window": 50,
           "sparse": true,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 482
+          "n_tests": 483
         },
         {
           "model_name": "TDA",
           "window": 80,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 552
+          "n_tests": 553
         },
         {
           "model_name": "TDA",
           "window": 80,
           "sparse": true,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 392
+          "n_tests": 393
         },
         {
           "model_name": "TDA",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -4.988269259314117,
-          "n_tests": 532
+          "log_likelihood": -4.989322775160813,
+          "n_tests": 533
         },
         {
           "model_name": "TDA",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -4.964226325699085,
-          "n_tests": 332
+          "log_likelihood": -5.005174528593316,
+          "n_tests": 333
         },
         {
           "model_name": "TDA",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.998580127292782,
-          "n_tests": 482
+          "log_likelihood": -4.987973324984659,
+          "n_tests": 483
         },
         {
           "model_name": "TDA",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.972678022918024,
-          "n_tests": 182
+          "log_likelihood": -4.970433078333143,
+          "n_tests": 183
         },
         {
           "model_name": "TDA",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.999875786961552,
-          "n_tests": 432
+          "log_likelihood": -4.98141702634989,
+          "n_tests": 433
         },
         {
           "model_name": "TDA",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -4.988352115623823,
-          "n_tests": 32
+          "log_likelihood": -4.975427904965061,
+          "n_tests": 33
         },
         {
           "model_name": "TDA",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.982656264364067,
-          "n_tests": 332
+          "log_likelihood": -5.028758615067141,
+          "n_tests": 333
         },
         {
           "model_name": "TDA",
@@ -3368,73 +2608,9 @@
           "n_tests": 0
         }
       ],
-      "best_window": 100,
-      "best_sparse": true,
-      "best_ll": -4.964226325699085
-    },
-    {
-      "model_name": "Diffusion",
-      "results": [
-        {
-          "model_name": "Diffusion",
-          "window": 20,
-          "sparse": false,
-          "log_likelihood": -5.644263238689662,
-          "n_tests": 612
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 30,
-          "sparse": false,
-          "log_likelihood": -5.731796079717127,
-          "n_tests": 602
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 50,
-          "sparse": false,
-          "log_likelihood": -5.783231786079989,
-          "n_tests": 582
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 80,
-          "sparse": false,
-          "log_likelihood": -6.101564650017307,
-          "n_tests": 552
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 100,
-          "sparse": false,
-          "log_likelihood": -5.863743831516224,
-          "n_tests": 532
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 150,
-          "sparse": false,
-          "log_likelihood": -5.506317614205007,
-          "n_tests": 482
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 200,
-          "sparse": false,
-          "log_likelihood": -5.514024302619197,
-          "n_tests": 432
-        },
-        {
-          "model_name": "Diffusion",
-          "window": 300,
-          "sparse": false,
-          "log_likelihood": -5.312052497391363,
-          "n_tests": 332
-        }
-      ],
-      "best_window": 300,
+      "best_window": 20,
       "best_sparse": false,
-      "best_ll": -5.312052497391363
+      "best_ll": -4.9698132995760025
     },
     {
       "model_name": "Physics",
@@ -3443,92 +2619,92 @@
           "model_name": "Physics",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -4.976028307747007,
-          "n_tests": 612
+          "log_likelihood": -4.969037256494796,
+          "n_tests": 613
         },
         {
           "model_name": "Physics",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -4.991857473087114,
-          "n_tests": 552
+          "log_likelihood": -4.989022229509172,
+          "n_tests": 553
         },
         {
           "model_name": "Physics",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -4.975260917439841,
-          "n_tests": 602
+          "log_likelihood": -4.967044997435831,
+          "n_tests": 603
         },
         {
           "model_name": "Physics",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -4.987984712934682,
-          "n_tests": 512
+          "log_likelihood": -4.9902587193975085,
+          "n_tests": 513
         },
         {
           "model_name": "Physics",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.007958513241846,
-          "n_tests": 582
+          "log_likelihood": -4.990372785750981,
+          "n_tests": 583
         },
         {
           "model_name": "Physics",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -4.976268512877222,
-          "n_tests": 432
+          "log_likelihood": -4.995954973147714,
+          "n_tests": 433
         },
         {
           "model_name": "Physics",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.0112771858772405,
-          "n_tests": 552
+          "log_likelihood": -4.991948888148341,
+          "n_tests": 553
         },
         {
           "model_name": "Physics",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.971856650599667,
-          "n_tests": 312
+          "log_likelihood": -5.00430937148698,
+          "n_tests": 313
         },
         {
           "model_name": "Physics",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.004839880385141,
-          "n_tests": 532
+          "log_likelihood": -4.991387757849311,
+          "n_tests": 533
         },
         {
           "model_name": "Physics",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -4.991553254714132,
-          "n_tests": 232
+          "log_likelihood": -4.995624540462236,
+          "n_tests": 233
         },
         {
           "model_name": "Physics",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.988505051477766,
-          "n_tests": 482
+          "log_likelihood": -4.989229692641024,
+          "n_tests": 483
         },
         {
           "model_name": "Physics",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.961565138267513,
-          "n_tests": 32
+          "log_likelihood": -4.953253652609435,
+          "n_tests": 33
         },
         {
           "model_name": "Physics",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.989114830153981,
-          "n_tests": 432
+          "log_likelihood": -4.980915734109102,
+          "n_tests": 433
         },
         {
           "model_name": "Physics",
@@ -3541,8 +2717,8 @@
           "model_name": "Physics",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.985967854788219,
-          "n_tests": 332
+          "log_likelihood": -5.003125126899586,
+          "n_tests": 333
         },
         {
           "model_name": "Physics",
@@ -3554,7 +2730,7 @@
       ],
       "best_window": 150,
       "best_sparse": true,
-      "best_ll": -4.961565138267513
+      "best_ll": -4.953253652609435
     },
     {
       "model_name": "Mod4Trans",
@@ -3563,106 +2739,106 @@
           "model_name": "Mod4Trans",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.009401913890125,
-          "n_tests": 612
+          "log_likelihood": -5.0224984697385056,
+          "n_tests": 613
         },
         {
           "model_name": "Mod4Trans",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -4.995365344652763,
-          "n_tests": 572
+          "log_likelihood": -4.981562216715498,
+          "n_tests": 573
         },
         {
           "model_name": "Mod4Trans",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -4.986858306015656,
-          "n_tests": 602
+          "log_likelihood": -5.027211824562819,
+          "n_tests": 603
         },
         {
           "model_name": "Mod4Trans",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -4.990705950104492,
-          "n_tests": 542
+          "log_likelihood": -4.985819234637921,
+          "n_tests": 543
         },
         {
           "model_name": "Mod4Trans",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -4.996263945868415,
-          "n_tests": 582
+          "log_likelihood": -5.000470485118775,
+          "n_tests": 583
         },
         {
           "model_name": "Mod4Trans",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -5.004018348710391,
-          "n_tests": 482
+          "log_likelihood": -4.982325614905173,
+          "n_tests": 483
         },
         {
           "model_name": "Mod4Trans",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -4.995066754555191,
-          "n_tests": 552
+          "log_likelihood": -4.996957046861411,
+          "n_tests": 553
         },
         {
           "model_name": "Mod4Trans",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.97908505773366,
-          "n_tests": 392
+          "log_likelihood": -5.002722228981296,
+          "n_tests": 393
         },
         {
           "model_name": "Mod4Trans",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -4.995055927683072,
-          "n_tests": 532
+          "log_likelihood": -4.997277934022434,
+          "n_tests": 533
         },
         {
           "model_name": "Mod4Trans",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -4.992775774242521,
-          "n_tests": 332
+          "log_likelihood": -4.9785754780401925,
+          "n_tests": 333
         },
         {
           "model_name": "Mod4Trans",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -4.977152935162913,
-          "n_tests": 482
+          "log_likelihood": -4.974727664297916,
+          "n_tests": 483
         },
         {
           "model_name": "Mod4Trans",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.9839993656650945,
-          "n_tests": 182
+          "log_likelihood": -4.983527964688718,
+          "n_tests": 183
         },
         {
           "model_name": "Mod4Trans",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -4.968186075018986,
-          "n_tests": 432
+          "log_likelihood": -4.976011325357363,
+          "n_tests": 433
         },
         {
           "model_name": "Mod4Trans",
           "window": 200,
           "sparse": true,
-          "log_likelihood": -4.981351601507473,
-          "n_tests": 32
+          "log_likelihood": -4.978145762595127,
+          "n_tests": 33
         },
         {
           "model_name": "Mod4Trans",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -4.977579963050063,
-          "n_tests": 332
+          "log_likelihood": -4.975079712972138,
+          "n_tests": 333
         },
         {
           "model_name": "Mod4Trans",
@@ -3672,9 +2848,129 @@
           "n_tests": 0
         }
       ],
-      "best_window": 200,
+      "best_window": 150,
       "best_sparse": false,
-      "best_ll": -4.968186075018986
+      "best_ll": -4.974727664297916
+    },
+    {
+      "model_name": "Mod4Profile",
+      "results": [
+        {
+          "model_name": "Mod4Profile",
+          "window": 20,
+          "sparse": false,
+          "log_likelihood": -5.005500852213849,
+          "n_tests": 613
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 20,
+          "sparse": true,
+          "log_likelihood": -4.975780031423409,
+          "n_tests": 573
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 30,
+          "sparse": false,
+          "log_likelihood": -5.021064065647733,
+          "n_tests": 603
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 30,
+          "sparse": true,
+          "log_likelihood": -4.981888291115806,
+          "n_tests": 543
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 50,
+          "sparse": false,
+          "log_likelihood": -4.994424967753424,
+          "n_tests": 583
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 50,
+          "sparse": true,
+          "log_likelihood": -4.97689420835956,
+          "n_tests": 483
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 80,
+          "sparse": false,
+          "log_likelihood": -5.002780557237503,
+          "n_tests": 553
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 80,
+          "sparse": true,
+          "log_likelihood": -5.009383669110416,
+          "n_tests": 393
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 100,
+          "sparse": false,
+          "log_likelihood": -5.006949897684687,
+          "n_tests": 533
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 100,
+          "sparse": true,
+          "log_likelihood": -4.994237383848133,
+          "n_tests": 333
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 150,
+          "sparse": false,
+          "log_likelihood": -4.990852237862551,
+          "n_tests": 483
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 150,
+          "sparse": true,
+          "log_likelihood": -4.991570359705766,
+          "n_tests": 183
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 200,
+          "sparse": false,
+          "log_likelihood": -4.9846456057406785,
+          "n_tests": 433
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 200,
+          "sparse": true,
+          "log_likelihood": -5.017474492779036,
+          "n_tests": 33
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 300,
+          "sparse": false,
+          "log_likelihood": -4.9679855120114835,
+          "n_tests": 333
+        },
+        {
+          "model_name": "Mod4Profile",
+          "window": 300,
+          "sparse": true,
+          "log_likelihood": null,
+          "n_tests": 0
+        }
+      ],
+      "best_window": 300,
+      "best_sparse": false,
+      "best_ll": -4.9679855120114835
     },
     {
       "model_name": "TripletBoost",
@@ -3684,56 +2980,56 @@
           "window": 20,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 612
+          "n_tests": 613
         },
         {
           "model_name": "TripletBoost",
           "window": 30,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 602
+          "n_tests": 603
         },
         {
           "model_name": "TripletBoost",
           "window": 50,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 582
+          "n_tests": 583
         },
         {
           "model_name": "TripletBoost",
           "window": 80,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 552
+          "n_tests": 553
         },
         {
           "model_name": "TripletBoost",
           "window": 100,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 532
+          "n_tests": 533
         },
         {
           "model_name": "TripletBoost",
           "window": 150,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 482
+          "n_tests": 483
         },
         {
           "model_name": "TripletBoost",
           "window": 200,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 432
+          "n_tests": 433
         },
         {
           "model_name": "TripletBoost",
           "window": 300,
           "sparse": false,
           "log_likelihood": -4.9698132995760025,
-          "n_tests": 332
+          "n_tests": 333
         }
       ],
       "best_window": 20,
@@ -3747,62 +3043,62 @@
           "model_name": "CondSummary",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.047247943023582,
-          "n_tests": 612
+          "log_likelihood": -5.022037950356117,
+          "n_tests": 613
         },
         {
           "model_name": "CondSummary",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -4.993549596440748,
-          "n_tests": 602
+          "log_likelihood": -5.032958069931696,
+          "n_tests": 603
         },
         {
           "model_name": "CondSummary",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.039762613811726,
-          "n_tests": 582
+          "log_likelihood": -5.020517964325434,
+          "n_tests": 583
         },
         {
           "model_name": "CondSummary",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.035053725182371,
-          "n_tests": 552
+          "log_likelihood": -5.0329411527520005,
+          "n_tests": 553
         },
         {
           "model_name": "CondSummary",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.039966356144977,
-          "n_tests": 532
+          "log_likelihood": -5.038390850152228,
+          "n_tests": 533
         },
         {
           "model_name": "CondSummary",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.0624128377675355,
-          "n_tests": 482
+          "log_likelihood": -5.062573145867813,
+          "n_tests": 483
         },
         {
           "model_name": "CondSummary",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.015761276798586,
-          "n_tests": 432
+          "log_likelihood": -5.097111722572815,
+          "n_tests": 433
         },
         {
           "model_name": "CondSummary",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.035674663616487,
-          "n_tests": 332
+          "log_likelihood": -5.0900855983756905,
+          "n_tests": 333
         }
       ],
-      "best_window": 30,
+      "best_window": 50,
       "best_sparse": false,
-      "best_ll": -4.993549596440748
+      "best_ll": -5.020517964325434
     },
     {
       "model_name": "StresaSGD",
@@ -3811,92 +3107,92 @@
           "model_name": "StresaSGD",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.027175979943099,
-          "n_tests": 612
+          "log_likelihood": -5.030434190340872,
+          "n_tests": 613
         },
         {
           "model_name": "StresaSGD",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -5.0621826010884545,
-          "n_tests": 552
+          "log_likelihood": -5.050798950271448,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSGD",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.006936241720755,
-          "n_tests": 602
+          "log_likelihood": -5.048605750494446,
+          "n_tests": 603
         },
         {
           "model_name": "StresaSGD",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -5.040381889114246,
-          "n_tests": 512
+          "log_likelihood": -5.053960423044431,
+          "n_tests": 513
         },
         {
           "model_name": "StresaSGD",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.075212143814386,
-          "n_tests": 582
+          "log_likelihood": -5.041151498573802,
+          "n_tests": 583
         },
         {
           "model_name": "StresaSGD",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -4.990732935297597,
-          "n_tests": 432
+          "log_likelihood": -5.0423077242454495,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSGD",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.069979683634971,
-          "n_tests": 552
+          "log_likelihood": -5.032533687995304,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSGD",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.991020551421451,
-          "n_tests": 312
+          "log_likelihood": -5.046083813169032,
+          "n_tests": 313
         },
         {
           "model_name": "StresaSGD",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.055928316673418,
-          "n_tests": 532
+          "log_likelihood": -5.0312911996144605,
+          "n_tests": 533
         },
         {
           "model_name": "StresaSGD",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -5.036183613739522,
-          "n_tests": 232
+          "log_likelihood": -5.036117178519193,
+          "n_tests": 233
         },
         {
           "model_name": "StresaSGD",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.027303408672388,
-          "n_tests": 482
+          "log_likelihood": -5.027125167330214,
+          "n_tests": 483
         },
         {
           "model_name": "StresaSGD",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.949903459596199,
-          "n_tests": 32
+          "log_likelihood": -4.931440419493659,
+          "n_tests": 33
         },
         {
           "model_name": "StresaSGD",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.033468784901772,
-          "n_tests": 432
+          "log_likelihood": -5.0117706366082775,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSGD",
@@ -3909,8 +3205,8 @@
           "model_name": "StresaSGD",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.02478464698638,
-          "n_tests": 332
+          "log_likelihood": -5.089564771441575,
+          "n_tests": 333
         },
         {
           "model_name": "StresaSGD",
@@ -3922,7 +3218,7 @@
       ],
       "best_window": 150,
       "best_sparse": true,
-      "best_ll": -4.949903459596199
+      "best_ll": -4.931440419493659
     },
     {
       "model_name": "StresaSMC",
@@ -3931,92 +3227,92 @@
           "model_name": "StresaSMC",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.027175979943099,
-          "n_tests": 612
+          "log_likelihood": -5.030434190340872,
+          "n_tests": 613
         },
         {
           "model_name": "StresaSMC",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -5.0621826010884545,
-          "n_tests": 552
+          "log_likelihood": -5.050798950271448,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSMC",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.006936241720755,
-          "n_tests": 602
+          "log_likelihood": -5.048605750494446,
+          "n_tests": 603
         },
         {
           "model_name": "StresaSMC",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -5.040381889114246,
-          "n_tests": 512
+          "log_likelihood": -5.053960423044431,
+          "n_tests": 513
         },
         {
           "model_name": "StresaSMC",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.075212143814386,
-          "n_tests": 582
+          "log_likelihood": -5.041151498573802,
+          "n_tests": 583
         },
         {
           "model_name": "StresaSMC",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -4.990732935297597,
-          "n_tests": 432
+          "log_likelihood": -5.0423077242454495,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSMC",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.069979683634971,
-          "n_tests": 552
+          "log_likelihood": -5.032533687995304,
+          "n_tests": 553
         },
         {
           "model_name": "StresaSMC",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.991020551421451,
-          "n_tests": 312
+          "log_likelihood": -5.046083813169032,
+          "n_tests": 313
         },
         {
           "model_name": "StresaSMC",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.055928316673418,
-          "n_tests": 532
+          "log_likelihood": -5.0312911996144605,
+          "n_tests": 533
         },
         {
           "model_name": "StresaSMC",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -5.036183613739522,
-          "n_tests": 232
+          "log_likelihood": -5.036117178519193,
+          "n_tests": 233
         },
         {
           "model_name": "StresaSMC",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.027303408672388,
-          "n_tests": 482
+          "log_likelihood": -5.027125167330214,
+          "n_tests": 483
         },
         {
           "model_name": "StresaSMC",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.949903459596199,
-          "n_tests": 32
+          "log_likelihood": -4.931440419493659,
+          "n_tests": 33
         },
         {
           "model_name": "StresaSMC",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.033468784901772,
-          "n_tests": 432
+          "log_likelihood": -5.0117706366082775,
+          "n_tests": 433
         },
         {
           "model_name": "StresaSMC",
@@ -4029,8 +3325,8 @@
           "model_name": "StresaSMC",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.02478464698638,
-          "n_tests": 332
+          "log_likelihood": -5.089564771441575,
+          "n_tests": 333
         },
         {
           "model_name": "StresaSMC",
@@ -4042,7 +3338,7 @@
       ],
       "best_window": 150,
       "best_sparse": true,
-      "best_ll": -4.949903459596199
+      "best_ll": -4.931440419493659
     },
     {
       "model_name": "StresaChaos",
@@ -4051,92 +3347,92 @@
           "model_name": "StresaChaos",
           "window": 20,
           "sparse": false,
-          "log_likelihood": -5.027175979943099,
-          "n_tests": 612
+          "log_likelihood": -5.030434190340872,
+          "n_tests": 613
         },
         {
           "model_name": "StresaChaos",
           "window": 20,
           "sparse": true,
-          "log_likelihood": -5.0621826010884545,
-          "n_tests": 552
+          "log_likelihood": -5.050798950271448,
+          "n_tests": 553
         },
         {
           "model_name": "StresaChaos",
           "window": 30,
           "sparse": false,
-          "log_likelihood": -5.006936241720755,
-          "n_tests": 602
+          "log_likelihood": -5.048605750494446,
+          "n_tests": 603
         },
         {
           "model_name": "StresaChaos",
           "window": 30,
           "sparse": true,
-          "log_likelihood": -5.040381889114246,
-          "n_tests": 512
+          "log_likelihood": -5.053960423044431,
+          "n_tests": 513
         },
         {
           "model_name": "StresaChaos",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -5.075212143814386,
-          "n_tests": 582
+          "log_likelihood": -5.041151498573802,
+          "n_tests": 583
         },
         {
           "model_name": "StresaChaos",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -4.990732935297597,
-          "n_tests": 432
+          "log_likelihood": -5.0423077242454495,
+          "n_tests": 433
         },
         {
           "model_name": "StresaChaos",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -5.069979683634971,
-          "n_tests": 552
+          "log_likelihood": -5.032533687995304,
+          "n_tests": 553
         },
         {
           "model_name": "StresaChaos",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -4.991020551421451,
-          "n_tests": 312
+          "log_likelihood": -5.046083813169032,
+          "n_tests": 313
         },
         {
           "model_name": "StresaChaos",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -5.055928316673418,
-          "n_tests": 532
+          "log_likelihood": -5.0312911996144605,
+          "n_tests": 533
         },
         {
           "model_name": "StresaChaos",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -5.036183613739522,
-          "n_tests": 232
+          "log_likelihood": -5.036117178519193,
+          "n_tests": 233
         },
         {
           "model_name": "StresaChaos",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -5.027303408672388,
-          "n_tests": 482
+          "log_likelihood": -5.027125167330214,
+          "n_tests": 483
         },
         {
           "model_name": "StresaChaos",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -4.949903459596199,
-          "n_tests": 32
+          "log_likelihood": -4.931440419493659,
+          "n_tests": 33
         },
         {
           "model_name": "StresaChaos",
           "window": 200,
           "sparse": false,
-          "log_likelihood": -5.033468784901772,
-          "n_tests": 432
+          "log_likelihood": -5.0117706366082775,
+          "n_tests": 433
         },
         {
           "model_name": "StresaChaos",
@@ -4149,8 +3445,8 @@
           "model_name": "StresaChaos",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -5.02478464698638,
-          "n_tests": 332
+          "log_likelihood": -5.089564771441575,
+          "n_tests": 333
         },
         {
           "model_name": "StresaChaos",
@@ -4162,7 +3458,7 @@
       ],
       "best_window": 150,
       "best_sparse": true,
-      "best_ll": -4.949903459596199
+      "best_ll": -4.931440419493659
     }
   ]
 }

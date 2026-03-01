@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use lemillion_db::db::{count_draws, db_path, delete_draw, fetch_last_draws, insert_draw, migrate, open_db};
+use lemillion_db::db::{count_draws, db_path, delete_draw, fetch_last_draws, fetch_draw_by_date, fetch_draws_before_date, insert_draw, migrate, open_db};
 use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::EnsembleCombiner;
@@ -16,7 +16,7 @@ use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_sco
 use lemillion_ensemble::models::all_models;
 use lemillion_ensemble::sampler::{
     apply_temperature, compute_bayesian_score, compute_conviction, conviction_temperature,
-    generate_suggestions_filtered,
+    generate_suggestions_filtered, generate_diverse_grids,
     generate_suggestions_ev, generate_suggestions_jackpot, optimal_grid, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
@@ -108,8 +108,16 @@ enum Command {
 
     /// Comparer un tirage avec les prédictions de l'ensemble
     Compare {
-        /// 5 boules + 2 étoiles (7 nombres)
+        /// 5 boules + 2 étoiles (7 nombres). Optionnel si --date est fourni.
         numbers: Vec<u8>,
+
+        /// Date du tirage (YYYY-MM-DD). Récupère automatiquement les numéros et n'utilise que les tirages antérieurs.
+        #[arg(short, long)]
+        date: Option<String>,
+
+        /// Fichier de calibration
+        #[arg(short, long, default_value = "calibration.json")]
+        calibration: String,
     },
 
     /// Ajouter un tirage manuellement: draw_id jour date b1 b2 b3 b4 b5 s1 s2
@@ -214,7 +222,7 @@ fn main() -> Result<()> {
         Command::Weights { calibration } => cmd_weights(&calibration),
         Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models),
         Command::History { last } => cmd_history(&conn, last),
-        Command::Compare { numbers } => cmd_compare(&conn, &numbers),
+        Command::Compare { numbers, date, calibration } => cmd_compare(&conn, &numbers, date.as_deref(), &calibration),
         Command::AddDraw { args } => cmd_add_draw(&conn, &args),
         Command::FixDraw => cmd_fix_draw(&conn),
         Command::Rebuild => cmd_rebuild(&conn),
@@ -452,6 +460,11 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let optimal_cs = consensus_score(&optimal.balls, &optimal.stars, &ball_consensus, &star_consensus);
     display::display_optimal_grid(&optimal, optimal_cs);
 
+    // Grilles diversifiées par profil mod-4
+    let effective_seed = seed.unwrap_or_else(lemillion_ensemble::sampler::date_seed);
+    let diverse = generate_diverse_grids(&ball_dist, &star_dist, &draws, 3, effective_seed);
+    display::display_diverse_grids(&diverse, &ball_consensus, &star_consensus);
+
     if jackpot_mode {
         // Mode Jackpot : énumération exhaustive
         let filter = if no_filter {
@@ -537,26 +550,40 @@ pub(crate) fn cmd_history(conn: &lemillion_db::rusqlite::Connection, last: u32) 
     Ok(())
 }
 
-pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[u8]) -> Result<()> {
-    if numbers.len() != 7 {
-        bail!("Attendu 7 nombres : 5 boules + 2 étoiles. Reçu : {}", numbers.len());
-    }
-
-    let balls: [u8; 5] = [numbers[0], numbers[1], numbers[2], numbers[3], numbers[4]];
-    let stars: [u8; 2] = [numbers[5], numbers[6]];
-
-    lemillion_db::models::validate_draw(&balls, &stars)?;
-
-    let n = count_draws(conn)?;
-    if n == 0 {
-        bail!("Base vide. Lancez d'abord : lemillion-cli import");
-    }
-
-    let draws = fetch_last_draws(conn, n)?;
+pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[u8], date: Option<&str>, calibration_path: &str) -> Result<()> {
+    // Déterminer les numéros à comparer et les tirages pour la prédiction
+    let (balls, stars, draws) = if let Some(date) = date {
+        // Mode date : récupérer le tirage et n'utiliser que les tirages antérieurs
+        let draw = fetch_draw_by_date(conn, date)?
+            .ok_or_else(|| anyhow::anyhow!("Aucun tirage trouvé pour la date {date}"))?;
+        let balls = draw.balls;
+        let stars = draw.stars;
+        let draws = fetch_draws_before_date(conn, date)?;
+        if draws.is_empty() {
+            bail!("Aucun tirage antérieur au {date} dans la base");
+        }
+        println!("Tirage du {date} : {:?} | {:?}", balls, stars);
+        println!("Prédiction basée sur {} tirages antérieurs au {date}\n", draws.len());
+        (balls, stars, draws)
+    } else {
+        // Mode classique : numéros fournis en arguments
+        if numbers.len() != 7 {
+            bail!("Attendu 7 nombres : 5 boules + 2 étoiles (ou --date YYYY-MM-DD). Reçu : {}", numbers.len());
+        }
+        let balls: [u8; 5] = [numbers[0], numbers[1], numbers[2], numbers[3], numbers[4]];
+        let stars: [u8; 2] = [numbers[5], numbers[6]];
+        lemillion_db::models::validate_draw(&balls, &stars)?;
+        let n = count_draws(conn)?;
+        if n == 0 {
+            bail!("Base vide. Lancez d'abord : lemillion-cli import");
+        }
+        let draws = fetch_last_draws(conn, n)?;
+        (balls, stars, draws)
+    };
     let models = all_models();
 
     // Charger les poids si disponibles
-    let weights = load_weights(&PathBuf::from("calibration.json"));
+    let weights = load_weights(&PathBuf::from(calibration_path));
     let combiner = match weights {
         Ok(w) => {
             let ball_w: Vec<f64> = models.iter()
@@ -567,8 +594,8 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
                 .collect();
             EnsembleCombiner::with_weights(models, ball_w, star_w)
         }
-        Err(_) => {
-            println!("(Pas de fichier de calibration, utilisation de poids uniformes)");
+        Err(e) => {
+            println!("(Pas de fichier de calibration, utilisation de poids uniformes: {e})");
             EnsembleCombiner::new(models)
         }
     };
@@ -1365,14 +1392,13 @@ fn cmd_benchmark(conn: &lemillion_db::rusqlite::Connection, train_size: usize, s
 
     // Benchmark physics-based models
     use lemillion_ensemble::models::{ForecastModel, stresa};
-    use lemillion_ensemble::models::{mod4, takens, physics};
+    use lemillion_ensemble::models::{mod4, physics};
     let models: Vec<Box<dyn ForecastModel>> = vec![
         Box::new(stresa::StresaChaosModel::default()),
         Box::new(stresa::StresaSgdModel::default()),
         Box::new(stresa::StresaSmcModel::default()),
         Box::new(mod4::Mod4TransitionModel::default()),
         Box::new(physics::PhysicsModel::default()),
-        Box::new(takens::TakensKnnModel::default()),
     ];
 
     for model in &models {

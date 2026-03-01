@@ -1,24 +1,20 @@
 pub mod dirichlet;
-pub mod ewma;
 pub mod logistic;
 pub mod random_forest;
 pub mod markov;
-pub mod retard;
-pub mod hot_streak;
 pub mod esn;
-pub mod takens;
 pub mod spectral;
 pub mod ctw;
-pub mod nvar;
-pub mod nvar_memo;
 pub mod mixture;
 pub mod transformer;
 pub mod tda;
-pub mod diffusion;
 pub mod physics;
 pub mod mod4;
 pub mod triplet;
 pub mod conditional;
+pub mod joint;
+pub mod mod4_profile;
+pub mod summary_predictor;
 pub mod stresa;
 
 use std::collections::HashMap;
@@ -60,16 +56,13 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Les 24 modèles de base.
+/// Les 18 modèles de base.
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
         Box::new(dirichlet::DirichletModel::with_window(0.1, Some(30))),
-        Box::new(ewma::EwmaModel::new(0.9)),
         Box::new(logistic::LogisticModel::new(0.01, 0.001, 50, 100)),
         Box::new(random_forest::RandomForestModel::new(50, 5, 100)),
         Box::new(markov::MarkovModel::new()),
-        Box::new(retard::RetardModel::new(1.5)),
-        Box::new(hot_streak::HotStreakModel::new(5)),
         Box::new(esn::EsnModel::new(lemillion_esn::config::EsnConfig {
             reservoir_size: 1000,
             spectral_radius: 0.95,
@@ -82,17 +75,14 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
             noise_amplitude: 1e-4,
             seed: 42,
         })),
-        Box::new(takens::TakensKnnModel::default()),
         Box::new(spectral::SpectralModel::default()),
         Box::new(ctw::CtwModel::default()),
-        Box::new(nvar::NvarModel::default()),
-        Box::new(nvar_memo::NvarMemoModel::default()),
         Box::new(mixture::MixtureModel::default()),
         Box::new(transformer::TransformerModel::default()),
         Box::new(tda::TdaModel::default()),
-        Box::new(diffusion::DiffusionModel::default()),
         Box::new(physics::PhysicsModel::default()),
         Box::new(mod4::Mod4TransitionModel::default()),
+        Box::new(mod4_profile::Mod4ProfileModel::default()),
         Box::new(triplet::TripletBoostModel::default()),
         Box::new(conditional::ConditionalSummaryModel::default()),
         Box::new(stresa::StresaSgdModel::default()),

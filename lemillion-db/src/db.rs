@@ -128,6 +128,66 @@ pub fn fetch_last_draws_numbers(conn: &Connection, limit: u32) -> Result<Vec<([u
     Ok(rows)
 }
 
+/// Récupère le tirage correspondant à une date (format YYYY-MM-DD).
+pub fn fetch_draw_by_date(conn: &Connection, date: &str) -> Result<Option<Draw>> {
+    let mut stmt = conn.prepare(
+        "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
+         FROM draws WHERE date = ?1 ORDER BY draw_id DESC LIMIT 1"
+    )?;
+    let mut draws = stmt.query_map([date], |row| {
+        Ok(Draw {
+            draw_id: row.get(0)?,
+            day: row.get(1)?,
+            date: row.get(2)?,
+            balls: [
+                row.get::<_, u8>(3)?,
+                row.get::<_, u8>(4)?,
+                row.get::<_, u8>(5)?,
+                row.get::<_, u8>(6)?,
+                row.get::<_, u8>(7)?,
+            ],
+            stars: [
+                row.get::<_, u8>(8)?,
+                row.get::<_, u8>(9)?,
+            ],
+            winner_count: row.get(10)?,
+            winner_prize: row.get(11)?,
+            my_million: row.get(12)?,
+        })
+    })?.collect::<Result<Vec<_>, _>>()?;
+    Ok(draws.pop())
+}
+
+/// Récupère tous les tirages avec date strictement avant `before_date` (format YYYY-MM-DD).
+pub fn fetch_draws_before_date(conn: &Connection, before_date: &str) -> Result<Vec<Draw>> {
+    let mut stmt = conn.prepare(
+        "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
+         FROM draws WHERE date < ?1 ORDER BY date DESC, draw_id DESC"
+    )?;
+    let draws = stmt.query_map([before_date], |row| {
+        Ok(Draw {
+            draw_id: row.get(0)?,
+            day: row.get(1)?,
+            date: row.get(2)?,
+            balls: [
+                row.get::<_, u8>(3)?,
+                row.get::<_, u8>(4)?,
+                row.get::<_, u8>(5)?,
+                row.get::<_, u8>(6)?,
+                row.get::<_, u8>(7)?,
+            ],
+            stars: [
+                row.get::<_, u8>(8)?,
+                row.get::<_, u8>(9)?,
+            ],
+            winner_count: row.get(10)?,
+            winner_prize: row.get(11)?,
+            my_million: row.get(12)?,
+        })
+    })?.collect::<Result<Vec<_>, _>>()?;
+    Ok(draws)
+}
+
 pub fn count_draws(conn: &Connection) -> Result<u32> {
     let count: u32 = conn.query_row("SELECT COUNT(*) FROM draws", [], |row| row.get(0))?;
     Ok(count)

@@ -7,7 +7,7 @@ use crate::ensemble::EnsemblePrediction;
 use crate::ensemble::calibration::{EnsembleWeights, ModelCalibration};
 use crate::ensemble::consensus::{ConsensusCategory, ConsensusEntry};
 use crate::expected_value::{PopularityModel, PRIZE_TIERS, jackpot_threshold, compute_ev};
-use crate::sampler::{ConvictionScore, ConvictionVerdict, JackpotResult, ScoredSuggestion};
+use crate::sampler::{ConvictionScore, ConvictionVerdict, DiverseGrids, JackpotResult, ScoredSuggestion};
 use crate::coverage::CoverageStats;
 use crate::research::{ResearchReport, ResearchVerdict};
 
@@ -233,6 +233,45 @@ pub fn display_optimal_grid(grid: &Suggestion, consensus: f64) {
         Cell::new(format!("{:.4}", grid.score)),
         Cell::new(format!("{:+.2}", consensus)),
     ]);
+    println!("{table}");
+}
+
+pub fn display_diverse_grids(diverse: &DiverseGrids, ball_consensus: &[ConsensusEntry], star_consensus: &[ConsensusEntry]) {
+    use crate::ensemble::consensus::consensus_score;
+
+    println!("\n== 3 Grilles Diversifiées (profils mod-4 distincts) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["#", "Boules", "Étoiles", "Score", "Profil mod-4", "Consensus"]);
+
+    for (i, (grid, profile)) in diverse.grids.iter().zip(diverse.profiles.iter()).enumerate() {
+        let balls_str = grid.balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join(" - ");
+
+        let stars_str = grid.stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join(" - ");
+
+        let profile_str = format!("({},{},{},{})", profile[0], profile[1], profile[2], profile[3]);
+        let cs = consensus_score(&grid.balls, &grid.stars, ball_consensus, star_consensus);
+
+        table.add_row(vec![
+            Cell::new(format!("{}", i + 1)),
+            Cell::new(&balls_str).fg(Color::Green),
+            Cell::new(&stars_str).fg(Color::Yellow),
+            Cell::new(format!("{:.4}", grid.score)),
+            Cell::new(&profile_str).fg(Color::Cyan),
+            Cell::new(format!("{:+.2}", cs)),
+        ]);
+    }
     println!("{table}");
 }
 

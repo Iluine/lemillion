@@ -9,6 +9,7 @@ use rand::rngs::StdRng;
 
 use lemillion_db::models::{Draw, Pool, Suggestion};
 use crate::expected_value::{PopularityModel, anti_popularity, compute_ev};
+use crate::models::summary_predictor::SummaryPredictor;
 
 /// Filtre structurel rejetant les candidats implausibles avant scoring.
 pub struct StructuralFilter {
@@ -88,6 +89,56 @@ impl StructuralFilter {
             max_consecutive: p98_u8(&max_consecs),
             odd_range: (p2_u8(&odd_counts), p98_u8(&odd_counts)),
             spread_range: (p2_u8(&spreads).min(10), p98_u8(&spreads).max(45)),
+        }
+    }
+
+    /// Construit un filtre adaptatif combinant filtres historiques et prédictions résumées.
+    /// Les bornes adaptatives resserrent les bornes historiques quand la prédiction est fiable.
+    pub fn adaptive(draws: &[Draw]) -> Self {
+        let base = Self::from_history(draws, Pool::Balls);
+        let predictor = SummaryPredictor::default();
+
+        match predictor.predict_bounds(draws, 0.80) {
+            Some(bounds) => {
+                // Intersecter bornes historiques et bornes adaptatives
+                let sum_range = (
+                    base.sum_range.0.max(bounds.sum_range.0),
+                    base.sum_range.1.min(bounds.sum_range.1),
+                );
+                // Sécurité : si l'intersection est vide, garder les bornes historiques
+                let sum_range = if sum_range.0 >= sum_range.1 {
+                    base.sum_range
+                } else {
+                    sum_range
+                };
+
+                let spread_range = (
+                    base.spread_range.0.max(bounds.spread_range.0),
+                    base.spread_range.1.min(bounds.spread_range.1),
+                );
+                let spread_range = if spread_range.0 >= spread_range.1 {
+                    base.spread_range
+                } else {
+                    spread_range
+                };
+
+                // Odd range : intersecter avec les valeurs prédites
+                let odd_min = bounds.odd_values.iter().copied().min().unwrap_or(0).max(base.odd_range.0);
+                let odd_max = bounds.odd_values.iter().copied().max().unwrap_or(5).min(base.odd_range.1);
+                let odd_range = if odd_min > odd_max {
+                    base.odd_range
+                } else {
+                    (odd_min, odd_max)
+                };
+
+                Self {
+                    sum_range,
+                    max_consecutive: base.max_consecutive,
+                    odd_range,
+                    spread_range,
+                }
+            }
+            None => base,
         }
     }
 
@@ -498,7 +549,7 @@ impl CoherenceScorer {
     }
 }
 
-/// Génère des suggestions avec scoring conjoint (cohérence historique).
+/// Génère des suggestions avec scoring conjoint (cohérence historique + modèle joint conditionnel).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_suggestions_joint(
     ball_probs: &[f64],
@@ -511,6 +562,11 @@ pub fn generate_suggestions_joint(
     filter: Option<&StructuralFilter>,
 ) -> Result<Vec<Suggestion>> {
     let coherence = CoherenceScorer::from_history(draws, Pool::Balls);
+
+    // Entraîner le modèle joint conditionnel
+    let mut joint_model = crate::models::joint::JointConditionalModel::default();
+    joint_model.train(draws);
+
     let mut rng = StdRng::seed_from_u64(seed);
 
     let uniform_ball = 1.0 / ball_probs.len() as f64;
@@ -551,9 +607,16 @@ pub fn generate_suggestions_joint(
         let bayesian_score = ball_score * star_score;
         let log_bayesian = bayesian_score.max(1e-15).ln();
         let coherence_score = coherence.score_balls(&balls_arr);
-        // Score en log-espace pour le tri : log(bayesian) + coherence
-        // Cela évite que des bayesian_scores énormes noient la cohérence
-        let sort_score = log_bayesian + coherence_score;
+        // Score joint conditionnel (bonus si le modèle est entraîné)
+        let joint_bonus = if joint_model.score_grid(&balls_arr, &stars_arr) != 0.0 {
+            // Normaliser le score joint : ratio vs uniforme, clamped
+            let norm = joint_model.score_grid_normalized(&balls_arr, &stars_arr);
+            norm.max(0.01).ln() * 0.3 // Poids 30% pour le joint
+        } else {
+            0.0
+        };
+        // Score en log-espace pour le tri : log(bayesian) + coherence + joint
+        let sort_score = log_bayesian + coherence_score + joint_bonus;
 
         candidates.push(Suggestion {
             balls: balls_arr,
@@ -566,7 +629,7 @@ pub fn generate_suggestions_joint(
     let n_templates = (count * oversample).saturating_sub(candidates.len());
     if !draws.is_empty() && n_templates > 0 {
         let template_candidates =
-            generate_template_candidates(draws, ball_probs, star_probs, &coherence, n_templates, &mut rng, filter);
+            generate_template_candidates(draws, ball_probs, star_probs, &coherence, &joint_model, n_templates, &mut rng, filter);
         candidates.extend(template_candidates);
     }
 
@@ -588,11 +651,13 @@ pub fn generate_suggestions_joint(
 }
 
 /// Génère des candidats par recombinaison de templates historiques.
+#[allow(clippy::too_many_arguments)]
 fn generate_template_candidates(
     draws: &[Draw],
     ball_probs: &[f64],
     star_probs: &[f64],
     coherence: &CoherenceScorer,
+    joint_model: &crate::models::joint::JointConditionalModel,
     count: usize,
     rng: &mut StdRng,
     filter: Option<&StructuralFilter>,
@@ -681,7 +746,13 @@ fn generate_template_candidates(
         let bayesian_score = ball_score * star_score;
         let log_bayesian = bayesian_score.max(1e-15).ln();
         let coherence_score = coherence.score_balls(&balls);
-        let sort_score = log_bayesian + coherence_score;
+        let joint_bonus = if joint_model.score_grid(&balls, &stars) != 0.0 {
+            let norm = joint_model.score_grid_normalized(&balls, &stars);
+            norm.max(0.01).ln() * 0.3
+        } else {
+            0.0
+        };
+        let sort_score = log_bayesian + coherence_score + joint_bonus;
 
         candidates.push(Suggestion {
             balls,
@@ -1104,6 +1175,186 @@ pub fn generate_suggestions_jackpot(
             filtered_size,
             improvement_factor: improvement,
         })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Diversification par profil mod-4 pour les 3 grilles finales
+// ═══════════════════════════════════════════════════════════════
+
+use crate::models::mod4_profile::{enumerate_profiles, extract_profile};
+
+/// Résultat de la diversification : 3 grilles avec profils mod-4 distincts.
+#[derive(Debug, Clone)]
+pub struct DiverseGrids {
+    pub grids: Vec<Suggestion>,
+    pub profiles: Vec<[u8; 4]>,
+}
+
+/// Génère N grilles diversifiées par profil mod-4.
+///
+/// 1. Prédit les top-N profils mod-4 les plus probables (via la distribution de profils).
+/// 2. Pour chaque profil, génère la meilleure grille contrainte à ce profil.
+/// 3. Les N grilles ont naturellement des structures mod-4 différentes.
+pub fn generate_diverse_grids(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    draws: &[Draw],
+    n_grids: usize,
+    seed: u64,
+) -> DiverseGrids {
+    let profiles = enumerate_profiles(5); // 56 profils pour les boules
+
+    // Scorer chaque profil : somme des probabilités des meilleures boules par classe mod-4
+    let mut profile_scores: Vec<(usize, f64, [u8; 4])> = profiles
+        .iter()
+        .enumerate()
+        .map(|(idx, profile)| {
+            let score = score_profile_against_probs(profile, ball_probs);
+            (idx, score, *profile)
+        })
+        .collect();
+
+    // Bonus pour les profils historiquement fréquents (si assez de tirages)
+    if draws.len() >= 20 {
+        let mut profile_freq = HashMap::new();
+        for d in draws {
+            let p = extract_profile(&d.balls);
+            *profile_freq.entry(p).or_insert(0usize) += 1;
+        }
+        let total = draws.len() as f64;
+        for entry in &mut profile_scores {
+            let freq = *profile_freq.get(&entry.2).unwrap_or(&0) as f64 / total;
+            // Pondérer : 70% score probabiliste, 30% fréquence historique
+            entry.1 = 0.7 * entry.1 + 0.3 * freq;
+        }
+    }
+
+    profile_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Sélectionner les top-N profils DISTINCTS
+    let mut selected_profiles: Vec<[u8; 4]> = Vec::new();
+    for &(_, _, profile) in &profile_scores {
+        if selected_profiles.len() >= n_grids {
+            break;
+        }
+        // S'assurer que le profil est suffisamment distinct des déjà sélectionnés
+        let distinct = selected_profiles.iter().all(|sp| {
+            profile.iter().zip(sp.iter()).map(|(&a, &b)| (a as i8 - b as i8).unsigned_abs()).sum::<u8>() >= 2
+        });
+        if distinct {
+            selected_profiles.push(profile);
+        }
+    }
+
+    // Si pas assez de profils distincts, prendre les meilleurs restants
+    if selected_profiles.len() < n_grids {
+        for &(_, _, profile) in &profile_scores {
+            if selected_profiles.len() >= n_grids {
+                break;
+            }
+            if !selected_profiles.contains(&profile) {
+                selected_profiles.push(profile);
+            }
+        }
+    }
+
+    // Pour chaque profil sélectionné, générer la meilleure grille
+    let mut rng = StdRng::seed_from_u64(seed);
+    let mut grids = Vec::with_capacity(n_grids);
+
+    for profile in &selected_profiles {
+        let grid = best_grid_for_profile(profile, ball_probs, star_probs, &mut rng);
+        grids.push(grid);
+    }
+
+    DiverseGrids {
+        grids,
+        profiles: selected_profiles,
+    }
+}
+
+/// Score un profil mod-4 contre les probabilités marginales.
+/// Pour chaque classe de résidu, prend les top-n_r boules par probabilité.
+fn score_profile_against_probs(profile: &[u8; 4], ball_probs: &[f64]) -> f64 {
+    let mut score = 1.0f64;
+    let uniform = 1.0 / ball_probs.len() as f64;
+
+    for (r, &n_r) in profile.iter().enumerate() {
+        if n_r == 0 {
+            continue;
+        }
+        // Boules de la classe r : indices k tels que k % 4 == r
+        let mut class_probs: Vec<(usize, f64)> = ball_probs
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| k % 4 == r)
+            .map(|(k, &p)| (k, p))
+            .collect();
+        class_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Prendre les n_r meilleures
+        for &(_, p) in class_probs.iter().take(n_r as usize) {
+            score *= p / uniform;
+        }
+    }
+
+    score
+}
+
+/// Génère la meilleure grille pour un profil mod-4 donné.
+fn best_grid_for_profile(
+    profile: &[u8; 4],
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    _rng: &mut StdRng,
+) -> Suggestion {
+    let uniform_ball = 1.0 / ball_probs.len() as f64;
+    let uniform_star = 1.0 / star_probs.len() as f64;
+
+    // Pour chaque classe mod-4, prendre les top n_r boules
+    let mut balls = Vec::with_capacity(5);
+    for (r, &n_r) in profile.iter().enumerate() {
+        if n_r == 0 {
+            continue;
+        }
+        let mut class_probs: Vec<(u8, f64)> = ball_probs
+            .iter()
+            .enumerate()
+            .filter(|(k, _)| k % 4 == r)
+            .map(|(k, &p)| ((k + 1) as u8, p))
+            .collect();
+        class_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        for &(num, _) in class_probs.iter().take(n_r as usize) {
+            balls.push(num);
+        }
+    }
+
+    balls.sort();
+    let mut balls_arr = [0u8; 5];
+    for (i, &b) in balls.iter().take(5).enumerate() {
+        balls_arr[i] = b;
+    }
+
+    // Top 2 étoiles
+    let mut star_indices: Vec<(u8, f64)> = star_probs
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| ((i + 1) as u8, p))
+        .collect();
+    star_indices.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut stars = [star_indices[0].0, star_indices[1].0];
+    stars.sort();
+
+    let score: f64 = balls_arr.iter().map(|&b| ball_probs[(b - 1) as usize] / uniform_ball).product::<f64>()
+        * stars.iter().map(|&s| star_probs[(s - 1) as usize] / uniform_star).product::<f64>();
+
+    Suggestion {
+        balls: balls_arr,
+        stars,
+        score,
     }
 }
 

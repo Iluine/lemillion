@@ -3,12 +3,20 @@ use serde::{Deserialize, Serialize};
 use lemillion_db::models::{Draw, Pool};
 use crate::models::{ForecastModel, SamplingStrategy};
 
+/// Deserialize null as f64::NEG_INFINITY for log_likelihood.
+fn deserialize_ll<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where D: serde::Deserializer<'de> {
+    let v: Option<f64> = Option::deserialize(deserializer)?;
+    Ok(v.unwrap_or(f64::NEG_INFINITY))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationResult {
     pub model_name: String,
     pub window: usize,
     #[serde(default)]
     pub sparse: bool,
+    #[serde(deserialize_with = "deserialize_ll")]
     pub log_likelihood: f64,
     pub n_tests: usize,
 }
@@ -582,10 +590,10 @@ mod tests {
     #[test]
     fn test_calibrate_model_consecutive_only() {
         let draws = make_test_draws(50);
-        let model = crate::models::ewma::EwmaModel::new(0.9);
+        let model = crate::models::logistic::LogisticModel::new(0.01, 0.001, 50, 100);
         let cal = calibrate_model(&model, &draws, &[10, 20], Pool::Balls);
-        assert_eq!(cal.model_name, "EWMA");
-        // EWMA is Consecutive → 2 results only
+        assert_eq!(cal.model_name, "Logistic");
+        // Logistic is Consecutive → 2 results only
         assert_eq!(cal.results.len(), 2);
         assert!(!cal.best_sparse);
     }

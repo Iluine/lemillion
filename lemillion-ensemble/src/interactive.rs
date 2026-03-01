@@ -213,7 +213,7 @@ fn cmd_compare_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
     let balls = prompt_balls()?;
     let stars = prompt_stars()?;
     let numbers: Vec<u8> = balls.iter().chain(stars.iter()).copied().collect();
-    super::cmd_compare(conn, &numbers)
+    super::cmd_compare(conn, &numbers, None, "calibration.json")
 }
 
 fn cmd_coverage_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
