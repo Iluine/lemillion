@@ -14,6 +14,7 @@ enum InteractiveCommand {
     Weights,
     Analyze,
     Coverage,
+    Research,
     Quit,
 }
 
@@ -27,7 +28,8 @@ fn parse_command(input: &str) -> Option<InteractiveCommand> {
         "6" | "poids" | "weights" => Some(InteractiveCommand::Weights),
         "7" | "analyser" | "analyze" | "ana" => Some(InteractiveCommand::Analyze),
         "8" | "couverture" | "coverage" | "cov" => Some(InteractiveCommand::Coverage),
-        "9" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
+        "9" | "recherche" | "research" | "res" => Some(InteractiveCommand::Research),
+        "10" | "quitter" | "quit" | "q" | "exit" => Some(InteractiveCommand::Quit),
         _ => None,
     }
 }
@@ -37,13 +39,14 @@ fn display_menu() {
     println!("── Mode interactif ──");
     println!("  1. ajouter    Ajouter un tirage");
     println!("  2. calibrer   Calibrer les modèles");
-    println!("  3. predire    Prédictions EV-aware");
+    println!("  3. predire    Prédictions (EV ou Jackpot)");
     println!("  4. historique Derniers tirages");
     println!("  5. comparer   Analyser une grille");
     println!("  6. poids      Afficher les poids");
     println!("  7. analyser   Tests de non-aléatoire");
     println!("  8. couverture Optimiser la couverture");
-    println!("  9. quitter    Quitter");
+    println!("  9. recherche  Recherche de biais");
+    println!(" 10. quitter    Quitter");
     println!();
 }
 
@@ -160,6 +163,9 @@ fn cmd_calibrate_interactive(conn: &lemillion_db::rusqlite::Connection) -> Resul
 }
 
 fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    let mode = prompt_with_default("Mode (ev/jackpot)", "ev")?;
+    let jackpot_mode = mode.to_lowercase() == "jackpot";
+
     let n_str = prompt_with_default("Nombre de suggestions", "5")?;
     let n: usize = n_str.parse().context("Nombre invalide")?;
 
@@ -180,7 +186,21 @@ fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
     let jackpot_str = prompt_with_default("Jackpot en EUR", "17000000")?;
     let jackpot: f64 = jackpot_str.parse().context("Jackpot invalide")?;
 
-    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot)
+    let no_filter = if jackpot_mode {
+        let filter_str = prompt_with_default("Désactiver le filtre structurel ? (o/n)", "n")?;
+        filter_str.to_lowercase() == "o"
+    } else {
+        false
+    };
+
+    let top_models = if jackpot_mode {
+        let tm_str = prompt_with_default("Top modèles (0 = tous)", "5")?;
+        tm_str.parse().context("Nombre invalide")?
+    } else {
+        0
+    };
+
+    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, jackpot_mode, no_filter, top_models)
 }
 
 fn cmd_history_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -211,6 +231,17 @@ fn cmd_coverage_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result
     };
 
     super::cmd_coverage(conn, n, jackpot, seed)
+}
+
+fn cmd_research_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
+    let tests = prompt_with_default("Catégorie (all/physical/mathematical/informational)", "all")?;
+    let window_str = prompt_with_default("Fenêtre (vide = tous)", "")?;
+    let window: Option<usize> = if window_str.is_empty() {
+        None
+    } else {
+        Some(window_str.parse().context("Nombre invalide")?)
+    };
+    super::cmd_research(conn, &tests, window)
 }
 
 fn cmd_analyze_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -286,6 +317,11 @@ pub fn run_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> 
                     println!("Erreur: {e:#}");
                 }
             }
+            Some(InteractiveCommand::Research) => {
+                if let Err(e) = cmd_research_interactive(conn) {
+                    println!("Erreur: {e:#}");
+                }
+            }
             None => {
                 println!("Commande inconnue : '{}'. Tapez un numéro (1-9) ou un nom de commande.", input);
             }
@@ -309,7 +345,8 @@ mod tests {
         assert_eq!(parse_command("6"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("7"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("8"), Some(InteractiveCommand::Coverage));
-        assert_eq!(parse_command("9"), Some(InteractiveCommand::Quit));
+        assert_eq!(parse_command("9"), Some(InteractiveCommand::Research));
+        assert_eq!(parse_command("10"), Some(InteractiveCommand::Quit));
     }
 
     #[test]
@@ -322,6 +359,7 @@ mod tests {
         assert_eq!(parse_command("poids"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("analyser"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("couverture"), Some(InteractiveCommand::Coverage));
+        assert_eq!(parse_command("recherche"), Some(InteractiveCommand::Research));
         assert_eq!(parse_command("quitter"), Some(InteractiveCommand::Quit));
     }
 
@@ -335,6 +373,7 @@ mod tests {
         assert_eq!(parse_command("weights"), Some(InteractiveCommand::Weights));
         assert_eq!(parse_command("ana"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("cov"), Some(InteractiveCommand::Coverage));
+        assert_eq!(parse_command("res"), Some(InteractiveCommand::Research));
         assert_eq!(parse_command("q"), Some(InteractiveCommand::Quit));
         assert_eq!(parse_command("exit"), Some(InteractiveCommand::Quit));
     }
@@ -347,13 +386,14 @@ mod tests {
         assert_eq!(parse_command("Predire"), Some(InteractiveCommand::Predict));
         assert_eq!(parse_command("ANALYSER"), Some(InteractiveCommand::Analyze));
         assert_eq!(parse_command("COUVERTURE"), Some(InteractiveCommand::Coverage));
+        assert_eq!(parse_command("RECHERCHE"), Some(InteractiveCommand::Research));
     }
 
     #[test]
     fn test_parse_command_unknown() {
         assert_eq!(parse_command("foo"), None);
         assert_eq!(parse_command(""), None);
-        assert_eq!(parse_command("10"), None);
+        assert_eq!(parse_command("11"), None);
         assert_eq!(parse_command("hello"), None);
     }
 }

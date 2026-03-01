@@ -7,8 +7,9 @@ use crate::ensemble::EnsemblePrediction;
 use crate::ensemble::calibration::{EnsembleWeights, ModelCalibration};
 use crate::ensemble::consensus::{ConsensusCategory, ConsensusEntry};
 use crate::expected_value::{PopularityModel, PRIZE_TIERS, jackpot_threshold, compute_ev};
-use crate::sampler::ScoredSuggestion;
+use crate::sampler::{ConvictionScore, ConvictionVerdict, JackpotResult, ScoredSuggestion};
 use crate::coverage::CoverageStats;
+use crate::research::{ResearchReport, ResearchVerdict};
 
 pub fn display_calibration_results(calibrations: &[ModelCalibration], windows: &[usize]) {
     println!("\n== Résultats de calibration ==\n");
@@ -958,5 +959,351 @@ pub fn display_coverage_stats(stats: &CoverageStats, n_tickets: usize) {
         ]);
     }
     println!("{tier_table}");
+}
+
+/// Affiche le rapport de recherche de biais.
+pub fn display_research_report(report: &ResearchReport) {
+    let categories = [
+        ("Physical", &report.physical),
+        ("Mathematical", &report.mathematical),
+        ("Informational", &report.informational),
+    ];
+
+    for (cat_name, results) in &categories {
+        if results.is_empty() {
+            continue;
+        }
+
+        println!("\n== {} ({} tests) ==\n", cat_name, results.len());
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec!["Test", "Statistique", "p-value", "Effet", "Verdict", "Détails"]);
+
+        for r in *results {
+            let verdict_color = match r.verdict {
+                ResearchVerdict::Significant => Color::Green,
+                ResearchVerdict::Marginal => Color::Yellow,
+                ResearchVerdict::NotSignificant => Color::White,
+            };
+
+            let p_str = match r.p_value {
+                Some(p) => {
+                    if p < 0.001 { format!("{:.2e}", p) }
+                    else { format!("{:.4}", p) }
+                }
+                None => "—".to_string(),
+            };
+
+            let stat_str = if r.statistic.is_nan() {
+                "N/A".to_string()
+            } else {
+                format!("{:.4}", r.statistic)
+            };
+
+            // Truncate detail to keep table readable
+            let detail = if r.detail.len() > 80 {
+                format!("{}…", &r.detail[..77])
+            } else {
+                r.detail.clone()
+            };
+
+            table.add_row(vec![
+                Cell::new(&r.test_name),
+                Cell::new(&stat_str),
+                Cell::new(&p_str),
+                Cell::new(format!("{:.4}", r.effect_size)),
+                Cell::new(format!("{}", r.verdict)).fg(verdict_color),
+                Cell::new(&detail),
+            ]);
+        }
+        println!("{table}");
+    }
+
+    // Résumé global
+    let all = report.all_results();
+    let sig_count = all.iter().filter(|r| r.verdict == ResearchVerdict::Significant).count();
+    let marg_count = all.iter().filter(|r| r.verdict == ResearchVerdict::Marginal).count();
+    let ns_count = all.iter().filter(|r| r.verdict == ResearchVerdict::NotSignificant).count();
+
+    println!("\n── Résumé global ({} tests) ──", all.len());
+    println!("  SIGNIFICATIF: {}  MARGINAL: {}  NON-SIGNIFICATIF: {}", sig_count, marg_count, ns_count);
+
+    // Per-category summary
+    for (cat_name, results) in &categories {
+        if results.is_empty() {
+            continue;
+        }
+        let s = results.iter().filter(|r| r.verdict == ResearchVerdict::Significant).count();
+        let m = results.iter().filter(|r| r.verdict == ResearchVerdict::Marginal).count();
+        println!("  {} : {} sig, {} marg / {} total", cat_name, s, m, results.len());
+    }
+
+    if sig_count >= 5 {
+        println!("\n  --> Plusieurs biais significatifs détectés. Investigation approfondie recommandée.");
+    } else if sig_count + marg_count >= 5 {
+        println!("\n  --> Signaux faibles détectés. Augmenter la fenêtre ou le nombre de tirages pour confirmer.");
+    } else {
+        println!("\n  --> Pas de biais exploitable détecté. Les tirages semblent conformes à l'uniformité.");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// Affichage mode Jackpot
+// ════════════════════════════════════════════════════════════════
+
+/// Affiche les résultats du mode jackpot.
+pub fn display_conviction(conviction: &ConvictionScore) {
+    println!("\n== Conviction de l'ensemble ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Métrique", "Boules", "Étoiles"]);
+
+    table.add_row(vec![
+        Cell::new("Entropie (bits)"),
+        Cell::new(format!("{:.3}", conviction.ball_entropy)),
+        Cell::new(format!("{:.3}", conviction.star_entropy)),
+    ]);
+
+    table.add_row(vec![
+        Cell::new("Concentration"),
+        Cell::new(format!("{:.1}%", conviction.ball_concentration * 100.0)),
+        Cell::new(format!("{:.1}%", conviction.star_concentration * 100.0)),
+    ]);
+
+    table.add_row(vec![
+        Cell::new("Accord inter-modèles"),
+        Cell::new(format!("{:.1}%", conviction.ball_agreement * 100.0)),
+        Cell::new(format!("{:.1}%", conviction.star_agreement * 100.0)),
+    ]);
+
+    let (verdict_str, verdict_color) = match conviction.verdict {
+        ConvictionVerdict::HighConviction => ("HAUTE", Color::Green),
+        ConvictionVerdict::MediumConviction => ("MOYENNE", Color::Yellow),
+        ConvictionVerdict::LowConviction => ("BASSE", Color::Red),
+    };
+
+    table.add_row(vec![
+        Cell::new("Score global"),
+        Cell::new(format!("{:.2}", conviction.overall)).fg(verdict_color),
+        Cell::new(verdict_str).fg(verdict_color),
+    ]);
+
+    println!("{table}");
+}
+
+pub fn display_jackpot_results(
+    result: &JackpotResult,
+    ball_consensus: &[ConsensusEntry],
+    star_consensus: &[ConsensusEntry],
+    conviction: &ConvictionScore,
+) {
+    use crate::ensemble::consensus::consensus_score;
+
+    println!("\n== Mode Jackpot ==\n");
+
+    // Table de résumé
+    let mut summary = Table::new();
+    summary
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Métrique", "Valeur"]);
+
+    summary.add_row(vec![
+        Cell::new("Combinaisons énumérées"),
+        Cell::new(format_count(result.enumeration_size)),
+    ]);
+    summary.add_row(vec![
+        Cell::new("Passant le filtre"),
+        Cell::new(format_count(result.filtered_size)),
+    ]);
+    summary.add_row(vec![
+        Cell::new("Retournées (top-N)"),
+        Cell::new(format!("{}", result.suggestions.len())),
+    ]);
+    summary.add_row(vec![
+        Cell::new("P(jackpot totale)"),
+        Cell::new(format!("{:.2e}", result.total_jackpot_probability)).fg(Color::Cyan),
+    ]);
+    summary.add_row(vec![
+        Cell::new("Facteur vs uniforme"),
+        Cell::new(format!("{:.2}x", result.improvement_factor)).fg(
+            if result.improvement_factor > 1.0 { Color::Green } else { Color::Yellow }
+        ),
+    ]);
+
+    let equiv_uniform = result.total_jackpot_probability * 139_838_160.0;
+    summary.add_row(vec![
+        Cell::new("Equiv. tickets uniformes"),
+        Cell::new(format!("{:.0}", equiv_uniform)),
+    ]);
+
+    println!("{summary}");
+
+    // Conviction
+    display_conviction(conviction);
+
+    // Table des suggestions
+    let n_display = result.suggestions.len().min(50);
+    println!("\n── Top {} suggestions ──\n", n_display);
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["#", "Boules", "Étoiles", "Score", "P(5+2)", "Consensus"]);
+
+    for (i, sug) in result.suggestions.iter().take(n_display).enumerate() {
+        let balls_str = sug.balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join(" - ");
+        let stars_str = sug.stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join(" - ");
+
+        let cs = consensus_score(&sug.balls, &sug.stars, ball_consensus, star_consensus);
+
+        // P(5+2) = produit des probas individuelles (pas le score bayésien)
+        // On ne le recalcule pas ici, mais le score est proportionnel
+
+        if i == 0 {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)).fg(Color::Green),
+                Cell::new(&balls_str).fg(Color::Green),
+                Cell::new(&stars_str).fg(Color::Green),
+                Cell::new(format!("{:.4}", sug.score)).fg(Color::Green),
+                Cell::new(format!("{:.2e}", sug.score / (139_838_160.0_f64))).fg(Color::Green),
+                Cell::new(format!("{:+.2}", cs)).fg(Color::Green),
+            ]);
+        } else {
+            table.add_row(vec![
+                Cell::new(format!("{}", i + 1)),
+                Cell::new(&balls_str),
+                Cell::new(&stars_str),
+                Cell::new(format!("{:.4}", sug.score)),
+                Cell::new(format!("{:.2e}", sug.score / (139_838_160.0_f64))),
+                Cell::new(format!("{:+.2}", cs)),
+            ]);
+        }
+    }
+
+    if result.suggestions.len() > n_display {
+        println!("  ... et {} autres suggestions", result.suggestions.len() - n_display);
+    }
+
+    println!("{table}");
+}
+
+/// Résultat backtest mode jackpot pour un tirage.
+pub struct JackpotBacktestRow {
+    pub date: String,
+    pub actual_balls: [u8; 5],
+    pub actual_stars: [u8; 2],
+    pub actual_score: f64,
+    pub in_top_n: bool,
+    pub jackpot_probability: f64,
+    pub improvement_factor: f64,
+    pub best_tier: Option<u8>,
+    pub total_payout: f64,
+    pub conviction: f64,
+}
+
+/// Affiche les résultats de backtest mode jackpot.
+pub fn display_jackpot_backtest_results(rows: &[JackpotBacktestRow]) {
+    println!("\n== Backtest (mode Jackpot) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            "Date", "Tirage réel", "Score", "Top-N?", "P(jackpot)", "Amélioration", "Conv.", "Best", "Gain",
+        ]);
+
+    for row in rows {
+        let balls_str = row.actual_balls
+            .iter()
+            .map(|b| format!("{:2}", b))
+            .collect::<Vec<_>>()
+            .join("-");
+        let stars_str = row.actual_stars
+            .iter()
+            .map(|s| format!("{:2}", s))
+            .collect::<Vec<_>>()
+            .join("-");
+        let draw_str = format!("{} + {}", balls_str, stars_str);
+
+        let in_top = if row.in_top_n {
+            Cell::new("OUI").fg(Color::Green)
+        } else {
+            Cell::new("non").fg(Color::Red)
+        };
+
+        let best_str = match row.best_tier {
+            Some(t) => PRIZE_TIERS[t as usize].name.to_string(),
+            None => "—".to_string(),
+        };
+
+        let conv_color = if row.conviction >= 0.6 {
+            Color::Green
+        } else if row.conviction >= 0.3 {
+            Color::Yellow
+        } else {
+            Color::Red
+        };
+
+        table.add_row(vec![
+            Cell::new(&row.date),
+            Cell::new(&draw_str),
+            Cell::new(format!("{:.4}", row.actual_score)),
+            in_top,
+            Cell::new(format!("{:.2e}", row.jackpot_probability)),
+            Cell::new(format!("{:.2}x", row.improvement_factor)),
+            Cell::new(format!("{:.2}", row.conviction)).fg(conv_color),
+            Cell::new(&best_str),
+            Cell::new(format!("{:.2}", row.total_payout)),
+        ]);
+    }
+    println!("{table}");
+
+    // Résumé
+    if !rows.is_empty() {
+        let n = rows.len() as f64;
+        let avg_improvement = rows.iter().map(|r| r.improvement_factor).sum::<f64>() / n;
+        let avg_prob = rows.iter().map(|r| r.jackpot_probability).sum::<f64>() / n;
+        let hits_in_top = rows.iter().filter(|r| r.in_top_n).count();
+        let total_payout: f64 = rows.iter().map(|r| r.total_payout).sum();
+
+        let avg_conviction = rows.iter().map(|r| r.conviction).sum::<f64>() / n;
+
+        println!("\n── Résumé Jackpot ──");
+        println!("  P(jackpot) moyenne   : {:.2e}", avg_prob);
+        println!("  Amélioration moyenne : {:.2}x", avg_improvement);
+        println!("  Conviction moyenne   : {:.2}", avg_conviction);
+        println!("  Dans top-N           : {}/{}", hits_in_top, rows.len());
+        println!("  Gain total           : {:.2} EUR", total_payout);
+    }
+}
+
+/// Formate un grand nombre avec séparateurs de milliers.
+fn format_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(' ');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 

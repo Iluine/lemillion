@@ -16,6 +16,10 @@ pub mod transformer;
 pub mod tda;
 pub mod diffusion;
 pub mod physics;
+pub mod mod4;
+pub mod triplet;
+pub mod conditional;
+pub mod stresa;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -56,7 +60,7 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Les 18 modèles de base.
+/// Les 24 modèles de base.
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
         Box::new(dirichlet::DirichletModel::with_window(0.1, Some(30))),
@@ -88,6 +92,12 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(tda::TdaModel::default()),
         Box::new(diffusion::DiffusionModel::default()),
         Box::new(physics::PhysicsModel::default()),
+        Box::new(mod4::Mod4TransitionModel::default()),
+        Box::new(triplet::TripletBoostModel::default()),
+        Box::new(conditional::ConditionalSummaryModel::default()),
+        Box::new(stresa::StresaSgdModel::default()),
+        Box::new(stresa::StresaSmcModel::default()),
+        Box::new(stresa::StresaChaosModel::default()),
     ]
 }
 

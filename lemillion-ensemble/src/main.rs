@@ -15,13 +15,15 @@ use lemillion_ensemble::ensemble::calibration::{
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
 use lemillion_ensemble::sampler::{
-    apply_temperature, compute_bayesian_score, generate_suggestions_filtered,
-    generate_suggestions_ev, optimal_grid, StructuralFilter,
+    apply_temperature, compute_bayesian_score, compute_conviction, conviction_temperature,
+    generate_suggestions_filtered,
+    generate_suggestions_ev, generate_suggestions_jackpot, optimal_grid, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
     PopularityModel, count_matches, match_to_tier, PRIZE_TIERS, TICKET_PRICE,
 };
 use lemillion_ensemble::coverage::{optimize_coverage, compute_coverage_stats};
+use lemillion_ensemble::research::{ResearchCategory, run_all_research};
 
 #[derive(Parser)]
 #[command(name = "lemillion-ensemble", about = "EuroMillions Ensemble Forecasting")]
@@ -83,6 +85,18 @@ enum Command {
         /// Montant du jackpot actuel en EUR
         #[arg(long, default_value = "17000000")]
         jackpot: f64,
+
+        /// Mode jackpot : maximiser P(5+2) par énumération exhaustive
+        #[arg(long)]
+        jackpot_mode: bool,
+
+        /// Désactiver le filtre structurel
+        #[arg(long)]
+        no_filter: bool,
+
+        /// Nombre de top modèles à conserver (0 = tous)
+        #[arg(long, default_value = "0")]
+        top_models: usize,
     },
 
     /// Historique des derniers tirages
@@ -135,6 +149,14 @@ enum Command {
         /// Balayer plusieurs températures pour trouver la meilleure
         #[arg(long)]
         sweep_temperature: bool,
+
+        /// Mode jackpot : maximiser P(5+2) par énumération exhaustive
+        #[arg(long)]
+        jackpot_mode: bool,
+
+        /// Nombre de top modèles à conserver (0 = tous)
+        #[arg(long, default_value = "0")]
+        top_models: usize,
     },
 
     /// Analyser la non-aléatoire des tirages
@@ -155,6 +177,28 @@ enum Command {
         seed: Option<u64>,
     },
 
+    /// Recherche de biais exploitables
+    Research {
+        /// Catégorie de tests : physical, mathematical, informational, all
+        #[arg(short = 't', long, default_value = "all")]
+        tests: String,
+
+        /// Fenêtre : derniers N tirages (défaut: tous)
+        #[arg(short, long)]
+        window: Option<usize>,
+    },
+
+    /// Benchmark des modèles physiques par random-split
+    Benchmark {
+        /// Taille du jeu d'entraînement
+        #[arg(long, default_value = "600")]
+        train: usize,
+
+        /// Seed pour le shuffle
+        #[arg(long, default_value = "42")]
+        seed: u64,
+    },
+
     /// Mode interactif (REPL)
     Interactive,
 }
@@ -168,15 +212,17 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Calibrate { windows, output, temperature } => cmd_calibrate(&conn, &windows, &output, temperature),
         Command::Weights { calibration } => cmd_weights(&calibration),
-        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot),
+        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers } => cmd_compare(&conn, &numbers),
         Command::AddDraw { args } => cmd_add_draw(&conn, &args),
         Command::FixDraw => cmd_fix_draw(&conn),
         Command::Rebuild => cmd_rebuild(&conn),
-        Command::Backtest { last, suggestions, oversample, calibration, temperature, sweep_temperature } => cmd_backtest(&conn, last, suggestions, oversample, &calibration, temperature, sweep_temperature),
+        Command::Backtest { last, suggestions, oversample, calibration, temperature, sweep_temperature, jackpot_mode, top_models } => cmd_backtest(&conn, last, suggestions, oversample, &calibration, temperature, sweep_temperature, jackpot_mode, top_models),
         Command::Analyze => cmd_analyze(&conn),
         Command::Coverage { tickets, jackpot, seed } => cmd_coverage(&conn, tickets, jackpot, seed),
+        Command::Research { tests, window } => cmd_research(&conn, &tests, window),
+        Command::Benchmark { train, seed } => cmd_benchmark(&conn, train, seed),
         Command::Interactive => interactive::run_interactive(&conn),
     }
 }
@@ -241,6 +287,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         ball_weights,
         star_weights,
         calibrations: ball_calibrations.into_iter().chain(star_calibrations).collect(),
+        detailed_ll: Vec::new(),
     };
 
     display::display_weights(&ensemble_weights);
@@ -260,8 +307,62 @@ pub(crate) fn cmd_weights(calibration_path: &str) -> Result<()> {
     Ok(())
 }
 
+fn filter_top_models(
+    ball_weights: &mut [f64],
+    star_weights: &mut [f64],
+    model_names: &[String],
+    top_n: usize,
+) {
+    // Filter ball weights: keep top N, zero the rest
+    let mut ball_indexed: Vec<(usize, f64)> = ball_weights.iter().copied().enumerate().collect();
+    ball_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_ball_indices: Vec<usize> = ball_indexed.iter().take(top_n).map(|(i, _)| *i).collect();
+    for (i, w) in ball_weights.iter_mut().enumerate() {
+        if !top_ball_indices.contains(&i) {
+            *w = 0.0;
+        }
+    }
+    let ball_sum: f64 = ball_weights.iter().sum();
+    if ball_sum > 0.0 {
+        for w in ball_weights.iter_mut() {
+            *w /= ball_sum;
+        }
+    }
+
+    // Filter star weights: keep top N, zero the rest
+    let mut star_indexed: Vec<(usize, f64)> = star_weights.iter().copied().enumerate().collect();
+    star_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_star_indices: Vec<usize> = star_indexed.iter().take(top_n).map(|(i, _)| *i).collect();
+    for (i, w) in star_weights.iter_mut().enumerate() {
+        if !top_star_indices.contains(&i) {
+            *w = 0.0;
+        }
+    }
+    let star_sum: f64 = star_weights.iter().sum();
+    if star_sum > 0.0 {
+        for w in star_weights.iter_mut() {
+            *w /= star_sum;
+        }
+    }
+
+    // Display retained models
+    println!("\n── Top {} modèles retenus ──", top_n);
+    println!("  Boules:");
+    for &idx in &top_ball_indices {
+        if idx < model_names.len() {
+            println!("    {} ({:.4})", model_names[idx], ball_weights[idx]);
+        }
+    }
+    println!("  Étoiles:");
+    for &idx in &top_star_indices {
+        if idx < model_names.len() {
+            println!("    {} ({:.4})", model_names[idx], star_weights[idx]);
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64) -> Result<()> {
+pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64, jackpot_mode: bool, no_filter: bool, top_models: usize) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -278,7 +379,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
 
     let models = all_models();
     let weights = load_weights(&PathBuf::from(calibration_path));
-    let combiner = match weights {
+    let mut combiner = match weights {
         Ok(w) => {
             let ball_w: Vec<f64> = models.iter()
                 .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
@@ -294,6 +395,12 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
     };
 
+    // Filtrer les top modèles si demandé
+    if top_models > 0 {
+        let model_names: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+        filter_top_models(&mut combiner.ball_weights, &mut combiner.star_weights, &model_names, top_models);
+    }
+
     let ball_pred = combiner.predict(&draws, Pool::Balls);
     let star_pred = combiner.predict(&draws, Pool::Stars);
 
@@ -307,17 +414,37 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     display::display_consensus(&ball_consensus, Pool::Balls);
     display::display_consensus(&star_consensus, Pool::Stars);
 
-    // Appliquer la température si fournie
-    let (ball_dist, star_dist) = match temperature {
-        Some(t) => {
-            if t <= 0.0 {
-                bail!("La température doit être > 0 (reçu : {t})");
-            }
-            println!("\n(Température appliquée : {:.2})", t);
-            (apply_temperature(&ball_pred.distribution, t),
-             apply_temperature(&star_pred.distribution, t))
-        }
-        None => (ball_pred.distribution.clone(), star_pred.distribution.clone()),
+    if let Some(t) = temperature
+        && t <= 0.0
+    {
+        bail!("La température doit être > 0 (reçu : {t})");
+    }
+
+    // Calculer la conviction AVANT d'appliquer la température (sur la distribution brute)
+    let conviction = compute_conviction(
+        &ball_pred.distribution,
+        &star_pred.distribution,
+        &ball_pred.spread,
+        &star_pred.spread,
+    );
+
+    // Température adaptative : utiliser la conviction comme fallback en mode jackpot
+    let effective_temp = if let Some(t) = temperature {
+        t
+    } else if jackpot_mode {
+        let ct = conviction_temperature(&conviction.verdict);
+        println!("\n(Température adaptative par conviction [{:.0}%] : {:.2})", conviction.overall * 100.0, ct);
+        ct
+    } else {
+        1.0
+    };
+
+    let (ball_dist, star_dist) = if (effective_temp - 1.0).abs() > 1e-9 {
+        println!("(Température appliquée : {:.2})", effective_temp);
+        (apply_temperature(&ball_pred.distribution, effective_temp),
+         apply_temperature(&star_pred.distribution, effective_temp))
+    } else {
+        (ball_pred.distribution.clone(), star_pred.distribution.clone())
     };
 
     // Grille optimale
@@ -325,40 +452,57 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let optimal_cs = consensus_score(&optimal.balls, &optimal.stars, &ball_consensus, &star_consensus);
     display::display_optimal_grid(&optimal, optimal_cs);
 
-    // Résolution du seed
-    let effective_seed = seed.unwrap_or_else(|| {
-        let ds = lemillion_ensemble::sampler::date_seed();
-        println!("(Seed du jour : {ds})");
-        ds
-    });
+    if jackpot_mode {
+        // Mode Jackpot : énumération exhaustive
+        let filter = if no_filter {
+            None
+        } else {
+            Some(StructuralFilter::from_history(&draws, Pool::Balls))
+        };
 
-    // Suggestions EV-aware (anti-popularite)
-    let ev_suggestions = generate_suggestions_ev(
-        &ball_dist,
-        &star_dist,
-        &draws,
-        n_suggestions,
-        effective_seed,
-        oversample,
-        min_diff,
-        &popularity,
-        jackpot,
-    )?;
+        let result = generate_suggestions_jackpot(
+            &ball_dist,
+            &star_dist,
+            n_suggestions,
+            filter.as_ref(),
+        )?;
 
-    // Tri par EV descendant
-    let mut indexed: Vec<(usize, f64)> = ev_suggestions.iter().enumerate()
-        .map(|(i, s)| (i, s.ev_per_euro))
-        .collect();
-    indexed.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-    });
+        display::display_jackpot_results(&result, &ball_consensus, &star_consensus, &conviction);
+    } else {
+        // Mode EV (défaut)
+        let effective_seed = seed.unwrap_or_else(|| {
+            let ds = lemillion_ensemble::sampler::date_seed();
+            println!("(Seed du jour : {ds})");
+            ds
+        });
 
-    let sorted_suggestions: Vec<_> = indexed.iter().map(|(i, _)| ev_suggestions[*i].clone()).collect();
-    let consensus_scores_ev: Vec<f64> = sorted_suggestions.iter()
-        .map(|s| consensus_score(&s.balls, &s.stars, &ball_consensus, &star_consensus))
-        .collect();
+        let ev_suggestions = generate_suggestions_ev(
+            &ball_dist,
+            &star_dist,
+            &draws,
+            n_suggestions,
+            effective_seed,
+            oversample,
+            min_diff,
+            &popularity,
+            jackpot,
+        )?;
 
-    display::display_suggestions_ev(&sorted_suggestions, &consensus_scores_ev);
+        // Tri par EV descendant
+        let mut indexed: Vec<(usize, f64)> = ev_suggestions.iter().enumerate()
+            .map(|(i, s)| (i, s.ev_per_euro))
+            .collect();
+        indexed.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let sorted_suggestions: Vec<_> = indexed.iter().map(|(i, _)| ev_suggestions[*i].clone()).collect();
+        let consensus_scores_ev: Vec<f64> = sorted_suggestions.iter()
+            .map(|s| consensus_score(&s.balls, &s.stars, &ball_consensus, &star_consensus))
+            .collect();
+
+        display::display_suggestions_ev(&sorted_suggestions, &consensus_scores_ev);
+    }
 
     Ok(())
 }
@@ -505,6 +649,7 @@ fn cmd_fix_draw(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_backtest(
     conn: &lemillion_db::rusqlite::Connection,
     last: usize,
@@ -513,6 +658,8 @@ fn cmd_backtest(
     calibration_path: &str,
     temperature: Option<f64>,
     sweep_temperature: bool,
+    jackpot_mode: bool,
+    top_models: usize,
 ) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
@@ -540,6 +687,11 @@ fn cmd_backtest(
     // Sweep de température
     if sweep_temperature {
         return cmd_backtest_sweep(&draws, weights.as_ref().ok(), last, n_suggestions, oversample);
+    }
+
+    // Mode jackpot backtest
+    if jackpot_mode {
+        return cmd_backtest_jackpot(&draws, weights.as_ref().ok(), last, n_suggestions, temperature, top_models);
     }
 
     // Si --temperature fourni, recomputer les poids depuis les calibrations stockées
@@ -610,6 +762,8 @@ fn run_backtest_inner(
     pb: Option<&ProgressBar>,
 ) -> Result<Vec<display::BacktestRow>> {
     let mut rows = Vec::with_capacity(last);
+    // (date, tier_name, rank, total, score)
+    let mut winning_ranks: Vec<(String, &str, usize, usize, f64)> = Vec::new();
 
     for i in 0..last {
         let test_draw = &draws[i];
@@ -710,11 +864,12 @@ fn run_backtest_inner(
         };
 
         // Matches partiels : compter les hits par rang de prix
+        // Also track rank of winning grids (suggestions are already sorted by score desc)
         let mut tier_hits = [0u32; 13];
         let mut best_tier: Option<u8> = None;
         let mut total_payout = 0.0f64;
 
-        for suggestion in &suggestions {
+        for (rank, suggestion) in suggestions.iter().enumerate() {
             let (bm, sm) = count_matches(&suggestion.balls, &suggestion.stars, test_draw);
             if let Some(tier_idx) = match_to_tier(bm, sm) {
                 tier_hits[tier_idx] += 1;
@@ -724,6 +879,11 @@ fn run_backtest_inner(
                     PRIZE_TIERS[tier_idx].fixed_prize
                 };
                 total_payout += payout;
+
+                // Track rank for winning grids (tier <= 9 = 3+0 or better)
+                if tier_idx <= 9 {
+                    winning_ranks.push((test_draw.date.clone(), PRIZE_TIERS[tier_idx].name, rank + 1, config.n_suggestions, suggestion.score));
+                }
 
                 match best_tier {
                     None => best_tier = Some(tier_idx as u8),
@@ -757,6 +917,58 @@ fn run_backtest_inner(
 
         if let Some(pb) = pb {
             pb.inc(1);
+        }
+    }
+
+    // Display winning grid rank analysis
+    if !winning_ranks.is_empty() {
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
+        println!("\n== Rang des grilles gagnantes (3+0 ou mieux) ==\n");
+
+        // Group by tier
+        let mut by_tier: std::collections::BTreeMap<&str, Vec<(usize, usize, f64)>> = std::collections::BTreeMap::new();
+        for (_, tier, rank, total, score) in &winning_ranks {
+            by_tier.entry(tier).or_default().push((*rank, *total, *score));
+        }
+
+        // Show detail for high tiers (4+1, 3+2, 4+0, 3+1, 3+0)
+        use comfy_table::{Table, Cell, Color};
+        let mut table = Table::new();
+        table.load_preset(comfy_table::presets::UTF8_FULL);
+        table.set_header(vec!["Date", "Rang prix", "Position", "Percentile", "Score"]);
+
+        for (date, tier, rank, total, score) in &winning_ranks {
+            let pct = 100.0 * *rank as f64 / *total as f64;
+            let pct_str = format!("{:.1}%", pct);
+            let pos_str = format!("{}/{}", rank, total);
+            let color = if pct <= 25.0 { Color::Green } else if pct <= 50.0 { Color::Yellow } else { Color::Red };
+            table.add_row(vec![
+                Cell::new(date),
+                Cell::new(tier),
+                Cell::new(&pos_str),
+                Cell::new(&pct_str).fg(color),
+                Cell::new(format!("{:.4}", score)),
+            ]);
+        }
+        println!("{table}");
+
+        // Summary per tier
+        println!("\n── Résumé par rang ──");
+        for (tier, ranks) in &by_tier {
+            let percentiles: Vec<f64> = ranks.iter().map(|(r, t, _)| 100.0 * *r as f64 / *t as f64).collect();
+            let avg_pct = percentiles.iter().sum::<f64>() / percentiles.len() as f64;
+            let median_pct = {
+                let mut sorted = percentiles.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted[sorted.len() / 2]
+            };
+            let in_top_quarter = percentiles.iter().filter(|&&p| p <= 25.0).count();
+            let in_top_half = percentiles.iter().filter(|&&p| p <= 50.0).count();
+            println!("  {} : {} grilles, percentile moyen {:.1}%, médian {:.1}%, top-25%: {}/{}, top-50%: {}/{}",
+                tier, ranks.len(), avg_pct, median_pct,
+                in_top_quarter, ranks.len(), in_top_half, ranks.len());
         }
     }
 
@@ -832,6 +1044,170 @@ fn cmd_backtest_sweep(
     Ok(())
 }
 
+fn cmd_backtest_jackpot(
+    draws: &[Draw],
+    weights: Option<&EnsembleWeights>,
+    last: usize,
+    n_suggestions: usize,
+    temperature: Option<f64>,
+    top_models: usize,
+) -> Result<()> {
+    let temp_label = match temperature {
+        Some(t) => format!("T={:.2}", t),
+        None => "T=adaptive".to_string(),
+    };
+
+    println!(
+        "Backtest Jackpot de {} tirages avec {} suggestions chacun ({}{})\n",
+        last, n_suggestions, temp_label,
+        if top_models > 0 { format!(", top-{}", top_models) } else { String::new() },
+    );
+
+    let pb = ProgressBar::new(last as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let mut rows = Vec::with_capacity(last);
+
+    for i in 0..last {
+        let test_draw = &draws[i];
+        let training_draws = &draws[i + 1..];
+
+        pb.set_message(test_draw.date.to_string());
+
+        let models = all_models();
+        let mut combiner = match weights {
+            Some(w) => {
+                let ball_w: Vec<f64> = models
+                    .iter()
+                    .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                    .collect();
+                let star_w: Vec<f64> = models
+                    .iter()
+                    .map(|m| w.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                    .collect();
+                EnsembleCombiner::with_weights(models, ball_w, star_w)
+            }
+            None => EnsembleCombiner::new(models),
+        };
+
+        // Filtrer les top modèles si demandé (silencieux en backtest)
+        if top_models > 0 {
+            let model_names: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+            // Filter without printing (backtest loop)
+            let mut ball_indexed: Vec<(usize, f64)> = combiner.ball_weights.iter().copied().enumerate().collect();
+            ball_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top_ball: Vec<usize> = ball_indexed.iter().take(top_models).map(|(i, _)| *i).collect();
+            for (i, w) in combiner.ball_weights.iter_mut().enumerate() {
+                if !top_ball.contains(&i) { *w = 0.0; }
+            }
+            let bs: f64 = combiner.ball_weights.iter().sum();
+            if bs > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= bs; } }
+
+            let mut star_indexed: Vec<(usize, f64)> = combiner.star_weights.iter().copied().enumerate().collect();
+            star_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top_star: Vec<usize> = star_indexed.iter().take(top_models).map(|(i, _)| *i).collect();
+            for (i, w) in combiner.star_weights.iter_mut().enumerate() {
+                if !top_star.contains(&i) { *w = 0.0; }
+            }
+            let ss: f64 = combiner.star_weights.iter().sum();
+            if ss > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= ss; } }
+            let _ = model_names; // suppress unused warning
+        }
+
+        let ball_pred = combiner.predict(training_draws, Pool::Balls);
+        let star_pred = combiner.predict(training_draws, Pool::Stars);
+
+        // Conviction calculée sur la distribution BRUTE (avant température)
+        let conviction = compute_conviction(
+            &ball_pred.distribution,
+            &star_pred.distribution,
+            &ball_pred.spread,
+            &star_pred.spread,
+        );
+
+        // Température adaptative par conviction si pas de --temperature explicite
+        let effective_temp = temperature.unwrap_or_else(|| conviction_temperature(&conviction.verdict));
+
+        let ball_dist = if (effective_temp - 1.0).abs() > 1e-9 {
+            apply_temperature(&ball_pred.distribution, effective_temp)
+        } else {
+            ball_pred.distribution.clone()
+        };
+        let star_dist = if (effective_temp - 1.0).abs() > 1e-9 {
+            apply_temperature(&star_pred.distribution, effective_temp)
+        } else {
+            star_pred.distribution.clone()
+        };
+
+        let actual_score = compute_bayesian_score(
+            &test_draw.balls, &test_draw.stars, &ball_dist, &star_dist,
+        );
+
+        let filter = StructuralFilter::from_history(training_draws, Pool::Balls);
+        let result = generate_suggestions_jackpot(
+            &ball_dist, &star_dist, n_suggestions, Some(&filter),
+        )?;
+
+        // Vérifier si le tirage réel est dans le top-N
+        let in_top_n = result.suggestions.iter().any(|s| {
+            let mut sb = s.balls;
+            let mut tb = test_draw.balls;
+            sb.sort();
+            tb.sort();
+            let mut ss = s.stars;
+            let mut ts = test_draw.stars;
+            ss.sort();
+            ts.sort();
+            sb == tb && ss == ts
+        });
+
+        // Matches partiels
+        let mut best_tier: Option<u8> = None;
+        let mut total_payout = 0.0f64;
+        for suggestion in &result.suggestions {
+            let (bm, sm) = count_matches(&suggestion.balls, &suggestion.stars, test_draw);
+            if let Some(tier_idx) = match_to_tier(bm, sm) {
+                let payout = if PRIZE_TIERS[tier_idx].is_parimutuel {
+                    0.0
+                } else {
+                    PRIZE_TIERS[tier_idx].fixed_prize
+                };
+                total_payout += payout;
+                match best_tier {
+                    None => best_tier = Some(tier_idx as u8),
+                    Some(current) if (tier_idx as u8) < current => best_tier = Some(tier_idx as u8),
+                    _ => {}
+                }
+            }
+        }
+
+        rows.push(display::JackpotBacktestRow {
+            date: test_draw.date.clone(),
+            actual_balls: test_draw.balls,
+            actual_stars: test_draw.stars,
+            actual_score,
+            in_top_n,
+            jackpot_probability: result.total_jackpot_probability,
+            improvement_factor: result.improvement_factor,
+            best_tier,
+            total_payout,
+            conviction: conviction.overall,
+        });
+
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+    display::display_jackpot_backtest_results(&rows);
+
+    Ok(())
+}
+
 fn cmd_coverage(conn: &lemillion_db::rusqlite::Connection, n_tickets: usize, jackpot: f64, seed: Option<u64>) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
@@ -877,6 +1253,34 @@ fn cmd_analyze(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn cmd_research(conn: &lemillion_db::rusqlite::Connection, tests: &str, window: Option<usize>) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide. Lancez d'abord : lemillion-cli import");
+    }
+
+    let draws = fetch_last_draws(conn, n)?;
+
+    let category = match tests.to_lowercase().as_str() {
+        "physical" | "physique" => ResearchCategory::Physical,
+        "mathematical" | "mathematique" | "math" => ResearchCategory::Mathematical,
+        "informational" | "informationnelle" | "info" => ResearchCategory::Informational,
+        "all" | "tout" | "tous" => ResearchCategory::All,
+        _ => bail!("Catégorie invalide : '{}'. Valeurs acceptées : physical, mathematical, informational, all", tests),
+    };
+
+    let window_desc = match window {
+        Some(w) => format!(" (fenêtre: {} derniers tirages)", w),
+        None => format!(" ({} tirages)", draws.len()),
+    };
+    println!("Recherche de biais — catégorie: {}{}", tests, window_desc);
+
+    let report = run_all_research(&draws, category, window);
+    display::display_research_report(&report);
+
+    Ok(())
+}
+
 fn cmd_rebuild(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
@@ -915,6 +1319,85 @@ fn cmd_rebuild(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
     if let Some(newest) = first.first() {
         println!("Dernier tirage : {} ({})", newest.draw_id, newest.date);
     }
+
+    Ok(())
+}
+
+fn cmd_benchmark(conn: &lemillion_db::rusqlite::Connection, train_size: usize, seed: u64) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide. Lancez d'abord : lemillion-cli import");
+    }
+
+    let all_draws = fetch_last_draws(conn, n)?;
+    let total = all_draws.len();
+    if train_size >= total {
+        bail!("train_size ({}) >= total draws ({})", train_size, total);
+    }
+
+    // Fisher-Yates shuffle with seed
+    let mut indices: Vec<usize> = (0..total).collect();
+    let mut rng = seed.wrapping_add(1).max(1);
+    for i in (1..total).rev() {
+        // xorshift64
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let j = (rng as usize) % (i + 1);
+        indices.swap(i, j);
+    }
+
+    let train_draws: Vec<lemillion_db::models::Draw> = indices[..train_size]
+        .iter()
+        .map(|&i| all_draws[i].clone())
+        .collect();
+    let test_draws: Vec<lemillion_db::models::Draw> = indices[train_size..]
+        .iter()
+        .map(|&i| all_draws[i].clone())
+        .collect();
+
+    println!("Benchmark: {} train, {} test (seed={})", train_draws.len(), test_draws.len(), seed);
+    println!("{:<20} {:>12} {:>12} {:>12}", "Model", "Ball LL", "Star LL", "Total LL");
+    println!("{}", "-".repeat(58));
+
+    let uniform_ball_ll = (1.0f64 / 50.0).ln() * 5.0;
+    let uniform_star_ll = (1.0f64 / 12.0).ln() * 2.0;
+
+    // Benchmark physics-based models
+    use lemillion_ensemble::models::{ForecastModel, stresa};
+    use lemillion_ensemble::models::{mod4, takens, physics};
+    let models: Vec<Box<dyn ForecastModel>> = vec![
+        Box::new(stresa::StresaChaosModel::default()),
+        Box::new(stresa::StresaSgdModel::default()),
+        Box::new(stresa::StresaSmcModel::default()),
+        Box::new(mod4::Mod4TransitionModel::default()),
+        Box::new(physics::PhysicsModel::default()),
+        Box::new(takens::TakensKnnModel::default()),
+    ];
+
+    for model in &models {
+        let ball_dist = model.predict(&train_draws, Pool::Balls);
+        let star_dist = model.predict(&train_draws, Pool::Stars);
+
+        let ball_ll: f64 = test_draws.iter()
+            .map(|d| d.balls.iter()
+                .map(|&b| ball_dist[(b - 1) as usize].max(1e-15).ln())
+                .sum::<f64>())
+            .sum::<f64>() / test_draws.len() as f64;
+
+        let star_ll: f64 = test_draws.iter()
+            .map(|d| d.stars.iter()
+                .map(|&s| star_dist[(s - 1) as usize].max(1e-15).ln())
+                .sum::<f64>())
+            .sum::<f64>() / test_draws.len() as f64;
+
+        let total_ll = ball_ll + star_ll;
+        println!("{:<20} {:>12.4} {:>12.4} {:>12.4}", model.name(), ball_ll, star_ll, total_ll);
+    }
+
+    println!("{}", "-".repeat(58));
+    println!("{:<20} {:>12.4} {:>12.4} {:>12.4}",
+        "Uniform", uniform_ball_ll, uniform_star_ll, uniform_ball_ll + uniform_star_ll);
 
     Ok(())
 }

@@ -28,6 +28,10 @@ pub struct EnsembleWeights {
     pub ball_weights: Vec<(String, f64)>,
     pub star_weights: Vec<(String, f64)>,
     pub calibrations: Vec<ModelCalibration>,
+    /// LL détaillé par tirage par modèle (optionnel, pour méta-apprentissage).
+    /// Chaque entrée : (model_name, Vec<f64> de LL par tirage test).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detailed_ll: Vec<(String, Vec<f64>)>,
 }
 
 /// Walk-forward evaluation: pour chaque tirage test t, on entraîne sur draws[t+1..t+1+window]
@@ -303,6 +307,144 @@ pub fn load_weights(path: &std::path::Path) -> anyhow::Result<EnsembleWeights> {
     let json = std::fs::read_to_string(path)?;
     let weights: EnsembleWeights = serde_json::from_str(&json)?;
     Ok(weights)
+}
+
+/// Collecte les LL par tirage pour chaque modèle.
+/// Utilise la meilleure fenêtre/stratégie de chaque modèle.
+/// Retourne Vec<(model_name, Vec<ll_per_test_draw>)>.
+pub fn collect_detailed_ll(
+    model: &dyn ForecastModel,
+    draws: &[Draw],
+    window: usize,
+    pool: Pool,
+    strategy: SamplingStrategy,
+) -> Vec<f64> {
+    let min_history = 10;
+
+    let max_t = match strategy {
+        SamplingStrategy::Consecutive => draws.len().saturating_sub(window + 1),
+        SamplingStrategy::Sparse { span_multiplier } => draws.len().saturating_sub(window * span_multiplier + 1),
+        SamplingStrategy::FullHistory => draws.len().saturating_sub(min_history + 1),
+    };
+
+    if max_t == 0 {
+        return vec![];
+    }
+
+    let max_tests = 100;
+    let stride = (max_t / max_tests).max(1);
+    let mut lls = Vec::new();
+
+    for t in (0..max_t).step_by(stride) {
+        let dist = match strategy {
+            SamplingStrategy::Consecutive => {
+                let train_end = (t + 1 + window).min(draws.len());
+                let train_data = &draws[t + 1..train_end];
+                if train_data.len() < 3 { continue; }
+                model.predict(train_data, pool)
+            }
+            SamplingStrategy::Sparse { span_multiplier } => {
+                let span = window * span_multiplier;
+                let actual_span = span.min(draws.len() - t - 1);
+                let full_range = &draws[t + 1..t + 1 + actual_span];
+                if full_range.len() < 3 { continue; }
+                let step = (actual_span / window).max(1);
+                let train_data: Vec<Draw> = full_range
+                    .iter().step_by(step).take(window).cloned().collect();
+                if train_data.len() < 3 { continue; }
+                model.predict(&train_data, pool)
+            }
+            SamplingStrategy::FullHistory => {
+                let train_data = &draws[t + 1..];
+                if train_data.len() < min_history { continue; }
+                model.predict(train_data, pool)
+            }
+        };
+
+        let test_draw = &draws[t];
+        let test_numbers = pool.numbers_from(test_draw);
+        let mut draw_ll = 0.0f64;
+        for &n in test_numbers {
+            let idx = (n - 1) as usize;
+            if idx < dist.len() {
+                draw_ll += dist[idx].max(1e-15).ln();
+            }
+        }
+        lls.push(draw_ll);
+    }
+
+    lls
+}
+
+/// Résultat de l'analyse de redondance entre modèles.
+#[derive(Debug, Clone)]
+pub struct RedundancyResult {
+    pub model_a: String,
+    pub model_b: String,
+    pub correlation: f64,
+}
+
+/// Détecte les paires de modèles redondants (corrélation > threshold).
+/// Prend les LL détaillés de chaque modèle.
+pub fn detect_redundancy(
+    detailed_ll: &[(String, Vec<f64>)],
+    threshold: f64,
+) -> Vec<RedundancyResult> {
+    let n = detailed_ll.len();
+    let mut results = Vec::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (name_a, lls_a) = &detailed_ll[i];
+            let (name_b, lls_b) = &detailed_ll[j];
+
+            // Aligner sur la longueur commune
+            let len = lls_a.len().min(lls_b.len());
+            if len < 5 {
+                continue;
+            }
+
+            let a = &lls_a[..len];
+            let b = &lls_b[..len];
+
+            let corr = pearson_correlation(a, b);
+            if corr > threshold {
+                results.push(RedundancyResult {
+                    model_a: name_a.clone(),
+                    model_b: name_b.clone(),
+                    correlation: corr,
+                });
+            }
+        }
+    }
+
+    results.sort_by(|x, y| y.correlation.partial_cmp(&x.correlation).unwrap_or(std::cmp::Ordering::Equal));
+    results
+}
+
+fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len() as f64;
+    let mean_a = a.iter().sum::<f64>() / n;
+    let mean_b = b.iter().sum::<f64>() / n;
+
+    let mut cov = 0.0f64;
+    let mut var_a = 0.0f64;
+    let mut var_b = 0.0f64;
+
+    for i in 0..a.len() {
+        let da = a[i] - mean_a;
+        let db = b[i] - mean_b;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+
+    let denom = (var_a * var_b).sqrt();
+    if denom < 1e-15 {
+        0.0
+    } else {
+        cov / denom
+    }
 }
 
 #[cfg(test)]
@@ -582,6 +724,7 @@ mod tests {
             ball_weights: vec![("A".to_string(), 0.5), ("B".to_string(), 0.5)],
             star_weights: vec![("A".to_string(), 0.3), ("B".to_string(), 0.7)],
             calibrations: vec![],
+            detailed_ll: Vec::new(),
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

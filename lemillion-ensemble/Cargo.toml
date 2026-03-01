@@ -17,3 +17,4 @@ rand = "0.10.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1"
 rustfft = "6"
+flate2 = "1"

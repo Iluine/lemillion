@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap};
+use std::cmp::Ordering as CmpOrdering;
 
 use anyhow::Result;
 use rand::SeedableRng;
@@ -14,6 +15,7 @@ pub struct StructuralFilter {
     pub sum_range: (u16, u16),
     pub max_consecutive: u8,
     pub odd_range: (u8, u8),
+    pub spread_range: (u8, u8),
 }
 
 impl StructuralFilter {
@@ -25,6 +27,7 @@ impl StructuralFilter {
                 sum_range: (2, 24),
                 max_consecutive: 2,
                 odd_range: (0, 2),
+                spread_range: (0, 11),
             },
         }
     }
@@ -35,6 +38,7 @@ impl StructuralFilter {
                 sum_range: (50, 200),
                 max_consecutive: 3,
                 odd_range: (0, 5),
+                spread_range: (10, 49),
             };
         }
 
@@ -67,6 +71,13 @@ impl StructuralFilter {
         }).collect();
         max_consecs.sort();
 
+        let mut spreads: Vec<u8> = draws.iter().map(|d| {
+            let mut sorted = d.balls;
+            sorted.sort();
+            sorted[4] - sorted[0]
+        }).collect();
+        spreads.sort();
+
         let p2 = |v: &[u16]| v[v.len() * 2 / 100];
         let p98 = |v: &[u16]| v[v.len() * 98 / 100];
         let p2_u8 = |v: &[u8]| v[v.len() * 2 / 100];
@@ -76,6 +87,7 @@ impl StructuralFilter {
             sum_range: (p2(&sums), p98(&sums)),
             max_consecutive: p98_u8(&max_consecs),
             odd_range: (p2_u8(&odd_counts), p98_u8(&odd_counts)),
+            spread_range: (p2_u8(&spreads).min(10), p98_u8(&spreads).max(45)),
         }
     }
 
@@ -93,6 +105,12 @@ impl StructuralFilter {
 
         let mut sorted = *balls;
         sorted.sort();
+
+        let spread = sorted[4] - sorted[0];
+        if spread < self.spread_range.0 || spread > self.spread_range.1 {
+            return false;
+        }
+
         let mut cur_consec = 1u8;
         for w in sorted.windows(2) {
             if w[1] == w[0] + 1 {
@@ -313,6 +331,7 @@ pub struct CoherenceScorer {
     pub mean_spread: f64,
     pub std_spread: f64,
     pub pair_freq: HashMap<(u8, u8), f64>,
+    pub triplet_freq: HashMap<(u8, u8, u8), f64>,
 }
 
 impl CoherenceScorer {
@@ -320,6 +339,7 @@ impl CoherenceScorer {
     pub fn from_history(draws: &[Draw], pool: Pool) -> Self {
         let (sums, spreads) = Self::compute_sum_spread_stats(draws, pool);
         let pair_freq = Self::compute_pair_frequencies(draws, pool);
+        let triplet_freq = Self::compute_triplet_frequencies(draws, pool);
 
         let mean_sum = if sums.is_empty() {
             125.0
@@ -354,6 +374,7 @@ impl CoherenceScorer {
             mean_spread,
             std_spread,
             pair_freq,
+            triplet_freq,
         }
     }
 
@@ -394,6 +415,29 @@ impl CoherenceScorer {
             .collect()
     }
 
+    fn compute_triplet_frequencies(draws: &[Draw], pool: Pool) -> HashMap<(u8, u8, u8), f64> {
+        let mut triplet_counts: HashMap<(u8, u8, u8), u32> = HashMap::new();
+        let total = draws.len() as f64;
+
+        for draw in draws {
+            let nums = pool.numbers_from(draw);
+            for i in 0..nums.len() {
+                for j in (i + 1)..nums.len() {
+                    for k in (j + 1)..nums.len() {
+                        let mut triple = [nums[i], nums[j], nums[k]];
+                        triple.sort();
+                        *triplet_counts.entry((triple[0], triple[1], triple[2])).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        triplet_counts
+            .into_iter()
+            .map(|(k, v)| (k, v as f64 / total))
+            .collect()
+    }
+
     /// Score de cohérence d'une grille de boules (0.0 = incohérent, ~1.0+ = cohérent).
     pub fn score_balls(&self, balls: &[u8; 5]) -> f64 {
         let sum: f64 = balls.iter().map(|&b| b as f64).sum();
@@ -420,8 +464,6 @@ impl CoherenceScorer {
             }
         }
         let pair_score = if pair_count > 0 {
-            // Normaliser : fréquence moyenne des paires vs fréquence attendue
-            // C(50,5) tirages, chaque paire apparaît ~pick_count*(pick_count-1)/(size*(size-1))
             let expected_pair_freq = (5.0 * 4.0) / (50.0 * 49.0);
             let avg_pair = pair_total / pair_count as f64;
             (avg_pair / expected_pair_freq).min(3.0) / 3.0
@@ -429,8 +471,30 @@ impl CoherenceScorer {
             0.5
         };
 
+        // Fréquence moyenne des triplets
+        let mut triplet_total = 0.0;
+        let mut triplet_count = 0;
+        for i in 0..5 {
+            for j in (i + 1)..5 {
+                for k in (j + 1)..5 {
+                    let mut triple = [balls[i], balls[j], balls[k]];
+                    triple.sort();
+                    triplet_total += self.triplet_freq.get(&(triple[0], triple[1], triple[2])).copied().unwrap_or(0.0);
+                    triplet_count += 1;
+                }
+            }
+        }
+        let triplet_score = if triplet_count > 0 {
+            // Fréquence attendue d'un triplet : C(47,2)/C(50,5)
+            let expected_triplet_freq = (5.0 * 4.0 * 3.0) / (50.0 * 49.0 * 48.0);
+            let avg_triplet = triplet_total / triplet_count as f64;
+            (avg_triplet / expected_triplet_freq).min(3.0) / 3.0
+        } else {
+            0.5
+        };
+
         // Combinaison pondérée
-        0.4 * sum_score + 0.3 * spread_score + 0.3 * pair_score
+        0.35 * sum_score + 0.25 * spread_score + 0.25 * pair_score + 0.15 * triplet_score
     }
 }
 
@@ -777,9 +841,430 @@ fn sample_without_replacement(
     Ok((selected, score))
 }
 
+// ════════════════════════════════════════════════════════════════
+// Mode Jackpot : énumération exhaustive top-N par P(5+2)
+// ════════════════════════════════════════════════════════════════
+
+/// Résultat du mode jackpot : top-N combinaisons par probabilité de 5+2.
+pub struct JackpotResult {
+    /// Top-N suggestions triées par score bayésien décroissant.
+    pub suggestions: Vec<Suggestion>,
+    /// Somme des P(5+2) pour tous les tickets retournés.
+    pub total_jackpot_probability: f64,
+    /// Nombre total de combinaisons énumérées.
+    pub enumeration_size: u64,
+    /// Nombre de combinaisons passant le filtre structurel.
+    pub filtered_size: u64,
+    /// Facteur d'amélioration vs N tickets uniformes.
+    pub improvement_factor: f64,
+}
+
+/// Coefficient binomial C(n, k).
+fn comb(n: usize, k: usize) -> u64 {
+    if k > n {
+        return 0;
+    }
+    let k = k.min(n - k);
+    let mut result: u64 = 1;
+    for i in 0..k {
+        result = result.saturating_mul((n - i) as u64) / (i as u64 + 1);
+    }
+    result
+}
+
+/// Calcule K_balls et K_stars adaptatifs pour que C(K_b,5)×C(K_s,2) >= 3×count.
+fn compute_adaptive_k(count: usize) -> (usize, usize) {
+    let target = 3 * count as u64;
+
+    // Commencer avec K_stars=4, K_balls=10 et augmenter
+    for k_stars in 4..=12usize {
+        let star_combs = comb(k_stars, 2);
+        for k_balls in 10..=50usize {
+            let ball_combs = comb(k_balls, 5);
+            if ball_combs.saturating_mul(star_combs) >= target {
+                return (k_balls, k_stars);
+            }
+        }
+    }
+    (50, 12) // fallback : tout énumérer
+}
+
+/// Wrapper pour le min-heap : on veut garder les N plus grands scores,
+/// donc on utilise un min-heap et on éjecte le plus petit quand on dépasse N.
+#[derive(PartialEq)]
+struct MinHeapEntry {
+    score: f64,
+    balls: [u8; 5],
+    stars: [u8; 2],
+}
+
+impl Eq for MinHeapEntry {}
+
+impl PartialOrd for MinHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for MinHeapEntry {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        // Inverser pour min-heap (BinaryHeap est un max-heap par défaut)
+        other.score.partial_cmp(&self.score).unwrap_or(CmpOrdering::Equal)
+    }
+}
+
+/// Génère les top-N combinaisons par probabilité de jackpot (5+2).
+///
+/// Énumère exhaustivement les combinaisons dans la zone haute probabilité,
+/// triées par score bayésien, sans diversité.
+pub fn generate_suggestions_jackpot(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    count: usize,
+    filter: Option<&StructuralFilter>,
+) -> Result<JackpotResult> {
+    let uniform_ball = 1.0 / ball_probs.len() as f64;
+    let uniform_star = 1.0 / star_probs.len() as f64;
+
+    // Trier les boules par probabilité décroissante
+    let mut ball_indices: Vec<usize> = (0..ball_probs.len()).collect();
+    ball_indices.sort_by(|&a, &b| {
+        ball_probs[b].partial_cmp(&ball_probs[a]).unwrap_or(CmpOrdering::Equal)
+    });
+
+    // Trier les étoiles par probabilité décroissante
+    let mut star_indices: Vec<usize> = (0..star_probs.len()).collect();
+    star_indices.sort_by(|&a, &b| {
+        star_probs[b].partial_cmp(&star_probs[a]).unwrap_or(CmpOrdering::Equal)
+    });
+
+    // K adaptatif
+    let (k_balls, k_stars) = compute_adaptive_k(count);
+    let top_balls = &ball_indices[..k_balls.min(ball_indices.len())];
+    let top_stars = &star_indices[..k_stars.min(star_indices.len())];
+
+    // Pré-calculer les paires d'étoiles avec leur score
+    let mut star_pairs: Vec<([u8; 2], f64)> = Vec::with_capacity(comb(top_stars.len(), 2) as usize);
+    for i in 0..top_stars.len() {
+        for j in (i + 1)..top_stars.len() {
+            let s1 = (top_stars[i] + 1) as u8;
+            let s2 = (top_stars[j] + 1) as u8;
+            let mut stars = [s1, s2];
+            stars.sort();
+            let star_score = (star_probs[top_stars[i]] / uniform_star)
+                * (star_probs[top_stars[j]] / uniform_star);
+            star_pairs.push((stars, star_score));
+        }
+    }
+
+    let total_enum = comb(top_balls.len(), 5) * comb(top_stars.len(), 2);
+    let use_heap = total_enum > 10 * count as u64;
+
+    let mut enumeration_size: u64 = 0;
+    let mut filtered_size: u64 = 0;
+
+    if use_heap {
+        // Mode heap : garder seulement les top-N
+        let mut heap: BinaryHeap<MinHeapEntry> = BinaryHeap::with_capacity(count + 1);
+        let mut min_score = f64::NEG_INFINITY;
+
+        for i0 in 0..top_balls.len() {
+            for i1 in (i0 + 1)..top_balls.len() {
+                for i2 in (i1 + 1)..top_balls.len() {
+                    for i3 in (i2 + 1)..top_balls.len() {
+                        for i4 in (i3 + 1)..top_balls.len() {
+                            let mut balls = [
+                                (top_balls[i0] + 1) as u8,
+                                (top_balls[i1] + 1) as u8,
+                                (top_balls[i2] + 1) as u8,
+                                (top_balls[i3] + 1) as u8,
+                                (top_balls[i4] + 1) as u8,
+                            ];
+                            balls.sort();
+
+                            if let Some(f) = filter
+                                && !f.accept_balls(&balls)
+                            {
+                                enumeration_size += star_pairs.len() as u64;
+                                continue;
+                            }
+
+                            let ball_score = (ball_probs[top_balls[i0]] / uniform_ball)
+                                * (ball_probs[top_balls[i1]] / uniform_ball)
+                                * (ball_probs[top_balls[i2]] / uniform_ball)
+                                * (ball_probs[top_balls[i3]] / uniform_ball)
+                                * (ball_probs[top_balls[i4]] / uniform_ball);
+
+                            for &(stars, star_score) in &star_pairs {
+                                enumeration_size += 1;
+                                let score = ball_score * star_score;
+
+                                // Élagage rapide : si le score est inférieur au min du heap plein, skip
+                                if heap.len() >= count && score <= min_score {
+                                    continue;
+                                }
+
+                                filtered_size += 1;
+                                heap.push(MinHeapEntry { score, balls, stars });
+
+                                if heap.len() > count {
+                                    heap.pop(); // éjecter le plus petit
+                                    if let Some(top) = heap.peek() {
+                                        min_score = top.score;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extraire du heap et trier par score décroissant
+        let mut suggestions: Vec<Suggestion> = heap
+            .into_iter()
+            .map(|e| Suggestion {
+                balls: e.balls,
+                stars: e.stars,
+                score: e.score,
+            })
+            .collect();
+        suggestions.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
+        });
+
+        // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
+        let total_prob: f64 = suggestions.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
+        let n = suggestions.len() as f64;
+        let uniform_prob = n / 139_838_160.0;
+        let improvement = if uniform_prob > 0.0 { total_prob / uniform_prob } else { 0.0 };
+
+        Ok(JackpotResult {
+            suggestions,
+            total_jackpot_probability: total_prob,
+            enumeration_size,
+            filtered_size,
+            improvement_factor: improvement,
+        })
+    } else {
+        // Mode collecte : tout garder puis trier
+        let mut all: Vec<Suggestion> = Vec::with_capacity(total_enum as usize);
+
+        for i0 in 0..top_balls.len() {
+            for i1 in (i0 + 1)..top_balls.len() {
+                for i2 in (i1 + 1)..top_balls.len() {
+                    for i3 in (i2 + 1)..top_balls.len() {
+                        for i4 in (i3 + 1)..top_balls.len() {
+                            let mut balls = [
+                                (top_balls[i0] + 1) as u8,
+                                (top_balls[i1] + 1) as u8,
+                                (top_balls[i2] + 1) as u8,
+                                (top_balls[i3] + 1) as u8,
+                                (top_balls[i4] + 1) as u8,
+                            ];
+                            balls.sort();
+
+                            let passes_filter = filter.is_none_or(|f| f.accept_balls(&balls));
+
+                            let ball_score = (ball_probs[top_balls[i0]] / uniform_ball)
+                                * (ball_probs[top_balls[i1]] / uniform_ball)
+                                * (ball_probs[top_balls[i2]] / uniform_ball)
+                                * (ball_probs[top_balls[i3]] / uniform_ball)
+                                * (ball_probs[top_balls[i4]] / uniform_ball);
+
+                            for &(stars, star_score) in &star_pairs {
+                                enumeration_size += 1;
+                                if passes_filter {
+                                    filtered_size += 1;
+                                    let score = ball_score * star_score;
+                                    all.push(Suggestion { balls, stars, score });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        all.sort_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
+        });
+        all.truncate(count);
+
+        // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
+        let total_prob: f64 = all.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
+        let n = all.len() as f64;
+        let uniform_prob = n / 139_838_160.0;
+        let improvement = if uniform_prob > 0.0 { total_prob / uniform_prob } else { 0.0 };
+
+        Ok(JackpotResult {
+            suggestions: all,
+            total_jackpot_probability: total_prob,
+            enumeration_size,
+            filtered_size,
+            improvement_factor: improvement,
+        })
+    }
+}
+
+// ── Conviction scoring ──
+
+#[derive(Debug, Clone)]
+pub struct ConvictionScore {
+    pub ball_entropy: f64,
+    pub star_entropy: f64,
+    pub ball_concentration: f64,
+    pub star_concentration: f64,
+    pub ball_agreement: f64,
+    pub star_agreement: f64,
+    pub overall: f64,
+    pub verdict: ConvictionVerdict,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConvictionVerdict {
+    HighConviction,
+    MediumConviction,
+    LowConviction,
+}
+
+impl std::fmt::Display for ConvictionVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HighConviction => write!(f, "HAUTE"),
+            Self::MediumConviction => write!(f, "MOYENNE"),
+            Self::LowConviction => write!(f, "BASSE"),
+        }
+    }
+}
+
+fn shannon_entropy(probs: &[f64]) -> f64 {
+    probs.iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| -p * p.ln())
+        .sum()
+}
+
+pub fn compute_conviction(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    ball_spread: &[f64],
+    star_spread: &[f64],
+) -> ConvictionScore {
+    let ball_entropy = shannon_entropy(ball_probs);
+    let star_entropy = shannon_entropy(star_probs);
+
+    let h_max_balls = (ball_probs.len() as f64).ln();
+    let h_max_stars = (star_probs.len() as f64).ln();
+
+    let ball_concentration = 1.0 - ball_entropy / h_max_balls;
+    let star_concentration = 1.0 - star_entropy / h_max_stars;
+
+    let mean_ball_spread: f64 = ball_spread.iter().sum::<f64>() / ball_spread.len() as f64;
+    let mean_ball_prob: f64 = ball_probs.iter().sum::<f64>() / ball_probs.len() as f64;
+    let ball_agreement = (1.0 - mean_ball_spread / mean_ball_prob).clamp(0.0, 1.0);
+
+    let mean_star_spread: f64 = star_spread.iter().sum::<f64>() / star_spread.len() as f64;
+    let mean_star_prob: f64 = star_probs.iter().sum::<f64>() / star_probs.len() as f64;
+    let star_agreement = (1.0 - mean_star_spread / mean_star_prob).clamp(0.0, 1.0);
+
+    let overall = 0.4 * ball_concentration + 0.1 * star_concentration
+        + 0.35 * ball_agreement + 0.15 * star_agreement;
+
+    let verdict = if overall >= 0.6 {
+        ConvictionVerdict::HighConviction
+    } else if overall >= 0.3 {
+        ConvictionVerdict::MediumConviction
+    } else {
+        ConvictionVerdict::LowConviction
+    };
+
+    ConvictionScore {
+        ball_entropy,
+        star_entropy,
+        ball_concentration,
+        star_concentration,
+        ball_agreement,
+        star_agreement,
+        overall,
+        verdict,
+    }
+}
+
+/// Température adaptative basée sur la conviction de l'ensemble.
+/// - HighConviction → T=0.10 (concentration agressive, modèles d'accord)
+/// - MediumConviction → T=0.20
+/// - LowConviction → T=0.25 (sharpening même en basse conviction pour maximiser P(jackpot))
+pub fn conviction_temperature(verdict: &ConvictionVerdict) -> f64 {
+    match verdict {
+        ConvictionVerdict::HighConviction => 0.10,
+        ConvictionVerdict::MediumConviction => 0.20,
+        ConvictionVerdict::LowConviction => 0.25,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_conviction_uniform() {
+        let ball_probs = vec![1.0 / 50.0; 50];
+        let star_probs = vec![1.0 / 12.0; 12];
+        let ball_spread = vec![0.001; 50];
+        let star_spread = vec![0.001; 12];
+
+        let conv = compute_conviction(&ball_probs, &star_probs, &ball_spread, &star_spread);
+        assert!(conv.ball_concentration.abs() < 0.01,
+            "uniform balls should have ~0 concentration, got {}", conv.ball_concentration);
+        assert!(conv.star_concentration.abs() < 0.01,
+            "uniform stars should have ~0 concentration, got {}", conv.star_concentration);
+    }
+
+    #[test]
+    fn test_conviction_concentrated() {
+        let mut ball_probs = vec![0.005; 50];
+        ball_probs[0] = 0.5;
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+
+        let star_probs = vec![1.0 / 12.0; 12];
+        let ball_spread = vec![0.001; 50];
+        let star_spread = vec![0.001; 12];
+
+        let conv = compute_conviction(&ball_probs, &star_probs, &ball_spread, &star_spread);
+        assert!(conv.ball_concentration > 0.2,
+            "concentrated balls should have high concentration, got {}", conv.ball_concentration);
+    }
+
+    #[test]
+    fn test_conviction_verdict_thresholds() {
+        let ball_probs = vec![1.0 / 50.0; 50];
+        let star_probs = vec![1.0 / 12.0; 12];
+        // High spread → low agreement → low conviction
+        let ball_spread = vec![0.05; 50];
+        let star_spread = vec![0.1; 12];
+
+        let conv = compute_conviction(&ball_probs, &star_probs, &ball_spread, &star_spread);
+        assert_eq!(conv.verdict, ConvictionVerdict::LowConviction,
+            "uniform probs + high spread → low conviction, got {:?} (overall={})", conv.verdict, conv.overall);
+    }
+
+    #[test]
+    fn test_shannon_entropy_uniform() {
+        let probs = vec![0.25; 4];
+        let h = shannon_entropy(&probs);
+        let expected = (4.0_f64).ln();
+        assert!((h - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_shannon_entropy_deterministic() {
+        let mut probs = vec![0.0; 4];
+        probs[0] = 1.0;
+        let h = shannon_entropy(&probs);
+        assert!(h.abs() < 1e-10, "deterministic should have 0 entropy, got {h}");
+    }
 
     #[test]
     fn test_date_seed_format() {
@@ -941,6 +1426,7 @@ mod tests {
             sum_range: (50, 200),
             max_consecutive: 3,
             odd_range: (1, 4),
+            spread_range: (5, 49),
         };
         // sum=100, odd=2 (10,20 pairs + 5,15,25 impairs → 3 impairs) → passe
         assert!(filter.accept_balls(&[5, 10, 20, 30, 35]));
@@ -956,6 +1442,7 @@ mod tests {
             sum_range: (10, 250),
             max_consecutive: 2,
             odd_range: (0, 5),
+            spread_range: (0, 49),
         };
         // 3 consécutifs : 1,2,3 → rejeté (max_consecutive=2)
         assert!(!filter.accept_balls(&[1, 2, 3, 10, 20]));
@@ -969,6 +1456,7 @@ mod tests {
             sum_range: (10, 250),
             max_consecutive: 5,
             odd_range: (1, 4),
+            spread_range: (0, 49),
         };
         // 5 impairs → hors range (0, 4)
         assert!(!filter.accept_balls(&[1, 3, 5, 7, 9]));
@@ -1022,6 +1510,116 @@ mod tests {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
             assert_eq!(a.score, b.score);
+        }
+    }
+
+    // ── Tests mode Jackpot ──
+
+    #[test]
+    fn test_comb() {
+        assert_eq!(comb(50, 5), 2_118_760);
+        assert_eq!(comb(12, 2), 66);
+        assert_eq!(comb(5, 0), 1);
+        assert_eq!(comb(5, 5), 1);
+        assert_eq!(comb(3, 5), 0);
+        assert_eq!(comb(10, 3), 120);
+    }
+
+    #[test]
+    fn test_compute_adaptive_k() {
+        let (kb, ks) = compute_adaptive_k(5);
+        assert!(comb(kb, 5) * comb(ks, 2) >= 15, "K trop petit pour 5 suggestions");
+        assert!(kb <= 50 && ks <= 12);
+
+        let (kb, ks) = compute_adaptive_k(5000);
+        assert!(comb(kb, 5) * comb(ks, 2) >= 15000, "K trop petit pour 5000 suggestions");
+
+        let (kb, ks) = compute_adaptive_k(50000);
+        assert!(comb(kb, 5) * comb(ks, 2) >= 150000, "K trop petit pour 50000 suggestions");
+    }
+
+    #[test]
+    fn test_jackpot_basic() {
+        let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
+        let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
+
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None).unwrap();
+        assert_eq!(result.suggestions.len(), 5);
+        assert!(result.total_jackpot_probability > 0.0);
+        assert!(result.enumeration_size > 0);
+        // Avec probas uniformes, improvement_factor dépend du sous-ensemble K adaptatif
+        // On vérifie simplement que c'est positif et fini
+        assert!(result.improvement_factor > 0.0 && result.improvement_factor.is_finite(),
+            "improvement_factor devrait être positif et fini, got {}", result.improvement_factor);
+    }
+
+    #[test]
+    fn test_jackpot_peaked_better_than_uniform() {
+        // Probas concentrées sur les 10 premières boules
+        let mut ball_probs = vec![0.005; 50];
+        for i in 0..10 {
+            ball_probs[i] = 0.075;
+        }
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+
+        let mut star_probs = vec![0.05; 12];
+        star_probs[0] = 0.2;
+        star_probs[1] = 0.15;
+        let total: f64 = star_probs.iter().sum();
+        let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
+
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None).unwrap();
+        assert_eq!(result.suggestions.len(), 100);
+        assert!(result.improvement_factor > 1.0,
+            "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
+    }
+
+    #[test]
+    fn test_jackpot_sorted_descending() {
+        let ball_probs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+        let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
+
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None).unwrap();
+        for w in result.suggestions.windows(2) {
+            assert!(w[0].score >= w[1].score,
+                "Suggestions non triées : {} < {}", w[0].score, w[1].score);
+        }
+    }
+
+    #[test]
+    fn test_jackpot_deterministic() {
+        let ball_probs: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+        let total: f64 = ball_probs.iter().sum();
+        let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
+        let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
+
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None).unwrap();
+        for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
+            assert_eq!(a.balls, b.balls);
+            assert_eq!(a.stars, b.stars);
+        }
+    }
+
+    #[test]
+    fn test_jackpot_with_filter() {
+        let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
+        let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
+        let filter = StructuralFilter {
+            sum_range: (80, 180),
+            max_consecutive: 3,
+            odd_range: (1, 4),
+            spread_range: (10, 45),
+        };
+
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter)).unwrap();
+        // Toutes les suggestions doivent passer le filtre
+        for s in &result.suggestions {
+            assert!(filter.accept_balls(&s.balls),
+                "Suggestion {:?} ne passe pas le filtre", s.balls);
         }
     }
 }
