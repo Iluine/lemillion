@@ -152,17 +152,33 @@ pub fn compute_hedge_weights(
         }
 
         for (m, model) in models.iter().enumerate() {
-            // Loss boules
+            let hit_bonus = 3.0;
+
+            // Loss boules (asymétrique: bonus 3× pour les hits)
+            let ball_uniform_ll = (1.0_f64 / 50.0).ln();
+            let ball_ll_cap = 2.0 * ball_uniform_ll;
             let ball_dist = model.predict(training_draws, Pool::Balls);
             let ball_loss: f64 = test_draw.balls.iter()
-                .map(|&b| -ball_dist[(b - 1) as usize].max(1e-15).ln())
+                .map(|&b| {
+                    let ll = ball_dist[(b - 1) as usize].max(1e-15).ln().max(ball_ll_cap);
+                    let excess = ll - ball_uniform_ll;
+                    let adj = if excess > 0.0 { hit_bonus * excess } else { excess };
+                    -(ball_uniform_ll + adj)
+                })
                 .sum();
             ball_weights[m] *= (-eta * ball_loss).exp();
 
-            // Loss étoiles
+            // Loss étoiles (asymétrique: bonus 3× pour les hits)
+            let star_uniform_ll = (1.0_f64 / 12.0).ln();
+            let star_ll_cap = 2.0 * star_uniform_ll;
             let star_dist = model.predict(training_draws, Pool::Stars);
             let star_loss: f64 = test_draw.stars.iter()
-                .map(|&s| -star_dist[(s - 1) as usize].max(1e-15).ln())
+                .map(|&s| {
+                    let ll = star_dist[(s - 1) as usize].max(1e-15).ln().max(star_ll_cap);
+                    let excess = ll - star_uniform_ll;
+                    let adj = if excess > 0.0 { hit_bonus * excess } else { excess };
+                    -(star_uniform_ll + adj)
+                })
                 .sum();
             star_weights[m] *= (-eta * star_loss).exp();
         }

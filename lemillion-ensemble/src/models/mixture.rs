@@ -33,7 +33,7 @@ impl Default for MixtureModel {
     }
 }
 
-const N_EXPERTS: usize = 6;
+const N_EXPERTS: usize = 7;
 
 /// Expert 0 : Fréquence brute (comptage de présences dans la fenêtre)
 fn expert_frequency(draws: &[Draw], pool: Pool) -> Vec<f64> {
@@ -230,6 +230,70 @@ fn expert_cooccurrence(draws: &[Draw], pool: Pool) -> Vec<f64> {
     }
 }
 
+/// Expert 6 : Couplage boules/étoiles (exploite la dépendance marginale p=0.014)
+///
+/// Pour Pool::Stars : P(étoile | sum_bin des boules du dernier tirage)
+/// Pour Pool::Balls : uniforme (pas de signal ball→ball via stars)
+fn expert_ball_star_coupling(draws: &[Draw], pool: Pool) -> Vec<f64> {
+    let size = pool.size();
+    let uniform = vec![1.0 / size as f64; size];
+
+    if draws.is_empty() {
+        return uniform;
+    }
+
+    match pool {
+        Pool::Balls => {
+            // Pas de signal stars→balls exploitable, retourne uniforme
+            uniform
+        }
+        Pool::Stars => {
+            // Construire P(étoile | sum_bin des boules)
+            let n_bins = 5;
+            let mut counts = vec![vec![0.0f64; size]; n_bins];
+            let mut bin_totals = vec![0.0f64; n_bins];
+
+            let window = draws.len().min(200);
+            for draw in &draws[..window] {
+                let ball_sum: u16 = draw.balls.iter().map(|&b| b as u16).sum();
+                // sum range 15-240, bin en 5
+                let bin = ((ball_sum as f64 - 15.0) / (240.0 - 15.0) * n_bins as f64)
+                    .floor()
+                    .clamp(0.0, (n_bins - 1) as f64) as usize;
+                bin_totals[bin] += 1.0;
+                for &s in &draw.stars {
+                    let idx = (s - 1) as usize;
+                    if idx < size {
+                        counts[bin][idx] += 1.0;
+                    }
+                }
+            }
+
+            // Bin actuel basé sur les boules du dernier tirage
+            let current_sum: u16 = draws[0].balls.iter().map(|&b| b as u16).sum();
+            let current_bin = ((current_sum as f64 - 15.0) / (240.0 - 15.0) * n_bins as f64)
+                .floor()
+                .clamp(0.0, (n_bins - 1) as f64) as usize;
+
+            if bin_totals[current_bin] > 0.0 {
+                let alpha = 0.5; // Laplace smoothing
+                let total_picks = bin_totals[current_bin] * 2.0; // 2 stars per draw
+                let mut probs = Vec::with_capacity(size);
+                for k in 0..size {
+                    probs.push((counts[current_bin][k] + alpha) / (total_picks + alpha * size as f64));
+                }
+                let sum: f64 = probs.iter().sum();
+                for p in &mut probs {
+                    *p /= sum;
+                }
+                probs
+            } else {
+                uniform
+            }
+        }
+    }
+}
+
 /// Retourne les prédictions de tous les experts.
 fn all_expert_predictions(draws: &[Draw], pool: Pool) -> Vec<Vec<f64>> {
     vec![
@@ -239,6 +303,7 @@ fn all_expert_predictions(draws: &[Draw], pool: Pool) -> Vec<Vec<f64>> {
         expert_decade(draws, pool),
         expert_sum(draws, pool),
         expert_cooccurrence(draws, pool),
+        expert_ball_star_coupling(draws, pool),
     ]
 }
 

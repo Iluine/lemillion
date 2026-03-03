@@ -78,6 +78,16 @@ impl PopularityModel {
             }
         }
 
+        // Biais de grille physique (layout 5x10) : boules au centre plus jouées
+        for (i, pop) in ball_pop.iter_mut().enumerate() {
+            let num = i + 1;
+            let row = (num - 1) / 10;   // 0-4
+            let col = (num - 1) % 10;   // 0-9
+            let center_dist = ((row as f64 - 2.0).powi(2) + (col as f64 - 4.5).powi(2)).sqrt();
+            let center_bias = 1.0 + 0.05 * (4.0 - center_dist).max(0.0);
+            *pop *= center_bias;
+        }
+
         // Numeros porte-bonheur (boules)
         ball_pop[6] *= 1.25;  // 7
         ball_pop[2] *= 1.10;  // 3

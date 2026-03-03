@@ -3,6 +3,7 @@ use lemillion_db::models::{Draw, Pool};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::prelude::*;
+use rayon::prelude::*;
 use super::ForecastModel;
 use crate::features;
 
@@ -53,21 +54,20 @@ impl ForecastModel for RandomForestModel {
         let n_features = features::FEATURE_NAMES.len();
         let features_per_split = (n_features as f64).sqrt().ceil() as usize;
 
-        // Entraîner la forêt
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut forest = Vec::with_capacity(self.n_trees);
+        // Entraîner la forêt en parallèle — chaque arbre a son propre RNG dérivé
+        let n_samples = all_features.len();
+        let forest: Vec<TreeNode> = (0..self.n_trees)
+            .into_par_iter()
+            .map(|tree_id| {
+                let mut rng = StdRng::seed_from_u64(42 ^ (tree_id as u64).wrapping_mul(6364136223846793005));
+                let indices: Vec<usize> = (0..n_samples).map(|_| rng.random_range(0..n_samples)).collect();
 
-        for _ in 0..self.n_trees {
-            // Bootstrap sampling
-            let n_samples = all_features.len();
-            let indices: Vec<usize> = (0..n_samples).map(|_| rng.random_range(0..n_samples)).collect();
+                let boot_features: Vec<&Vec<f64>> = indices.iter().map(|&i| &all_features[i]).collect();
+                let boot_labels: Vec<f64> = indices.iter().map(|&i| all_labels[i]).collect();
 
-            let boot_features: Vec<&Vec<f64>> = indices.iter().map(|&i| &all_features[i]).collect();
-            let boot_labels: Vec<f64> = indices.iter().map(|&i| all_labels[i]).collect();
-
-            let tree = build_tree(&boot_features, &boot_labels, self.max_depth, features_per_split, &mut rng);
-            forest.push(tree);
-        }
+                build_tree(&boot_features, &boot_labels, self.max_depth, features_per_split, &mut rng)
+            })
+            .collect();
 
         // Prédire pour le tirage actuel (index 0)
         let current_rows = features::extract_features_for_draw(draws, pool, 0);

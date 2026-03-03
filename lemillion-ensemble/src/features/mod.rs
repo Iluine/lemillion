@@ -17,6 +17,9 @@ pub const FEATURE_NAMES: &[&str] = &[
     "pair_freq",
     "gap_acceleration",
     "low_half",
+    "mod4_class",
+    "mod4_class_freq",
+    "mod4_transition",
 ];
 
 #[derive(Debug, Clone)]

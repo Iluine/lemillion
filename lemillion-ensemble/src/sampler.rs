@@ -790,9 +790,9 @@ pub fn generate_suggestions_ev(
     popularity: &PopularityModel,
     jackpot: f64,
 ) -> Result<Vec<ScoredSuggestion>> {
-    // Aplatir les distributions (T=2.0) pour generer quasi-uniformement
-    let flat_ball = apply_temperature(ball_probs, 2.0);
-    let flat_star = apply_temperature(star_probs, 2.0);
+    // Utiliser directement les distributions (la température est déjà appliquée en amont par cmd_predict)
+    let flat_ball = ball_probs.to_vec();
+    let flat_star = star_probs.to_vec();
 
     let filter = if !draws.is_empty() {
         Some(StructuralFilter::from_history(draws, Pool::Balls))
@@ -1184,6 +1184,31 @@ pub fn generate_suggestions_jackpot(
 
 use crate::models::mod4_profile::{enumerate_profiles, extract_profile};
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StarStrategy {
+    Concentrated, // Même top-2 étoiles sur toutes les grilles (défaut)
+    Triangular,   // 3 paires parmi top-3 étoiles
+    Disjoint,     // Paires disjointes
+}
+
+impl StarStrategy {
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "triangular" | "triangulaire" => Self::Triangular,
+            "disjoint" | "disjointe" => Self::Disjoint,
+            _ => Self::Concentrated,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Concentrated => "concentrée",
+            Self::Triangular => "triangulaire",
+            Self::Disjoint => "disjointe",
+        }
+    }
+}
+
 /// Résultat de la diversification : 3 grilles avec profils mod-4 distincts et étoiles diversifiées.
 #[derive(Debug, Clone)]
 pub struct DiverseGrids {
@@ -1204,7 +1229,22 @@ pub fn generate_diverse_grids(
     draws: &[Draw],
     n_grids: usize,
     seed: u64,
+    popularity: Option<&PopularityModel>,
 ) -> DiverseGrids {
+    generate_diverse_grids_with_strategy(ball_probs, star_probs, draws, n_grids, seed, popularity, StarStrategy::Triangular)
+}
+
+pub fn generate_diverse_grids_with_strategy(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    draws: &[Draw],
+    n_grids: usize,
+    seed: u64,
+    _popularity: Option<&PopularityModel>,
+    star_strategy: StarStrategy,
+) -> DiverseGrids {
+    // Scoring de cohérence historique (paires, triplets, sum, spread)
+    let coherence = CoherenceScorer::from_history(draws, Pool::Balls);
     let profiles = enumerate_profiles(5); // 56 profils pour les boules
 
     // Scorer chaque profil : somme des probabilités des meilleures boules par classe mod-4
@@ -1261,81 +1301,170 @@ pub fn generate_diverse_grids(
         }
     }
 
-    // Sélectionner N paires d'étoiles distinctes (disjointe vs triangulaire)
-    let star_pairs = select_diverse_star_pairs(star_probs, n_grids);
+    // Sélectionner N paires d'étoiles selon la stratégie
+    let star_pairs = select_star_pairs(star_probs, n_grids, star_strategy);
 
-    // Déterminer quelle stratégie a été choisie
-    let star_strategy = if n_grids >= 3 && star_pairs.len() >= 3 {
-        // Vérifier si c'est triangulaire : les 3 paires partagent des étoiles
-        let all_stars: std::collections::HashSet<u8> = star_pairs.iter().flat_map(|p| p.iter().copied()).collect();
-        if all_stars.len() <= 3 { "triangulaire" } else { "disjointe" }
-    } else {
-        "disjointe"
-    };
+    let star_strategy_label = star_strategy.label();
 
-    // Pour chaque profil, générer K=10 candidats (en variant les boules choisies par classe)
+    // Pour chaque profil, générer K=50 candidats (en variant les boules choisies par classe)
     // puis sélectionner gloutonement les n_grids maximisant les boules distinctes couvertes.
     let mut rng = StdRng::seed_from_u64(seed);
-    let k_candidates = 10;
+    let k_candidates = 200;
 
-    // Générer les candidats par profil
+    // Générer les candidats par profil, triés par score combiné (prob × cohérence)
     let mut all_candidates: Vec<(usize, Suggestion)> = Vec::new(); // (profile_idx, grid)
     for (pi, profile) in selected_profiles.iter().enumerate() {
         let assigned_stars = star_pairs[pi % star_pairs.len()];
-        let candidates = generate_profile_candidates(profile, ball_probs, star_probs, assigned_stars, k_candidates);
+        let mut candidates = generate_profile_candidates(profile, ball_probs, star_probs, assigned_stars, k_candidates);
+        // Rescorer les candidats avec la cohérence
+        for c in &mut candidates {
+            let coh = coherence.score_balls(&c.balls);
+            c.score *= 0.5 + coh;
+        }
+        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         for c in candidates {
             all_candidates.push((pi, c));
         }
     }
 
-    // Sélection gloutonne : maximiser les boules distinctes sur les n_grids grilles
-    let mut grids = Vec::with_capacity(n_grids);
-    let mut used_profiles: Vec<bool> = vec![false; selected_profiles.len()];
-    let mut covered_balls: std::collections::HashSet<u8> = std::collections::HashSet::new();
+    // Sélection exhaustive : maximiser un score composite 100% jackpot
+    // Score = 0.15 * pair_coverage + 0.85 * log_probabilité
+    // Grouper les candidats par profil
+    let n_profiles = selected_profiles.len();
+    let mut candidates_by_profile: Vec<Vec<&Suggestion>> = vec![Vec::new(); n_profiles];
+    for (pi, candidate) in &all_candidates {
+        candidates_by_profile[*pi].push(candidate);
+    }
 
-    for _ in 0..n_grids {
-        let mut best_idx = None;
-        let mut best_new_balls = 0usize;
-        let mut best_score = f64::NEG_INFINITY;
+    let grids = if n_grids <= 3 && n_profiles >= n_grids {
+        // Évaluation exhaustive de tous les triplets de profils × candidats
+        let mut best_composite = f64::NEG_INFINITY;
+        let mut best_combo: Vec<Suggestion> = Vec::new();
 
-        for (ci, (pi, candidate)) in all_candidates.iter().enumerate() {
-            if used_profiles[*pi] { continue; }
-            let new_balls = candidate.balls.iter().filter(|b| !covered_balls.contains(b)).count();
-            // Priorité : plus de nouvelles boules, puis meilleur score
-            if new_balls > best_new_balls || (new_balls == best_new_balls && candidate.score > best_score) {
-                best_new_balls = new_balls;
-                best_score = candidate.score;
-                best_idx = Some((ci, *pi));
+        // Générer toutes les combinaisons de n_grids profils distincts
+        let profile_combos = combinations_indices(n_profiles, n_grids);
+
+        for profile_combo in &profile_combos {
+            let candidate_lists: Vec<&Vec<&Suggestion>> = profile_combo
+                .iter()
+                .map(|&pi| &candidates_by_profile[pi])
+                .collect();
+
+            let mut indices = vec![0usize; n_grids];
+            let sizes: Vec<usize> = candidate_lists.iter().map(|c| c.len()).collect();
+
+            if sizes.iter().any(|&s| s == 0) {
+                continue;
             }
-        }
 
-        if let Some((ci, pi)) = best_idx {
-            let (_, grid) = &all_candidates[ci];
-            for &b in &grid.balls {
-                covered_balls.insert(b);
-            }
-            grids.push(grid.clone());
-            used_profiles[pi] = true;
-        } else {
-            // Fallback : premier profil non utilisé
-            for (pi, profile) in selected_profiles.iter().enumerate() {
-                if !used_profiles[pi] {
-                    let assigned_stars = star_pairs[pi % star_pairs.len()];
-                    let grid = best_grid_for_profile(profile, ball_probs, star_probs, assigned_stars, &mut rng);
-                    grids.push(grid);
-                    used_profiles[pi] = true;
+            loop {
+                // Collecter les grilles de cette combinaison
+                let combo: Vec<&Suggestion> = indices.iter().enumerate()
+                    .map(|(g, &idx)| candidate_lists[g][idx])
+                    .collect();
+
+                // Score = 100% log-probabilité (maximiser P(5+2) par grille)
+                // La diversité structurelle est assurée par les profils mod-4
+                // (L1 distance >= 2 entre profils sélectionnés)
+                let composite = {
+                    let sum_log: f64 = combo.iter()
+                        .map(|s| s.score.max(1e-30).ln())
+                        .sum();
+                    let avg_log = sum_log / combo.len() as f64;
+                    let log_score = ((avg_log + 30.0) / 30.0).clamp(0.0, 1.0);
+                    // Bonus couverture : combien de boules distinctes sur les N grilles
+                    let distinct_balls: std::collections::HashSet<u8> = combo.iter()
+                        .flat_map(|s| s.balls.iter().copied()).collect();
+                    let coverage = distinct_balls.len() as f64 / (5.0 * combo.len() as f64);
+                    0.85 * log_score + 0.15 * coverage
+                };
+
+                if composite > best_composite {
+                    best_composite = composite;
+                    best_combo = combo.iter().map(|s| (*s).clone()).collect();
+                }
+
+                // Incrémenter le compteur (produit cartésien)
+                let mut carry = true;
+                for g in (0..n_grids).rev() {
+                    if carry {
+                        indices[g] += 1;
+                        if indices[g] >= sizes[g] {
+                            indices[g] = 0;
+                        } else {
+                            carry = false;
+                        }
+                    }
+                }
+                if carry {
                     break;
                 }
             }
         }
-    }
+
+        if best_combo.is_empty() {
+            // Fallback : meilleur candidat par profil
+            selected_profiles.iter().enumerate()
+                .take(n_grids)
+                .map(|(pi, profile)| {
+                    let assigned_stars = star_pairs[pi % star_pairs.len()];
+                    best_grid_for_profile(profile, ball_probs, star_probs, assigned_stars, &mut rng)
+                })
+                .collect()
+        } else {
+            best_combo
+        }
+    } else {
+        // Fallback pour n_grids > 3 : sélection gloutonne par score
+        let mut grids = Vec::with_capacity(n_grids);
+        let mut used_profiles: Vec<bool> = vec![false; n_profiles];
+        for _ in 0..n_grids {
+            let mut best_score = f64::NEG_INFINITY;
+            let mut best_grid = None;
+            let mut best_pi = 0;
+            for (pi, candidates) in candidates_by_profile.iter().enumerate() {
+                if used_profiles[pi] { continue; }
+                for c in candidates {
+                    if c.score > best_score {
+                        best_score = c.score;
+                        best_grid = Some((*c).clone());
+                        best_pi = pi;
+                    }
+                }
+            }
+            if let Some(grid) = best_grid {
+                grids.push(grid);
+                used_profiles[best_pi] = true;
+            }
+        }
+        grids
+    };
 
     DiverseGrids {
         grids,
         profiles: selected_profiles,
         star_pairs: star_pairs.clone(),
-        star_strategy,
+        star_strategy: star_strategy_label,
     }
+}
+
+/// Génère toutes les combinaisons de `k` indices parmi `n` (C(n,k)).
+fn combinations_indices(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    let mut combo = Vec::with_capacity(k);
+    fn recurse(start: usize, n: usize, k: usize, combo: &mut Vec<usize>, result: &mut Vec<Vec<usize>>) {
+        if combo.len() == k {
+            result.push(combo.clone());
+            return;
+        }
+        for i in start..n {
+            combo.push(i);
+            recurse(i + 1, n, k, combo, result);
+            combo.pop();
+        }
+    }
+    recurse(0, n, k, &mut combo, &mut result);
+    result
 }
 
 /// Score un profil mod-4 contre les probabilités marginales.
@@ -1546,9 +1675,8 @@ fn make_grid_from_classes(
     Suggestion { balls: balls_arr, stars: assigned_stars, score }
 }
 
-/// Sélectionne N paires d'étoiles distinctes maximisant la probabilité totale.
-/// Compare la stratégie disjointe ({s1,s2}, {s3,s4}, {s5,s6}) vs triangulaire ({s1,s2}, {s1,s3}, {s2,s3}).
-fn select_diverse_star_pairs(star_probs: &[f64], n_pairs: usize) -> Vec<[u8; 2]> {
+/// Sélectionne N paires d'étoiles selon la stratégie choisie.
+fn select_star_pairs(star_probs: &[f64], n_pairs: usize, strategy: StarStrategy) -> Vec<[u8; 2]> {
     // Trier les étoiles par probabilité décroissante
     let mut star_ranked: Vec<(u8, f64)> = star_probs
         .iter()
@@ -1563,41 +1691,45 @@ fn select_diverse_star_pairs(star_probs: &[f64], n_pairs: usize) -> Vec<[u8; 2]>
         return vec![pair];
     }
 
-    let uniform = 1.0 / star_probs.len() as f64;
-    let prob_ratio = |s: u8| star_probs[(s - 1) as usize] / uniform;
-
-    // Stratégie A : disjointe — {s1,s2}, {s3,s4}, {s5,s6}
-    let mut disjoint_pairs: Vec<[u8; 2]> = Vec::new();
-    let mut disjoint_score = 0.0f64;
-    for i in 0..n_pairs.min(star_ranked.len() / 2) {
-        let mut pair = [star_ranked[2 * i].0, star_ranked[2 * i + 1].0];
-        pair.sort();
-        disjoint_score += prob_ratio(pair[0]) * prob_ratio(pair[1]);
-        disjoint_pairs.push(pair);
-    }
-
-    // Stratégie B : triangulaire — {s1,s2}, {s1,s3}, {s2,s3} (les 3 meilleures étoiles)
-    let mut triangular_pairs: Vec<[u8; 2]> = Vec::new();
-    let mut triangular_score = 0.0f64;
-    if n_pairs >= 3 && star_ranked.len() >= 3 {
-        let top3 = [star_ranked[0].0, star_ranked[1].0, star_ranked[2].0];
-        for i in 0..3 {
-            for j in (i + 1)..3 {
-                if triangular_pairs.len() < n_pairs {
-                    let mut pair = [top3[i], top3[j]];
-                    pair.sort();
-                    triangular_score += prob_ratio(pair[0]) * prob_ratio(pair[1]);
-                    triangular_pairs.push(pair);
+    match strategy {
+        StarStrategy::Concentrated => {
+            // Même paire top-2 sur toutes les grilles
+            let mut pair = [star_ranked[0].0, star_ranked[1].0];
+            pair.sort();
+            vec![pair; n_pairs]
+        }
+        StarStrategy::Disjoint => {
+            // Paires disjointes : {s1,s2}, {s3,s4}, {s5,s6}
+            let mut pairs = Vec::new();
+            for i in 0..n_pairs.min(star_ranked.len() / 2) {
+                let mut pair = [star_ranked[2 * i].0, star_ranked[2 * i + 1].0];
+                pair.sort();
+                pairs.push(pair);
+            }
+            pairs
+        }
+        StarStrategy::Triangular => {
+            // Triangulaire : {s1,s2}, {s1,s3}, {s2,s3}
+            if n_pairs >= 3 && star_ranked.len() >= 3 {
+                let top3 = [star_ranked[0].0, star_ranked[1].0, star_ranked[2].0];
+                let mut pairs = Vec::new();
+                for i in 0..3 {
+                    for j in (i + 1)..3 {
+                        if pairs.len() < n_pairs {
+                            let mut pair = [top3[i], top3[j]];
+                            pair.sort();
+                            pairs.push(pair);
+                        }
+                    }
                 }
+                pairs
+            } else {
+                // Fallback vers concentrated si pas assez d'étoiles
+                let mut pair = [star_ranked[0].0, star_ranked[1].0];
+                pair.sort();
+                vec![pair; n_pairs]
             }
         }
-    }
-
-    // Choisir la meilleure stratégie
-    if !triangular_pairs.is_empty() && triangular_score > disjoint_score {
-        triangular_pairs
-    } else {
-        disjoint_pairs
     }
 }
 

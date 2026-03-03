@@ -12,6 +12,8 @@ pub mod physics;
 pub mod mod4;
 pub mod triplet;
 pub mod conditional;
+pub mod conditional_v2;
+pub mod gap_dynamics;
 pub mod joint;
 pub mod mod4_profile;
 pub mod summary_predictor;
@@ -43,6 +45,31 @@ pub trait ForecastModel: Send + Sync {
     fn sampling_strategy(&self) -> SamplingStrategy {
         SamplingStrategy::Consecutive
     }
+
+    /// Stride de calibration : les modèles lourds peuvent sauter des test points.
+    /// stride=1 → tous les points, stride=3 → 1 sur 3.
+    fn calibration_stride(&self) -> usize {
+        1
+    }
+}
+
+/// Numerical safety floor — prevents log(0) = -inf, zero signal impact.
+pub const PROB_FLOOR_BALLS: f64 = 1e-15;
+pub const PROB_FLOOR_STARS: f64 = 1e-15;
+
+/// Numerical safety only: floor at epsilon to prevent log(0), then renormalize.
+pub fn floor_and_normalize(probs: &mut Vec<f64>, floor: f64) {
+    for p in probs.iter_mut() {
+        if *p < floor {
+            *p = floor;
+        }
+    }
+    let sum: f64 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in probs.iter_mut() {
+            *p /= sum;
+        }
+    }
 }
 
 pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
@@ -56,25 +83,11 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Les 18 modèles de base.
+/// Les 14 modèles de base (Dirichlet, Markov, ESN, CondSummary supprimés — skill négatif).
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
-        Box::new(dirichlet::DirichletModel::with_window(0.1, Some(30))),
-        Box::new(logistic::LogisticModel::new(0.01, 0.001, 50, 100)),
-        Box::new(random_forest::RandomForestModel::new(50, 5, 100)),
-        Box::new(markov::MarkovModel::new()),
-        Box::new(esn::EsnModel::new(lemillion_esn::config::EsnConfig {
-            reservoir_size: 1000,
-            spectral_radius: 0.95,
-            sparsity: 0.8,
-            leaking_rate: 1.0,
-            ridge_lambda: 1e-6,
-            input_scaling: 0.1,
-            encoding: lemillion_esn::config::Encoding::Normalized,
-            washout: 100,
-            noise_amplitude: 1e-4,
-            seed: 42,
-        })),
+        Box::new(logistic::LogisticModel::new(0.01, 0.0001, 200, 100)),
+        Box::new(random_forest::RandomForestModel::new(100, 3, 200)),
         Box::new(spectral::SpectralModel::default()),
         Box::new(ctw::CtwModel::default()),
         Box::new(mixture::MixtureModel::default()),
@@ -84,10 +97,11 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(mod4::Mod4TransitionModel::default()),
         Box::new(mod4_profile::Mod4ProfileModel::default()),
         Box::new(triplet::TripletBoostModel::default()),
-        Box::new(conditional::ConditionalSummaryModel::default()),
         Box::new(stresa::StresaSgdModel::default()),
         Box::new(stresa::StresaSmcModel::default()),
         Box::new(stresa::StresaChaosModel::default()),
+        Box::new(conditional_v2::CondSummaryV2Model::default()),
+        Box::new(gap_dynamics::GapDynamicsModel::default()),
     ]
 }
 

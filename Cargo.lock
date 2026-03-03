@@ -1076,6 +1076,7 @@ dependencies = [
  "lemillion-esn",
  "ndarray",
  "rand 0.10.0",
+ "rayon",
  "rustfft",
  "serde",
  "serde_json",

@@ -80,6 +80,15 @@ fn compute_features_for_number(number: u8, history: &[Draw], pool: Pool, target_
         Pool::Stars => if number <= 6 { 1.0 } else { 0.0 },
     };
 
+    // mod4_class : classe de résidu mod 4 normalisée [0, 1]
+    let mod4_class = ((number - 1) % 4) as f64 / 3.0;
+
+    // mod4_class_freq : fréquence de la classe mod-4 dans les 10 derniers tirages
+    let mod4_class_freq = compute_mod4_class_freq(number, history, pool, 10);
+
+    // mod4_transition : proportion de la classe mod-4 du numéro dans le dernier tirage
+    let mod4_transition = compute_mod4_transition(number, history, pool);
+
     vec![
         freq_5,             // 0
         freq_10,            // 1
@@ -99,6 +108,9 @@ fn compute_features_for_number(number: u8, history: &[Draw], pool: Pool, target_
         pair_freq,          // 15
         gap_acceleration,   // 16
         low_half,           // 17
+        mod4_class,         // 18
+        mod4_class_freq,    // 19
+        mod4_transition,    // 20
     ]
 }
 
@@ -247,6 +259,38 @@ fn compute_recent_sum_norm(history: &[Draw], pool: Pool, window: usize, pool_siz
     if max_possible > 0.0 { total / max_possible } else { 0.5 }
 }
 
+/// Fréquence de la classe mod-4 du numéro dans les `window` derniers tirages.
+/// Compte combien de numéros tirés ont le même résidu mod 4 que `number`.
+fn compute_mod4_class_freq(number: u8, history: &[Draw], pool: Pool, window: usize) -> f64 {
+    let w = window.min(history.len());
+    if w == 0 {
+        return 0.25; // prior uniforme sur 4 classes
+    }
+    let target_class = (number - 1) % 4;
+    let mut count = 0usize;
+    let mut total = 0usize;
+    for draw in &history[..w] {
+        for &n in pool.numbers_from(draw) {
+            total += 1;
+            if (n - 1) % 4 == target_class {
+                count += 1;
+            }
+        }
+    }
+    if total == 0 { 0.25 } else { count as f64 / total as f64 }
+}
+
+/// Proportion de la classe mod-4 du numéro dans le dernier tirage (history[0]).
+fn compute_mod4_transition(number: u8, history: &[Draw], pool: Pool) -> f64 {
+    if history.is_empty() {
+        return 0.25;
+    }
+    let target_class = (number - 1) % 4;
+    let last_numbers = pool.numbers_from(&history[0]);
+    let count = last_numbers.iter().filter(|&&n| (n - 1) % 4 == target_class).count();
+    count as f64 / last_numbers.len() as f64
+}
+
 fn compute_recent_even_count(history: &[Draw], pool: Pool, window: usize) -> f64 {
     let w = window.min(history.len());
     if w == 0 {
@@ -273,7 +317,7 @@ mod tests {
         let draws = make_test_draws(30);
         let features = extract_features_for_draw(&draws, Pool::Balls, 0);
         assert_eq!(features.len(), 50);
-        assert_eq!(features[0].features.len(), 18);
+        assert_eq!(features[0].features.len(), 21);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use lemillion_db::models::{Draw, Pool};
@@ -58,6 +59,7 @@ pub fn walk_forward_evaluate(
 }
 
 /// Walk-forward evaluation avec stratégie d'échantillonnage explicite.
+/// Le stride est calculé automatiquement pour limiter à ~500 test points max.
 pub fn walk_forward_evaluate_with_strategy(
     model: &dyn ForecastModel,
     draws: &[Draw],
@@ -77,79 +79,75 @@ pub fn walk_forward_evaluate_with_strategy(
         return f64::NEG_INFINITY;
     }
 
-    // Limiter à ~500 points de test avec un stride pour la performance
-    // SE passe de ~0.2 nats (100 pts) à ~0.09 nats, rendant les skills de 0.01 détectables
     let max_tests = 500;
     let stride = (max_t / max_tests).max(1);
 
-    let mut total_ll = 0.0f64;
-    let mut n_tests = 0usize;
+    // Collecter les indices de test, puis paralléliser les predict() calls
+    let test_indices: Vec<usize> = (0..max_t).step_by(stride).collect();
 
-    for t in (0..max_t).step_by(stride) {
-        let dist = match strategy {
-            SamplingStrategy::Consecutive => {
-                // Données d'entraînement : strictement après le tirage test
-                let train_end = (t + 1 + window).min(draws.len());
-                let train_data = &draws[t + 1..train_end];
-
-                if train_data.len() < 3 {
-                    continue;
+    let results: Vec<f64> = test_indices
+        .par_iter()
+        .filter_map(|&t| {
+            let dist = match strategy {
+                SamplingStrategy::Consecutive => {
+                    let train_end = (t + 1 + window).min(draws.len());
+                    let train_data = &draws[t + 1..train_end];
+                    if train_data.len() < 3 {
+                        return None;
+                    }
+                    model.predict(train_data, pool)
                 }
-
-                model.predict(train_data, pool)
-            }
-            SamplingStrategy::Sparse { span_multiplier } => {
-                let span = window * span_multiplier;
-                let actual_span = span.min(draws.len() - t - 1);
-                let full_range = &draws[t + 1..t + 1 + actual_span];
-
-                if full_range.len() < 3 {
-                    continue;
+                SamplingStrategy::Sparse { span_multiplier } => {
+                    let span = window * span_multiplier;
+                    let actual_span = span.min(draws.len() - t - 1);
+                    let full_range = &draws[t + 1..t + 1 + actual_span];
+                    if full_range.len() < 3 {
+                        return None;
+                    }
+                    let step = (actual_span / window).max(1);
+                    let train_data: Vec<Draw> = full_range
+                        .iter()
+                        .step_by(step)
+                        .take(window)
+                        .cloned()
+                        .collect();
+                    if train_data.len() < 3 {
+                        return None;
+                    }
+                    model.predict(&train_data, pool)
                 }
-
-                // Sous-échantillonner : prendre window tirages uniformément répartis
-                let step = (actual_span / window).max(1);
-                let train_data: Vec<Draw> = full_range
-                    .iter()
-                    .step_by(step)
-                    .take(window)
-                    .cloned()
-                    .collect();
-
-                if train_data.len() < 3 {
-                    continue;
+                SamplingStrategy::FullHistory => {
+                    let train_data = &draws[t + 1..];
+                    if train_data.len() < min_history {
+                        return None;
+                    }
+                    model.predict(train_data, pool)
                 }
+            };
 
-                model.predict(&train_data, pool)
-            }
-            SamplingStrategy::FullHistory => {
-                let train_data = &draws[t + 1..];
-                if train_data.len() < min_history {
-                    continue;
+            let test_draw = &draws[t];
+            let test_numbers = pool.numbers_from(test_draw);
+            let n_pool = pool.size() as f64;
+            let uniform_ll = (1.0 / n_pool).ln();  // -3.91 balls, -2.49 stars
+            let ll_cap = 2.0 * uniform_ll;          // -7.82 balls, -4.97 stars
+            let hit_bonus = 3.0;
+            let mut draw_ll = 0.0f64;
+            for &n in test_numbers {
+                let idx = (n - 1) as usize;
+                if idx < dist.len() {
+                    let ll = dist[idx].max(1e-15).ln().max(ll_cap);
+                    let excess = ll - uniform_ll;
+                    let adjusted = if excess > 0.0 { hit_bonus * excess } else { excess };
+                    draw_ll += uniform_ll + adjusted;
                 }
-                model.predict(train_data, pool)
             }
-        };
+            Some(draw_ll)
+        })
+        .collect();
 
-        // Mesurer la log-likelihood sur le tirage test
-        let test_draw = &draws[t];
-        let test_numbers = pool.numbers_from(test_draw);
-
-        let mut draw_ll = 0.0f64;
-        for &n in test_numbers {
-            let idx = (n - 1) as usize;
-            if idx < dist.len() {
-                let p = dist[idx].max(1e-15); // Éviter log(0)
-                draw_ll += p.ln();
-            }
-        }
-
-        total_ll += draw_ll;
-        n_tests += 1;
-    }
-
+    let n_tests = results.len();
     if n_tests > 0 {
-        total_ll / n_tests as f64
+        results.iter().sum::<f64>() / n_tests as f64
     } else {
         f64::NEG_INFINITY
     }
@@ -185,18 +183,53 @@ pub fn compute_weights_with_params(
 ) -> Vec<(String, f64)> {
     let uniform_ll = uniform_log_likelihood(pool);
 
-    // Poids = exp(skill / T) avec hard dropout pour skill <= 0
+    // Poids = exp(skill / T) pour tous les modèles (pas de dropout).
     // skill = best_ll - uniform_ll
-    // Hard dropout : les modèles au niveau ou sous l'uniforme (skill <= 0)
-    // reçoivent un poids de 0 — ils diluent ou dégradent le signal.
     // T < 1 concentre sur les meilleurs (ex: T=0.5 → ratios élevés au carré)
     // T > 1 aplatit vers l'uniforme
     let raw_weights: Vec<f64> = calibrations
         .iter()
         .map(|c| {
             let skill = c.best_ll - uniform_ll;
-            if skill <= 0.0 {
-                0.0 // Hard dropout : sous-uniforme ou uniforme
+            (skill / temperature).exp()
+        })
+        .collect();
+
+    let total: f64 = raw_weights.iter().sum();
+
+    if total > 0.0 {
+        calibrations
+            .iter()
+            .zip(raw_weights.iter())
+            .map(|(c, &w)| (c.model_name.clone(), w / total))
+            .collect()
+    } else {
+        // Cas dégénéré → uniforme
+        let n = calibrations.len() as f64;
+        calibrations
+            .iter()
+            .map(|c| (c.model_name.clone(), 1.0 / n))
+            .collect()
+    }
+}
+
+/// Calcule les poids avec seuil de skill minimum.
+/// Les modèles avec skill <= min_skill reçoivent un poids de 0.
+/// Fallback uniforme si tous les modèles sont éliminés.
+pub fn compute_weights_with_threshold(
+    calibrations: &[ModelCalibration],
+    pool: Pool,
+    temperature: f64,
+    min_skill: f64,
+) -> Vec<(String, f64)> {
+    let uniform_ll = uniform_log_likelihood(pool);
+
+    let raw_weights: Vec<f64> = calibrations
+        .iter()
+        .map(|c| {
+            let skill = c.best_ll - uniform_ll;
+            if skill <= min_skill {
+                0.0
             } else {
                 (skill / temperature).exp()
             }
@@ -212,7 +245,7 @@ pub fn compute_weights_with_params(
             .map(|(c, &w)| (c.model_name.clone(), w / total))
             .collect()
     } else {
-        // Cas dégénéré → uniforme
+        // Tous éliminés → fallback uniforme
         let n = calibrations.len() as f64;
         calibrations
             .iter()
@@ -236,8 +269,7 @@ pub fn calibrate_model(
         );
         let min_history = 10;
         let max_t = draws.len().saturating_sub(min_history + 1);
-        let stride = (max_t / 100).max(1);
-        let n_tests = (0..max_t).step_by(stride).count();
+        let n_tests = max_t;
 
         return ModelCalibration {
             model_name: model.name().to_string(),
@@ -261,7 +293,9 @@ pub fn calibrate_model(
 
     for &window in windows {
         // Toujours évaluer en mode consécutif
-        let ll = walk_forward_evaluate(model, draws, window, pool);
+        let ll = walk_forward_evaluate_with_strategy(
+            model, draws, window, pool, SamplingStrategy::Consecutive,
+        );
         let max_t = draws.len().saturating_sub(window + 1);
 
         results.push(CalibrationResult {
@@ -279,26 +313,30 @@ pub fn calibrate_model(
         }
 
         // Si le modèle supporte le sparse, évaluer aussi en mode sparse
+        // Skip si trop peu de test points pour être statistiquement significatif
         if let SamplingStrategy::Sparse { span_multiplier } = strategy {
-            let sparse_strategy = SamplingStrategy::Sparse { span_multiplier };
             let span = window * span_multiplier;
-            let ll_sparse = walk_forward_evaluate_with_strategy(
-                model, draws, window, pool, sparse_strategy,
-            );
             let max_t_sparse = draws.len().saturating_sub(span + 1);
 
-            results.push(CalibrationResult {
-                model_name: model.name().to_string(),
-                window,
-                sparse: true,
-                log_likelihood: ll_sparse,
-                n_tests: max_t_sparse,
-            });
+            if max_t_sparse >= 30 {
+                let sparse_strategy = SamplingStrategy::Sparse { span_multiplier };
+                let ll_sparse = walk_forward_evaluate_with_strategy(
+                    model, draws, window, pool, sparse_strategy,
+                );
 
-            if ll_sparse > best_ll {
-                best_ll = ll_sparse;
-                best_window = window;
-                best_sparse = true;
+                results.push(CalibrationResult {
+                    model_name: model.name().to_string(),
+                    window,
+                    sparse: true,
+                    log_likelihood: ll_sparse,
+                    n_tests: max_t_sparse,
+                });
+
+                if ll_sparse > best_ll {
+                    best_ll = ll_sparse;
+                    best_window = window;
+                    best_sparse = true;
+                }
             }
         }
     }
@@ -346,49 +384,63 @@ pub fn collect_detailed_ll(
         return vec![];
     }
 
-    let max_tests = 500;
-    let stride = (max_t / max_tests).max(1);
-    let mut lls = Vec::new();
+    // collect_detailed_ll conserve stride=1 pour garder la résolution complète
+    // (utilisé pour meta-predictor et redundancy detection)
+    let test_indices: Vec<usize> = (0..max_t).collect();
 
-    for t in (0..max_t).step_by(stride) {
-        let dist = match strategy {
-            SamplingStrategy::Consecutive => {
-                let train_end = (t + 1 + window).min(draws.len());
-                let train_data = &draws[t + 1..train_end];
-                if train_data.len() < 3 { continue; }
-                model.predict(train_data, pool)
-            }
-            SamplingStrategy::Sparse { span_multiplier } => {
-                let span = window * span_multiplier;
-                let actual_span = span.min(draws.len() - t - 1);
-                let full_range = &draws[t + 1..t + 1 + actual_span];
-                if full_range.len() < 3 { continue; }
-                let step = (actual_span / window).max(1);
-                let train_data: Vec<Draw> = full_range
-                    .iter().step_by(step).take(window).cloned().collect();
-                if train_data.len() < 3 { continue; }
-                model.predict(&train_data, pool)
-            }
-            SamplingStrategy::FullHistory => {
-                let train_data = &draws[t + 1..];
-                if train_data.len() < min_history { continue; }
-                model.predict(train_data, pool)
-            }
-        };
+    // Paralléliser les predict() calls — chaque t est indépendant
+    // On collecte (index, ll) pour préserver l'ordre
+    let mut indexed_lls: Vec<(usize, f64)> = test_indices
+        .par_iter()
+        .filter_map(|&t| {
+            let dist = match strategy {
+                SamplingStrategy::Consecutive => {
+                    let train_end = (t + 1 + window).min(draws.len());
+                    let train_data = &draws[t + 1..train_end];
+                    if train_data.len() < 3 { return None; }
+                    model.predict(train_data, pool)
+                }
+                SamplingStrategy::Sparse { span_multiplier } => {
+                    let span = window * span_multiplier;
+                    let actual_span = span.min(draws.len() - t - 1);
+                    let full_range = &draws[t + 1..t + 1 + actual_span];
+                    if full_range.len() < 3 { return None; }
+                    let step = (actual_span / window).max(1);
+                    let train_data: Vec<Draw> = full_range
+                        .iter().step_by(step).take(window).cloned().collect();
+                    if train_data.len() < 3 { return None; }
+                    model.predict(&train_data, pool)
+                }
+                SamplingStrategy::FullHistory => {
+                    let train_data = &draws[t + 1..];
+                    if train_data.len() < min_history { return None; }
+                    model.predict(train_data, pool)
+                }
+            };
 
-        let test_draw = &draws[t];
-        let test_numbers = pool.numbers_from(test_draw);
-        let mut draw_ll = 0.0f64;
-        for &n in test_numbers {
-            let idx = (n - 1) as usize;
-            if idx < dist.len() {
-                draw_ll += dist[idx].max(1e-15).ln();
+            let test_draw = &draws[t];
+            let test_numbers = pool.numbers_from(test_draw);
+            let n_pool = pool.size() as f64;
+            let uniform_ll = (1.0 / n_pool).ln();
+            let ll_cap = 2.0 * uniform_ll;
+            let hit_bonus = 3.0;
+            let mut draw_ll = 0.0f64;
+            for &n in test_numbers {
+                let idx = (n - 1) as usize;
+                if idx < dist.len() {
+                    let ll = dist[idx].max(1e-15).ln().max(ll_cap);
+                    let excess = ll - uniform_ll;
+                    let adjusted = if excess > 0.0 { hit_bonus * excess } else { excess };
+                    draw_ll += uniform_ll + adjusted;
+                }
             }
-        }
-        lls.push(draw_ll);
-    }
+            Some((t, draw_ll))
+        })
+        .collect();
 
-    lls
+    // Trier par index pour préserver l'ordre chronologique
+    indexed_lls.sort_unstable_by_key(|&(idx, _)| idx);
+    indexed_lls.into_iter().map(|(_, ll)| ll).collect()
 }
 
 /// Résultat de l'analyse de redondance entre modèles.
@@ -585,12 +637,14 @@ mod tests {
 
     #[test]
     fn test_calibrate_model() {
-        let draws = make_test_draws(50);
+        // 200 tirages pour que les évaluations sparse aient assez de test points (>= 30)
+        let draws = make_test_draws(200);
         let model = crate::models::dirichlet::DirichletModel::new(1.0);
         let cal = calibrate_model(&model, &draws, &[10, 20, 30], Pool::Balls);
         assert_eq!(cal.model_name, "Dirichlet");
-        // Dirichlet has Sparse strategy → 3 consecutive + 3 sparse = 6 results
-        assert_eq!(cal.results.len(), 6);
+        // Dirichlet has Sparse strategy → 3 consecutive + up to 3 sparse
+        // Sparse évalué seulement si max_t_sparse >= 30
+        assert!(cal.results.len() >= 3 && cal.results.len() <= 6);
         assert!(cal.best_ll.is_finite() || cal.best_ll == f64::NEG_INFINITY);
     }
 
@@ -619,8 +673,7 @@ mod tests {
     #[test]
     fn test_temperature_sharpening_increases_ratio() {
         let uniform_ll = uniform_log_likelihood(Pool::Balls);
-        // Utiliser deux modèles POSITIFS (au-dessus de l'uniforme) pour tester le sharpening,
-        // car les modèles sous-uniformes sont droppés (poids = 0) par le hard dropout.
+        // Utiliser deux modèles POSITIFS (au-dessus de l'uniforme) pour tester le sharpening.
         let calibrations = vec![
             ModelCalibration {
                 model_name: "Good".to_string(),
@@ -733,6 +786,66 @@ mod tests {
         assert_eq!(cal.results.len(), 1, "FullHistory should produce exactly 1 result");
         assert_eq!(cal.best_window, 0, "FullHistory best_window should be 0");
         assert!(!cal.best_sparse);
+    }
+
+    #[test]
+    fn test_compute_weights_with_threshold_zeros_bad_models() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "Good".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll + 0.5,
+            },
+            ModelCalibration {
+                model_name: "Uniform".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll, // skill = 0
+            },
+            ModelCalibration {
+                model_name: "Bad".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 0.5, // skill < 0
+            },
+        ];
+        let weights = compute_weights_with_threshold(&calibrations, Pool::Balls, 1.0, 0.0);
+        let good_w = weights.iter().find(|(n, _)| n == "Good").unwrap().1;
+        let uniform_w = weights.iter().find(|(n, _)| n == "Uniform").unwrap().1;
+        let bad_w = weights.iter().find(|(n, _)| n == "Bad").unwrap().1;
+        assert_eq!(uniform_w, 0.0, "skill=0 should be zeroed");
+        assert_eq!(bad_w, 0.0, "skill<0 should be zeroed");
+        assert!((good_w - 1.0).abs() < 1e-10, "Good should get all weight: {good_w}");
+    }
+
+    #[test]
+    fn test_compute_weights_with_threshold_fallback_uniform() {
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "A".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 1.0,
+            },
+            ModelCalibration {
+                model_name: "B".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll - 2.0,
+            },
+        ];
+        // All models below threshold → uniform fallback
+        let weights = compute_weights_with_threshold(&calibrations, Pool::Balls, 1.0, 0.0);
+        assert!((weights[0].1 - 0.5).abs() < 1e-10);
+        assert!((weights[1].1 - 0.5).abs() < 1e-10);
     }
 
     #[test]
