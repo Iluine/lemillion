@@ -10,8 +10,9 @@ use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::{EnsembleCombiner, compute_hedge_weights};
 use lemillion_ensemble::ensemble::calibration::{
-    EnsembleWeights, calibrate_model, collect_detailed_ll, compute_weights_with_params,
-    compute_weights_with_threshold, detect_redundancy, load_weights, save_weights,
+    EnsembleWeights, STAR_DEFAULT_TEMPERATURE, calibrate_model, collect_detailed_ll,
+    compute_weights_with_params, compute_weights_with_threshold, detect_redundancy,
+    load_weights, save_weights,
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
 use lemillion_ensemble::models::all_models;
@@ -363,9 +364,17 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     }
 
     // Calculer et afficher les poids
-    println!("\nTempérature : {:.2}, seuil skill : {:.4}", temperature, min_skill);
+    // Température séparée pour les étoiles : STAR_DEFAULT_TEMPERATURE (0.25) par défaut
+    let star_temp = if (temperature - 1.0).abs() < 1e-9 {
+        // Si température = 1.0 (valeur par défaut CLI), utiliser la température spécifique étoiles
+        STAR_DEFAULT_TEMPERATURE
+    } else {
+        // Si l'utilisateur a spécifié une température explicite, l'utiliser pour les deux
+        temperature
+    };
+    println!("\nTempérature boules : {:.2}, étoiles : {:.2}, seuil skill : {:.4}", temperature, star_temp, min_skill);
     let mut ball_weights = compute_weights_with_threshold(&ball_calibrations, Pool::Balls, temperature, min_skill);
-    let mut star_weights = compute_weights_with_threshold(&star_calibrations, Pool::Stars, temperature, min_skill);
+    let mut star_weights = compute_weights_with_threshold(&star_calibrations, Pool::Stars, star_temp, min_skill);
 
     // Halver le poids du modèle le plus faible pour les paires boules > 0.95
     for r in &redundancies {
@@ -646,44 +655,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let optimal_cs = consensus_score(&optimal.balls, &optimal.stars, &ball_consensus, &star_consensus);
     display::display_optimal_grid(&optimal, optimal_cs);
 
-    // Grilles diversifiées par profil mod-4
-    let effective_seed = seed.unwrap_or_else(lemillion_ensemble::sampler::date_seed);
-    let star_strat = StarStrategy::from_str_loose(star_strategy_str);
-    let diverse = generate_diverse_grids_with_strategy(&ball_dist, &star_dist, &draws, 3, effective_seed, Some(&popularity), star_strat);
-    display::display_diverse_grids(&diverse, &ball_consensus, &star_consensus);
-
-    // Verdict Jackpot — P(5+2) par grille et combiné
-    if !diverse.grids.is_empty() {
-        const TOTAL_COMBINATIONS: f64 = 139_838_160.0; // C(50,5) * C(12,2)
-
-        let grid_probs: Vec<f64> = diverse.grids.iter().map(|g| {
-            let p_balls: f64 = g.balls.iter()
-                .map(|&b| ball_dist[(b as usize) - 1])
-                .product();
-            let p_stars: f64 = g.stars.iter()
-                .map(|&s| star_dist[(s as usize) - 1])
-                .product();
-            // P(5+2) = produit des probas individuelles × nombre de combinaisons
-            // car prob[i] = fréquence estimée du numéro i, pas la proba de le tirer
-            // score = prod(prob/uniform) et P(5+2) = score / TOTAL_COMBINATIONS
-            p_balls * p_stars * TOTAL_COMBINATIONS
-        }).collect();
-
-        // P(au moins 1 grille matche 5+2) = 1 - produit(1 - P_i)
-        let p_jackpot_3 = 1.0 - grid_probs.iter().map(|&p| 1.0 - p).product::<f64>();
-        let p_random_3 = 3.0 / TOTAL_COMBINATIONS;
-        let factor = p_jackpot_3 / p_random_3;
-
-        println!("\n── Verdict Jackpot ──");
-        for (i, &p) in grid_probs.iter().enumerate() {
-            println!("  P(5+2) grille {} : {:.2e}", i + 1, p);
-        }
-        println!("  P(5+2) combiné  : {:.2e}", p_jackpot_3);
-        println!("  Facteur vs aléatoire : {:.1}x", factor);
-    }
-
     if jackpot_mode {
-        // Mode Jackpot : énumération exhaustive
+        // Mode Jackpot : énumération exhaustive par P(5+2)
         let filter = if no_filter {
             None
         } else {
@@ -697,9 +670,80 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             filter.as_ref(),
         )?;
 
+        // Extraire les 3 meilleures grilles par P(5+2) avec min 2 boules de différence
+        // (pas de diversification artificielle — chaque grille maximise P(5+2))
+        if !result.suggestions.is_empty() {
+            const TOTAL_COMBINATIONS: f64 = 139_838_160.0;
+            let mut top3: Vec<&lemillion_db::models::Suggestion> = Vec::new();
+            for s in &result.suggestions {
+                let dominated = top3.iter().any(|t| {
+                    let common = s.balls.iter().filter(|b| t.balls.contains(b)).count();
+                    common >= 4 && s.stars == t.stars
+                });
+                if !dominated {
+                    top3.push(s);
+                }
+                if top3.len() >= 3 {
+                    break;
+                }
+            }
+            // Si on n'a pas 3 grilles assez différentes, compléter avec les top restantes
+            if top3.len() < 3 {
+                for s in &result.suggestions {
+                    if top3.len() >= 3 { break; }
+                    if !top3.iter().any(|t| std::ptr::eq(*t, s)) {
+                        top3.push(s);
+                    }
+                }
+            }
+
+            println!("\n== 3 Grilles Jackpot (top P(5+2), min 2 boules diff) ==\n");
+            for (i, g) in top3.iter().enumerate() {
+                let p_balls: f64 = g.balls.iter()
+                    .map(|&b| ball_dist[(b as usize) - 1])
+                    .product();
+                let p_stars: f64 = g.stars.iter()
+                    .map(|&s| star_dist[(s as usize) - 1])
+                    .product();
+                let p52 = p_balls * p_stars * TOTAL_COMBINATIONS;
+                let cs = consensus_score(&g.balls, &g.stars, &ball_consensus, &star_consensus);
+                println!(
+                    "  Grille {} : {:2} - {:2} - {:2} - {:2} - {:2}  + {:2} - {:2}   P(5+2)={:.2e}  consensus={:+.2}  score={:.4}",
+                    i + 1, g.balls[0], g.balls[1], g.balls[2], g.balls[3], g.balls[4],
+                    g.stars[0], g.stars[1], p52, cs, g.score,
+                );
+            }
+
+            let grid_probs: Vec<f64> = top3.iter().map(|g| {
+                let p_balls: f64 = g.balls.iter()
+                    .map(|&b| ball_dist[(b as usize) - 1])
+                    .product();
+                let p_stars: f64 = g.stars.iter()
+                    .map(|&s| star_dist[(s as usize) - 1])
+                    .product();
+                p_balls * p_stars * TOTAL_COMBINATIONS
+            }).collect();
+
+            let p_jackpot_3 = 1.0 - grid_probs.iter().map(|&p| 1.0 - p).product::<f64>();
+            let p_random_3 = 3.0 / TOTAL_COMBINATIONS;
+            let factor = p_jackpot_3 / p_random_3;
+
+            println!("\n── Verdict Jackpot ──");
+            for (i, &p) in grid_probs.iter().enumerate() {
+                println!("  P(5+2) grille {} : {:.2e}", i + 1, p);
+            }
+            println!("  P(5+2) combiné (3 grilles) : {:.2e}", p_jackpot_3);
+            println!("  Facteur vs 3 grilles aléatoires : {:.1}x", factor);
+        }
+
         display::display_jackpot_results(&result, &ball_consensus, &star_consensus, &conviction);
     } else {
-        // Mode EV (défaut)
+        // Mode EV : grilles diversifiées + suggestions EV
+        let effective_seed = seed.unwrap_or_else(lemillion_ensemble::sampler::date_seed);
+        let star_strat = StarStrategy::from_str_loose(star_strategy_str);
+        let diverse = generate_diverse_grids_with_strategy(&ball_dist, &star_dist, &draws, 3, effective_seed, Some(&popularity), star_strat);
+        display::display_diverse_grids(&diverse, &ball_consensus, &star_consensus);
+
         let effective_seed = seed.unwrap_or_else(|| {
             let ds = lemillion_ensemble::sampler::date_seed();
             println!("(Seed du jour : {ds})");

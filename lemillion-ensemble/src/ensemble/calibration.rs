@@ -159,10 +159,15 @@ pub fn uniform_log_likelihood(pool: Pool) -> f64 {
     pool.pick_count() as f64 * p.ln()
 }
 
-/// Température par défaut pour le scaling des poids.
+/// Température par défaut pour le scaling des poids (boules).
 /// T<1.0 = concentration sur les meilleurs modèles (sharpening).
 /// T=0.5 → exp(skill/0.5) = exp(2×skill), les ratios sont élevés au carré.
 pub const DEFAULT_TEMPERATURE: f64 = 0.5;
+
+/// Température séparée pour les étoiles.
+/// Plus basse car le skill range étoiles est ~0.42 vs ~1.17 boules.
+/// Avec T=0.25 : exp(0.42/0.25) = 5.4× entre meilleur et pire → poids non-uniformes.
+pub const STAR_DEFAULT_TEMPERATURE: f64 = 0.25;
 
 /// Calcule les poids de l'ensemble à partir des calibrations.
 /// Pondération continue avec temperature scaling : poids = exp(skill / T).

@@ -476,7 +476,15 @@ impl ForecastModel for StresaSgdModel {
                 if draws.len() < 20 {
                     return uniform;
                 }
-                ewma_star_predict(draws, self.star_smoothing)
+                // EWMA rapide (alpha=0.08) + mod4 transition étoiles (30/70 blend)
+                let ewma = ewma_star_predict_alpha(draws, 0.08, self.star_smoothing);
+                let mod4 = mod4_star_transition(draws);
+                let mod4_w = 0.30;
+                let mut dist: Vec<f64> = (0..size)
+                    .map(|i| (1.0 - mod4_w) * ewma[i] + mod4_w * mod4[i])
+                    .collect();
+                normalize(&mut dist);
+                dist
             }
         }
     }
@@ -625,7 +633,6 @@ impl ParticleFilter {
         self.observations_seen += 1;
     }
 
-    #[allow(dead_code)]
     fn observe_stars(&mut self, draw: &Draw) {
         let n = self.particles.len();
 
@@ -709,7 +716,6 @@ impl ParticleFilter {
         combined
     }
 
-    #[allow(dead_code)]
     fn predict_stars(&self) -> Vec<f64> {
         let mut combined = vec![0.0f64; 12];
         for (i, particle) in self.particles.iter().enumerate() {
@@ -741,12 +747,25 @@ impl ForecastModel for StresaSmcModel {
             return uniform;
         }
 
-        // Stars: EWMA prediction (proven better than particle filter)
+        // Stars: filtre particulaire dédié (200 particules pour 12 numéros)
         if pool == Pool::Stars {
             if draws.len() < 20 {
                 return uniform;
             }
-            return ewma_star_predict(draws, self.star_smoothing);
+            let n_star_particles = 200;
+            let mut pf = ParticleFilter::new(n_star_particles, self.seed.wrapping_add(7), self.jitter_noise, self.warmup);
+            let n = draws.len();
+            for t in (0..n).rev() {
+                pf.observe_stars(&draws[t]);
+            }
+            let mut star_dist = pf.predict_stars();
+            // Blend avec uniforme
+            let uniform_val = 1.0 / size as f64;
+            for p in &mut star_dist {
+                *p = (1.0 - self.star_smoothing) * *p + self.star_smoothing * uniform_val;
+            }
+            normalize(&mut star_dist);
+            return star_dist;
         }
 
         // Balls path: particle filter + Mod4 + EWMA blend
@@ -1766,6 +1785,84 @@ fn normalize(dist: &mut [f64]) {
     }
 }
 
+/// EWMA star prediction avec alpha configurable.
+fn ewma_star_predict_alpha(draws: &[Draw], alpha: f64, smoothing: f64) -> Vec<f64> {
+    let size = 12;
+    let mut freq = vec![1.0 / size as f64; size];
+
+    for draw in draws.iter().rev() {
+        let mut current = vec![0.0; size];
+        for &s in &draw.stars {
+            current[(s - 1) as usize] = 1.0;
+        }
+        for i in 0..size {
+            freq[i] = (1.0 - alpha) * freq[i] + alpha * current[i];
+        }
+    }
+
+    normalize(&mut freq);
+    let uniform_val = 1.0 / size as f64;
+    for f in &mut freq {
+        *f = (1.0 - smoothing) * *f + smoothing * uniform_val;
+    }
+    normalize(&mut freq);
+    freq
+}
+
+/// Matrice de transition mod-4 pour étoiles.
+/// (star-1) % 4 → 4 classes, matrice de transition 4×4, redistribution intra-classe.
+fn mod4_star_transition(draws: &[Draw]) -> Vec<f64> {
+    let size = 12;
+    let uniform = vec![1.0 / size as f64; size];
+
+    if draws.len() < 10 {
+        return uniform;
+    }
+
+    let n_classes = 4;
+    let laplace = 0.5;
+    let mut transition = vec![vec![laplace; n_classes]; n_classes];
+    let mut from_totals = vec![laplace * n_classes as f64; n_classes];
+
+    for i in 0..draws.len() - 1 {
+        for &s_from in &draws[i + 1].stars {
+            let class_from = ((s_from - 1) % 4) as usize;
+            for &s_to in &draws[i].stars {
+                let class_to = ((s_to - 1) % 4) as usize;
+                transition[class_from][class_to] += 1.0;
+                from_totals[class_from] += 1.0;
+            }
+        }
+    }
+
+    let mut class_probs = vec![0.0f64; n_classes];
+    for &s in &draws[0].stars {
+        let class_from = ((s - 1) % 4) as usize;
+        if from_totals[class_from] > 0.0 {
+            for c in 0..n_classes {
+                class_probs[c] += transition[class_from][c] / from_totals[class_from];
+            }
+        }
+    }
+
+    let class_sum: f64 = class_probs.iter().sum();
+    if class_sum > 0.0 {
+        for p in &mut class_probs {
+            *p /= class_sum;
+        }
+    }
+
+    let mut dist = vec![0.0f64; size];
+    for star in 1..=12u8 {
+        let idx = (star - 1) as usize;
+        let class = ((star - 1) % 4) as usize;
+        let members = (1..=12u8).filter(|&s| ((s - 1) % 4) as usize == class).count();
+        dist[idx] = class_probs[class] / members as f64;
+    }
+
+    dist
+}
+
 /// EWMA star prediction — same approach as Physics model (alpha=0.03).
 fn ewma_star_predict(draws: &[Draw], smoothing: f64) -> Vec<f64> {
     let size = 12;
@@ -1856,8 +1953,29 @@ impl ForecastModel for StresaChaosModel {
             return uniform;
         }
 
-        // Stars: EWMA prediction (proven by Physics model: -4.9573 vs uniform -4.9698)
+        // Stars: Nadaraya-Watson en espace des phases
         if pool == Pool::Stars {
+            // Encode étoiles en 2D : [sum_norm_stars, spread_norm_stars]
+            let star_states = encode_all_states(draws, Pool::Stars);
+            let tau = 1;
+            let dim = 2;
+            let embedded = chaos_takens_embed(&star_states, tau, dim);
+            if embedded.len() >= self.k_pilot + 2 {
+                let offset = (dim - 1) * tau;
+                let pred_nw = nadaraya_watson_predict(
+                    &embedded, draws, Pool::Stars,
+                    self.k_pilot.min(10), offset, self.temporal_decay,
+                );
+                // Blend avec uniforme
+                let uniform_val = 1.0 / size as f64;
+                let mut star_dist = pred_nw;
+                for p in &mut star_dist {
+                    *p = (1.0 - self.star_smoothing) * *p + self.star_smoothing * uniform_val;
+                }
+                normalize(&mut star_dist);
+                return star_dist;
+            }
+            // Fallback: EWMA
             return ewma_star_predict(draws, self.star_smoothing);
         }
 

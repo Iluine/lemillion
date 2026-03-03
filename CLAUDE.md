@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-The purpose of this project is to win the jackpot at EuroMillions with only 3 grids played.
+The sole purpose of this project is to win the EuroMillions jackpot (5+2). Only the jackpot matters — lower prize tiers are irrelevant.
 
 ## Build & Test Commands
 
@@ -22,7 +22,7 @@ cargo run -p lemillion-cli -- list --last 5   # show last N draws
 cargo run -p lemillion-cli -- stats --window 20  # frequency & gap statistics
 cargo run -p lemillion-cli -- predict --seed 42  # Dirichlet prediction
 cargo run -p lemillion-cli -- predict --model ewma --alpha 0.9 --seed 42  # EWMA prediction
-cargo run -p lemillion-ensemble -- calibrate                  # calibrate (7 default windows)
+cargo run -p lemillion-ensemble -- calibrate                  # calibrate (8 default windows)
 cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate with custom windows
 cargo run -p lemillion-ensemble -- weights     # show ensemble weights
 cargo run -p lemillion-ensemble -- predict --seed 42  # ensemble prediction (explicit seed)
@@ -67,9 +67,9 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,ewma,logistic,random_forest,markov,retard,hot_streak,esn,takens,spectral,ctw,nvar,nvar_memo,mixture,transformer,tda,diffusion,physics,mod4,triplet,conditional,stresa}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy}.rs
     src/features/{mod,compute}.rs
-    src/ensemble/{mod,calibration,consensus}.rs
+    src/ensemble/{mod,calibration,consensus,meta}.rs
     src/research/{mod,physical,mathematical,informational}.rs
 ```
 
@@ -118,32 +118,33 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-24 independent models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration:
+18 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
 
-1. **Dirichlet** **(S×3)** — Dirichlet-Multinomial prior
-2. **EWMA** — Exponentially Weighted Moving Average
-3. **Logistic** — SGD with L2 regularization via ndarray, 14 features
-4. **RandomForest** — 50 trees, depth 5, bootstrap, sqrt(n) features, Gini impurity
-5. **Markov** — Transition matrices by ranges (5x10 balls, 3x4 stars) + frequency redistribution
-6. **Retard** — `score = (gap/mean_gap)^gamma`, default gamma=1.5
-7. **HotStreak** — Linear decreasing weights over K recent draws
-8. **ESN** — Echo State Network wrapper; dynamically adjusts washout for small windows, uniform fallback on error
-9. **TakensKNN** — Phase-space reconstruction (Takens embedding theorem), K-nearest-neighbor in embedded space (k=5, tau=1, dim=3). Encodes draws as scalar vectors, weights successor draws by inverse distance. 70/30 mix with uniform
-10. **Spectral** — FFT via `rustfft` on binary presence/absence series per number, identifies dominant harmonics, autocorrelation extrapolation (n_harmonics=5, smoothing=0.7, min 30 draws)
-11. **CTW** **(S×3)** — Context Tree Weighting: Bayesian universal predictor with Krichevsky-Trofimov estimator, depth-6 context tree over binary presence/absence series per number. Analytically computes predictive probability by traversing context path (O(D) per prediction). Theoretically optimal for finite-memory sources (depth=6, smoothing=0.5, min 10 draws)
-12. **NVAR** — Nonlinear Vector Autoregression (Gauthier et al. 2021): deterministic replacement for ESN. Delay embedding (d=5) of summary statistics (sum, spread, parity, centroid, variance) + quadratic cross-products, ridge regression via `lemillion-esn::linalg::ridge_regression`. (poly_degree=2, ridge_lambda=1e-4, smoothing=0.6)
-13. **NVAR-Memo** — Random Fourier Features (Rahimi & Recht 2007) approximating infinite-dimensional RBF kernel. Overparameterized (200 features > N samples) ridge regression for memorization/interpolation. Tests whether RBF kernel extrapolation beats uniform. (n_features=200, bandwidth=1.0, ridge_lambda=1e-6, delay=3, smoothing=0.5, seed=42)
-14. **BME** — Bayesian Mixture of Experts: 6 lightweight experts (frequency, gap, parity, decade balance, sum target, co-occurrence) reweighted online via Hedge algorithm (multiplicative weights update). Proven regret bound: loss ≤ best_expert + sqrt(T×ln(K)). (learning_rate=0.1, smoothing=0.15)
-15. **Transformer** — Reservoir Transformer: self-attention à poids fixes (random frozen) + ridge regression readout. 2 couches, 4 têtes, d_model=32, masque causal, positional encoding sinusoïdal. Capture les dépendances long-range sans backprop. (context_len=50, ridge_lambda=1e-3, smoothing=0.5, seed=42)
-16. **TDA** **(S×3)** — Topological Data Analysis: homologie persistante H0 via Union-Find sur nuages de points 5D. Extrait persistence entropy, max persistence, Betti-0 et corrèle avec apparitions. (window_size=30, correlation_window=50, smoothing=0.6)
-17. **Diffusion** — Denoising Autoencoder multi-échelle: autoencodeurs linéaires entraînés par ridge regression à 5 niveaux de bruit (géométrique 0.1→2.0). Prédiction itérative en 10 pas de débruitage avec contexte des 5 derniers tirages. (ridge_lambda=1e-3, smoothing=0.5, seed=42)
-18. **Physics** **(S×4)** — Simulation de biais mécaniques: fréquences EWMA lentes (α=0.05), biais log-ratio avec shrinkage bayésien, drift temporel, lissage spatial gaussien (σ=3, boules voisines similaires), détection changement de régime CUSUM. (prior_strength=50, drift_window=20, smoothing=0.4)
-19. **Mod4Trans** **(S×3)** — Matrice de transition sur résidus mod 4, exploitant la corrélation inter-tirages (cosine 0.68 vs 0.38) liée aux 4 pales de la machine Stresa. Redistribution intra-classe + lissage uniforme. (smoothing=0.25, min_draws=10)
-20. **TripletBoost** — Scoring par triplets co-occurrents à z-score élevé (81 triplets excédentaires |z|>3). Pour chaque candidat k, somme des z-scores des triplets {a,b,k} formés avec les paires du dernier tirage. Softmax + lissage. Étoiles: uniforme. (z_threshold=2.0, smoothing=0.5, min_draws=30)
-21. **CondSummary** — Prédiction conditionnelle P(num|état_résumé). Encode chaque tirage en 4D (sum_bin, spread_bin, odd_count, decade_mask) et construit table de fréquences conditionnelles avec lissage de Laplace. Exploite le gain informationnel de 66% du test d'entropie conditionnelle. (smoothing=0.4, laplace_alpha=1.0, min_draws=20)
-22. **StresaSGD** **(S×4)** — Simulateur physique Bayésien de la machine Stresa. Modèle génératif inverse avec 4 blade_bias (pales), 5 row_bias (rangées rack), 50 ball_affinity individuelles, persistence inter-tirages et température. Optimisation SGD par différences finies avec gradient clipping et régularisation vers prior uniforme. (lr=0.02, reg=0.01, n_epochs=10, smoothing=0.30, star_smoothing=0.18)
-23. **StresaSMC** **(S×4)** — Filtre particulaire (Sequential Monte Carlo) pour le simulateur Stresa. 1000 particules avec systematic resampling quand ESS < N/2. Donne une distribution complète sur θ, capture les modes multiples. Jittering post-resampling pour éviter le collapse. (n_particles=1000, jitter=0.02, warmup=30, smoothing=0.20, star_smoothing=0.12, seed=42)
-24. **StresaChaos** **(S×4)** — Simulateur dynamique chaotique de la machine Stresa. 3 couches : reconstruction espace des phases (Takens 8D balls / 4D stars avec AMI+FNN optimal), analyse attracteur (Lyapunov local, RQA, orbites quasi-périodiques), prédiction multi-méthode fusionnée (KNN phase-space gaussien, transition mod-4, UPO). Smoothing adaptatif basé sur la prédictibilité locale Lyapunov. (k_pilot=20, mod4_weight=0.90, NW_bandwidth=2.0, smoothing=0.25, star_smoothing=0.25)
+**Active ensemble** (`base_models()` in `models/mod.rs`):
+1. **Logistic** — SGD with L2 regularization via ndarray, 14 features
+2. **RandomForest** — 100 trees, depth 3, bootstrap, sqrt(n) features, Gini impurity
+3. **Spectral** — FFT via `rustfft` on binary presence/absence series per number, identifies dominant harmonics, autocorrelation extrapolation (n_harmonics=5, smoothing=0.7, min 30 draws)
+4. **CTW** **(S×3)** — Context Tree Weighting: Bayesian universal predictor with Krichevsky-Trofimov estimator, depth-6 context tree over binary presence/absence series per number. Theoretically optimal for finite-memory sources (depth=6, smoothing=0.5, min 10 draws)
+5. **BME** — Bayesian Mixture of Experts: 6 lightweight experts reweighted online via Hedge algorithm (multiplicative weights update). Proven regret bound: loss ≤ best_expert + sqrt(T×ln(K)). (learning_rate=0.1, smoothing=0.15)
+6. **Transformer** — Reservoir Transformer: self-attention à poids fixes (random frozen) + ridge regression readout. 2 couches, 4 têtes, d_model=32, masque causal, positional encoding sinusoïdal. (context_len=50, ridge_lambda=1e-3, smoothing=0.5, seed=42)
+7. **TDA** **(S×3)** — Topological Data Analysis: homologie persistante H0 via Union-Find sur nuages de points 5D. (window_size=30, correlation_window=50, smoothing=0.6)
+8. **Physics** **(S×4)** — Simulation de biais mécaniques: fréquences EWMA lentes (α=0.05), biais log-ratio avec shrinkage bayésien, drift temporel, lissage spatial gaussien, CUSUM. (prior_strength=50, drift_window=20, smoothing=0.4)
+9. **Mod4Trans** **(S×3)** — Matrice de transition sur résidus mod 4, exploitant la corrélation inter-tirages (cosine 0.68 vs 0.38) liée aux 4 pales de la machine Stresa. (smoothing=0.25, min_draws=10)
+10. **Mod4Profile** **(S×3)** — Matrice de transition sur profils mod-4 complets (n₀,n₁,n₂,n₃). 56 profils boules, 10 profils étoiles, transition Laplace-smoothed. Capture les patterns de profils complets plutôt que blade→blade.
+11. **TripletBoost** — Scoring par triplets co-occurrents à z-score élevé. Pour chaque candidat k, somme des z-scores des triplets formés avec les paires du dernier tirage. (z_threshold=2.0, smoothing=0.5, min_draws=30)
+12. **StresaSGD** **(S×4)** — Simulateur physique Bayésien de la machine Stresa. Modèle génératif inverse avec row_bias (5 rangées rack), persistence inter-tirages et température. SGD par différences finies. (lr=0.02, reg=0.01, n_epochs=10, smoothing=0.30, star_smoothing=0.18)
+13. **StresaSMC** **(S×4)** — Filtre particulaire (Sequential Monte Carlo) pour le simulateur Stresa. 1000 particules avec systematic resampling quand ESS < N/2. (n_particles=1000, jitter=0.02, warmup=30, smoothing=0.20, star_smoothing=0.12, seed=42)
+14. **StresaChaos** **(S×4)** — Simulateur dynamique chaotique de la machine Stresa. Reconstruction espace des phases (Takens), analyse attracteur (Lyapunov local, RQA, UPO), prédiction multi-méthode fusionnée. Smoothing adaptatif basé sur la prédictibilité locale Lyapunov. (k_pilot=20, mod4_weight=0.90, smoothing=0.25)
+15. **CondSummaryV2** — Naive Bayes factorisé: P(num|sum_bin) × P(num|spread_bin) × P(num|odd_count) / P(num)². Corrige l'explosion d'état de V1 (~4800 états pour 634 tirages) en 3 tables indépendantes ~100+ observations chacune. Lissage de Laplace. (smoothing=0.4, n_bins=5)
+16. **GapDynamics** **(S×3)** — Fonction de hasard empirique + correction par autocorrélation. Exploite la compression des gaps (0.64 vs 0.78 théorique). Pour chaque numéro: hazard P(gap=g|gap≥g), prior géométrique, ajustement lag-1 autocorrélation. (prior_weight=0.20, autocorr_strength=0.40)
+17. **StarSpecialist** **(S×3)** — Modèle dédié étoiles: 4 micro-experts combinés via Hedge (gap-hazard, conditionnel ball→star, balance haut/bas EWMA, mod-4 transition étoiles). Retourne uniforme pour Pool::Balls. (smoothing=0.35, learning_rate=0.15, min_draws=30)
+18. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée. Score multiplicatif basé sur présence des sources dans le dernier tirage. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2 (coûteux). (alpha=2.0, te_threshold_factor=3.0, smoothing=0.40, n_top_sources=15)
+
+**Retired models** (modules still exist but excluded from `base_models()` — negative calibration skill): Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion.
+
+**Utility types** (not `ForecastModel`, used internally):
+- **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`.
+- **SummaryPredictor** (`summary_predictor.rs`) — Markov order-1 on summary states (sum_bin, spread_bin, odd_count). Used by sampler for adaptive filtering.
 
 **Feature engineering** (`features/compute.rs`): 21 features per number — freq_3, freq_5, freq_10, freq_20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count, pair_freq, gap_acceleration, low_half, mod4_class, mod4_class_freq, mod4_transition.
 

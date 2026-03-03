@@ -17,7 +17,9 @@ pub mod gap_dynamics;
 pub mod joint;
 pub mod mod4_profile;
 pub mod summary_predictor;
+pub mod star_specialist;
 pub mod stresa;
+pub mod transfer_entropy;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -102,6 +104,8 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(stresa::StresaChaosModel::default()),
         Box::new(conditional_v2::CondSummaryV2Model::default()),
         Box::new(gap_dynamics::GapDynamicsModel::default()),
+        Box::new(star_specialist::StarSpecialistModel::default()),
+        Box::new(transfer_entropy::TransferEntropyModel::default()),
     ]
 }
 
