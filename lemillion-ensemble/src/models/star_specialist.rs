@@ -407,6 +407,10 @@ impl ForecastModel for StarSpecialistModel {
     fn sampling_strategy(&self) -> SamplingStrategy {
         SamplingStrategy::Sparse { span_multiplier: 3 }
     }
+
+    fn is_stars_only(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

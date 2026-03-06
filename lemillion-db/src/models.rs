@@ -79,6 +79,14 @@ pub struct Suggestion {
     pub score: f64,
 }
 
+impl Draw {
+    /// Trie balls et stars en ordre croissant (défensif contre les données DB non triées).
+    pub fn normalize(&mut self) {
+        self.balls.sort();
+        self.stars.sort();
+    }
+}
+
 pub fn validate_draw(balls: &[u8; 5], stars: &[u8; 2]) -> Result<()> {
     for &b in balls {
         if !(1..=50).contains(&b) {

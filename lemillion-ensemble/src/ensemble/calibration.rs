@@ -41,6 +41,9 @@ pub struct EnsembleWeights {
     /// Chaque entrée : (model_name, Vec<f64> de LL par tirage test).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub detailed_ll: Vec<(String, Vec<f64>)>,
+    /// LL détaillé étoiles par tirage par modèle (optionnel, pour méta-apprentissage étoiles).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub star_detailed_ll: Vec<(String, Vec<f64>)>,
 }
 
 /// Walk-forward evaluation: pour chaque tirage test t, on entraîne sur draws[t+1..t+1+window]
@@ -158,6 +161,12 @@ pub fn uniform_log_likelihood(pool: Pool) -> f64 {
     let p = 1.0 / pool.size() as f64;
     pool.pick_count() as f64 * p.ln()
 }
+
+/// Fenêtres par défaut pour les boules.
+pub const DEFAULT_BALL_WINDOWS: &[usize] = &[20, 30, 50, 80, 100, 150, 200, 300];
+
+/// Fenêtres par défaut pour les étoiles (plus longues car patterns plus clairsemés).
+pub const DEFAULT_STAR_WINDOWS: &[usize] = &[50, 100, 200, 300, 500];
 
 /// Température par défaut pour le scaling des poids (boules).
 /// T<1.0 = concentration sur les meilleurs modèles (sharpening).
@@ -492,6 +501,50 @@ pub fn detect_redundancy(
 
     results.sort_by(|x, y| y.correlation.partial_cmp(&x.correlation).unwrap_or(std::cmp::Ordering::Equal));
     results
+}
+
+/// Pénalise les modèles corrélés de façon continue.
+/// Pour chaque paire avec corrélation > min_corr, le modèle le plus faible
+/// voit son poids multiplié par un facteur de pénalité décroissant.
+/// Pénalité = 1 - strength × (corr - min_corr) / (1 - min_corr), plancher = floor.
+pub fn apply_decorrelation_penalty(
+    weights: &mut Vec<(String, f64)>,
+    redundancies: &[RedundancyResult],
+    min_corr: f64,
+    strength: f64,
+    floor: f64,
+) {
+    for r in redundancies {
+        if r.correlation <= min_corr {
+            continue;
+        }
+        let w_a = weights
+            .iter()
+            .find(|(n, _)| *n == r.model_a)
+            .map(|(_, w)| *w)
+            .unwrap_or(0.0);
+        let w_b = weights
+            .iter()
+            .find(|(n, _)| *n == r.model_b)
+            .map(|(_, w)| *w)
+            .unwrap_or(0.0);
+        let weaker = if w_a <= w_b {
+            &r.model_a
+        } else {
+            &r.model_b
+        };
+        let penalty =
+            (1.0 - strength * (r.correlation - min_corr) / (1.0 - min_corr)).max(floor);
+        if let Some((_, w)) = weights.iter_mut().find(|(n, _)| n == weaker) {
+            *w *= penalty;
+        }
+    }
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    if total > 0.0 {
+        for (_, w) in weights.iter_mut() {
+            *w /= total;
+        }
+    }
 }
 
 fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
@@ -854,12 +907,93 @@ mod tests {
     }
 
     #[test]
+    fn test_decorrelation_no_penalty_below_threshold() {
+        let mut weights = vec![
+            ("A".to_string(), 0.3),
+            ("B".to_string(), 0.7),
+        ];
+        let redundancies = vec![RedundancyResult {
+            model_a: "A".to_string(),
+            model_b: "B".to_string(),
+            correlation: 0.79,
+        }];
+        apply_decorrelation_penalty(&mut weights, &redundancies, 0.80, 0.5, 0.30);
+        // Below threshold → no penalty, just renormalized
+        assert!((weights[0].1 - 0.3).abs() < 1e-10);
+        assert!((weights[1].1 - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_decorrelation_at_threshold_boundary() {
+        let mut weights = vec![
+            ("A".to_string(), 0.4),
+            ("B".to_string(), 0.6),
+        ];
+        let redundancies = vec![RedundancyResult {
+            model_a: "A".to_string(),
+            model_b: "B".to_string(),
+            correlation: 0.80,
+        }];
+        apply_decorrelation_penalty(&mut weights, &redundancies, 0.80, 0.5, 0.30);
+        // At exact threshold → penalty = 1 - 0.5 * 0/0.2 = 1.0, no change
+        let sum: f64 = weights.iter().map(|(_, w)| w).sum();
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_decorrelation_at_0_90() {
+        let mut weights = vec![
+            ("A".to_string(), 0.4),
+            ("B".to_string(), 0.6),
+        ];
+        let redundancies = vec![RedundancyResult {
+            model_a: "A".to_string(),
+            model_b: "B".to_string(),
+            correlation: 0.90,
+        }];
+        apply_decorrelation_penalty(&mut weights, &redundancies, 0.80, 0.5, 0.30);
+        // penalty = 1 - 0.5 * (0.10/0.20) = 0.75
+        // A (weaker, 0.4) → 0.4 * 0.75 = 0.30
+        // B stays 0.6, total = 0.9, renormalized
+        let a_w = weights.iter().find(|(n, _)| n == "A").unwrap().1;
+        let b_w = weights.iter().find(|(n, _)| n == "B").unwrap().1;
+        assert!(a_w < b_w);
+        let sum: f64 = weights.iter().map(|(_, w)| w).sum();
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_decorrelation_floor_respected() {
+        let mut weights = vec![
+            ("A".to_string(), 0.5),
+            ("B".to_string(), 0.5),
+        ];
+        let redundancies = vec![RedundancyResult {
+            model_a: "A".to_string(),
+            model_b: "B".to_string(),
+            correlation: 1.0,
+        }];
+        // strength=1.0 would give penalty = 0, but floor = 0.30 applies
+        apply_decorrelation_penalty(&mut weights, &redundancies, 0.80, 1.0, 0.30);
+        let a_w = weights.iter().find(|(n, _)| n == "A").unwrap().1;
+        let b_w = weights.iter().find(|(n, _)| n == "B").unwrap().1;
+        // One of them got floor penalty (0.30), the other is original
+        // Since both equal, first alphabetically gets penalized (model_a = "A")
+        // Actually with equal weights, w_a <= w_b → weaker = model_a = "A"
+        // A: 0.5 * 0.30 = 0.15, B: 0.5, total = 0.65
+        assert!(a_w < b_w);
+        let sum: f64 = weights.iter().map(|(_, w)| w).sum();
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
     fn test_weights_json_roundtrip() {
         let weights = EnsembleWeights {
             ball_weights: vec![("A".to_string(), 0.5), ("B".to_string(), 0.5)],
             star_weights: vec![("A".to_string(), 0.3), ("B".to_string(), 0.7)],
             calibrations: vec![],
             detailed_ll: Vec::new(),
+            star_detailed_ll: Vec::new(),
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

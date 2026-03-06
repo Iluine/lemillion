@@ -36,14 +36,16 @@ fn parse_record(record: &csv::StringRecord) -> Result<Draw> {
     let raw_date = get(2)?;
     let date = parse_date(&raw_date)?;
 
-    let balls: [u8; 5] = [
+    let mut balls: [u8; 5] = [
         get_u8(5)?,
         get_u8(6)?,
         get_u8(7)?,
         get_u8(8)?,
         get_u8(9)?,
     ];
-    let stars: [u8; 2] = [get_u8(10)?, get_u8(11)?];
+    let mut stars: [u8; 2] = [get_u8(10)?, get_u8(11)?];
+    balls.sort();
+    stars.sort();
 
     let winner_count_str = get(15).unwrap_or_default();
     let winner_count: i32 = if winner_count_str.is_empty() {

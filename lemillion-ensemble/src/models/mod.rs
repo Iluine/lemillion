@@ -20,6 +20,9 @@ pub mod summary_predictor;
 pub mod star_specialist;
 pub mod stresa;
 pub mod transfer_entropy;
+pub mod star_pair;
+pub mod star_recency;
+pub mod context_knn;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -52,6 +55,12 @@ pub trait ForecastModel: Send + Sync {
     /// stride=1 → tous les points, stride=3 → 1 sur 3.
     fn calibration_stride(&self) -> usize {
         1
+    }
+
+    /// Retourne true si le modèle ne prédit que les étoiles (uniform pour les boules).
+    /// Les modèles star-only auront leur poids boules mis à 0.
+    fn is_stars_only(&self) -> bool {
+        false
     }
 }
 
@@ -98,7 +107,6 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(physics::PhysicsModel::default()),
         Box::new(mod4::Mod4TransitionModel::default()),
         Box::new(mod4_profile::Mod4ProfileModel::default()),
-        Box::new(triplet::TripletBoostModel::default()),
         Box::new(stresa::StresaSgdModel::default()),
         Box::new(stresa::StresaSmcModel::default()),
         Box::new(stresa::StresaChaosModel::default()),
@@ -106,6 +114,9 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(gap_dynamics::GapDynamicsModel::default()),
         Box::new(star_specialist::StarSpecialistModel::default()),
         Box::new(transfer_entropy::TransferEntropyModel::default()),
+        Box::new(star_pair::StarPairModel::default()),
+        Box::new(star_recency::StarRecencyModel::default()),
+        Box::new(context_knn::ContextKnnModel::default()),
     ]
 }
 

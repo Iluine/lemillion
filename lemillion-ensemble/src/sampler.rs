@@ -372,6 +372,73 @@ pub fn compute_bayesian_score(
 }
 
 // ════════════════════════════════════════════════════════════════
+// Conditioning ball→star
+// ════════════════════════════════════════════════════════════════
+
+/// Conditionne les probabilités de paires d'étoiles sur le contexte des boules.
+/// 5 sum_bins × 3 spread_bins = 15 contextes.
+/// Pour chaque contexte, distribution sur les 66 paires d'étoiles (Laplace smoothed).
+pub struct BallStarConditioner {
+    table: Vec<[f64; 66]>,
+}
+
+impl BallStarConditioner {
+    const N_CONTEXTS: usize = 15; // 5 sum_bins × 3 spread_bins
+    const LAPLACE_ALPHA: f64 = 0.3;
+
+    pub fn from_history(draws: &[Draw]) -> Self {
+        let mut counts = vec![[0.0f64; 66]; Self::N_CONTEXTS];
+
+        for draw in draws {
+            let mut balls = draw.balls;
+            balls.sort();
+            let ctx = Self::ball_context(&balls);
+            let (s1, s2) = if draw.stars[0] < draw.stars[1] {
+                (draw.stars[0], draw.stars[1])
+            } else {
+                (draw.stars[1], draw.stars[0])
+            };
+            let pidx = crate::models::star_pair::pair_index(s1, s2);
+            counts[ctx][pidx] += 1.0;
+        }
+
+        // Normaliser chaque contexte avec Laplace smoothing
+        let mut table = vec![[0.0f64; 66]; Self::N_CONTEXTS];
+        for ctx in 0..Self::N_CONTEXTS {
+            let total: f64 = counts[ctx].iter().sum::<f64>() + Self::LAPLACE_ALPHA * 66.0;
+            for p in 0..66 {
+                table[ctx][p] = (counts[ctx][p] + Self::LAPLACE_ALPHA) / total;
+            }
+        }
+
+        Self { table }
+    }
+
+    #[inline]
+    pub fn ball_context(balls: &[u8; 5]) -> usize {
+        let sum: u32 = balls.iter().map(|&b| b as u32).sum();
+        let spread = balls[4] - balls[0];
+        let sum_bin = match sum {
+            0..=89 => 0,
+            90..=114 => 1,
+            115..=139 => 2,
+            140..=164 => 3,
+            _ => 4,
+        };
+        let spread_bin = match spread {
+            0..=19 => 0,
+            20..=34 => 1,
+            _ => 2,
+        };
+        sum_bin * 3 + spread_bin
+    }
+
+    #[inline]
+    pub fn conditioned_pair_probs(&self, balls: &[u8; 5]) -> &[f64; 66] {
+        &self.table[Self::ball_context(balls)]
+    }
+}
+
 // Scoring de cohérence conjointe
 // ════════════════════════════════════════════════════════════════
 
@@ -517,7 +584,7 @@ impl CoherenceScorer {
         let pair_score = if pair_count > 0 {
             let expected_pair_freq = (5.0 * 4.0) / (50.0 * 49.0);
             let avg_pair = pair_total / pair_count as f64;
-            (avg_pair / expected_pair_freq).min(3.0) / 3.0
+            (1.0 + (avg_pair / expected_pair_freq).ln().max(0.0)).min(3.0) / 3.0
         } else {
             0.5
         };
@@ -539,7 +606,7 @@ impl CoherenceScorer {
             // Fréquence attendue d'un triplet : C(47,2)/C(50,5)
             let expected_triplet_freq = (5.0 * 4.0 * 3.0) / (50.0 * 49.0 * 48.0);
             let avg_triplet = triplet_total / triplet_count as f64;
-            (avg_triplet / expected_triplet_freq).min(3.0) / 3.0
+            (1.0 + (avg_triplet / expected_triplet_freq).ln().max(0.0)).min(3.0) / 3.0
         } else {
             0.5
         };
@@ -947,13 +1014,13 @@ fn comb(n: usize, k: usize) -> u64 {
 fn compute_adaptive_k(count: usize) -> (usize, usize) {
     let target = 3 * count as u64;
 
-    // Commencer avec K_stars=4, K_balls=10 et augmenter
-    for k_stars in 4..=12usize {
+    // Commencer avec K_stars=6, K_balls=10 et augmenter
+    for k_stars in 6..=12usize {
         let star_combs = comb(k_stars, 2);
         for k_balls in 10..=50usize {
             let ball_combs = comb(k_balls, 5);
             if ball_combs.saturating_mul(star_combs) >= target {
-                return (k_balls, k_stars);
+                return (k_balls.max(30), k_stars);
             }
         }
     }
@@ -993,6 +1060,11 @@ pub fn generate_suggestions_jackpot(
     star_probs: &[f64],
     count: usize,
     filter: Option<&StructuralFilter>,
+    coherence: Option<&CoherenceScorer>,
+    joint_model: Option<&crate::models::joint::JointConditionalModel>,
+    star_pair_probs: Option<&[f64; 66]>,
+    excluded_balls: Option<&[u8]>,
+    conditioner: Option<&BallStarConditioner>,
 ) -> Result<JackpotResult> {
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
@@ -1002,6 +1074,11 @@ pub fn generate_suggestions_jackpot(
     ball_indices.sort_by(|&a, &b| {
         ball_probs[b].partial_cmp(&ball_probs[a]).unwrap_or(CmpOrdering::Equal)
     });
+
+    // Appliquer l'exclusion de boules
+    if let Some(excluded) = excluded_balls {
+        ball_indices.retain(|&idx| !excluded.contains(&((idx + 1) as u8)));
+    }
 
     // Trier les étoiles par probabilité décroissante
     let mut star_indices: Vec<usize> = (0..star_probs.len()).collect();
@@ -1015,6 +1092,7 @@ pub fn generate_suggestions_jackpot(
     let top_stars = &star_indices[..k_stars.min(star_indices.len())];
 
     // Pré-calculer les paires d'étoiles avec leur score
+    let uniform_pair = 1.0 / 66.0;
     let mut star_pairs: Vec<([u8; 2], f64)> = Vec::with_capacity(comb(top_stars.len(), 2) as usize);
     for i in 0..top_stars.len() {
         for j in (i + 1)..top_stars.len() {
@@ -1022,8 +1100,13 @@ pub fn generate_suggestions_jackpot(
             let s2 = (top_stars[j] + 1) as u8;
             let mut stars = [s1, s2];
             stars.sort();
-            let star_score = (star_probs[top_stars[i]] / uniform_star)
-                * (star_probs[top_stars[j]] / uniform_star);
+            let star_score = if let Some(pp) = star_pair_probs {
+                let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+                pp[pidx] / uniform_pair
+            } else {
+                (star_probs[top_stars[i]] / uniform_star)
+                    * (star_probs[top_stars[j]] / uniform_star)
+            };
             star_pairs.push((stars, star_score));
         }
     }
@@ -1066,9 +1149,29 @@ pub fn generate_suggestions_jackpot(
                                 * (ball_probs[top_balls[i3]] / uniform_ball)
                                 * (ball_probs[top_balls[i4]] / uniform_ball);
 
-                            for &(stars, star_score) in &star_pairs {
+                            let coh_bonus = if let Some(coh) = coherence {
+                                0.5 + coh.score_balls(&balls)
+                            } else {
+                                1.0
+                            };
+
+                            let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
+
+                            for &(stars, base_star_score) in &star_pairs {
                                 enumeration_size += 1;
-                                let score = ball_score * star_score;
+                                let star_score = if let Some(cp) = cond_probs {
+                                    let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+                                    let conditioned = cp[pidx] / uniform_pair;
+                                    0.6 * conditioned + 0.4 * base_star_score
+                                } else {
+                                    base_star_score
+                                };
+                                let mut score = ball_score * star_score * coh_bonus;
+
+                                if let Some(jm) = joint_model {
+                                    let joint_norm = jm.score_grid_normalized(&balls, &stars).clamp(0.5, 2.0);
+                                    score *= 0.7 + 0.3 * joint_norm;
+                                }
 
                                 // Élagage rapide : si le score est inférieur au min du heap plein, skip
                                 if heap.len() >= count && score <= min_score {
@@ -1143,11 +1246,30 @@ pub fn generate_suggestions_jackpot(
                                 * (ball_probs[top_balls[i3]] / uniform_ball)
                                 * (ball_probs[top_balls[i4]] / uniform_ball);
 
-                            for &(stars, star_score) in &star_pairs {
+                            let coh_bonus = if let Some(coh) = coherence {
+                                0.5 + coh.score_balls(&balls)
+                            } else {
+                                1.0
+                            };
+
+                            let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
+
+                            for &(stars, base_star_score) in &star_pairs {
                                 enumeration_size += 1;
                                 if passes_filter {
                                     filtered_size += 1;
-                                    let score = ball_score * star_score;
+                                    let star_score = if let Some(cp) = cond_probs {
+                                        let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+                                        let conditioned = cp[pidx] / uniform_pair;
+                                        0.6 * conditioned + 0.4 * base_star_score
+                                    } else {
+                                        base_star_score
+                                    };
+                                    let mut score = ball_score * star_score * coh_bonus;
+                                    if let Some(jm) = joint_model {
+                                        let joint_norm = jm.score_grid_normalized(&balls, &stars).clamp(0.5, 2.0);
+                                        score *= 0.7 + 0.3 * joint_norm;
+                                    }
                                     all.push(Suggestion { balls, stars, score });
                                 }
                             }
@@ -1788,18 +1910,20 @@ pub fn compute_conviction(
 
     let mean_ball_spread: f64 = ball_spread.iter().sum::<f64>() / ball_spread.len() as f64;
     let mean_ball_prob: f64 = ball_probs.iter().sum::<f64>() / ball_probs.len() as f64;
-    let ball_agreement = (1.0 - mean_ball_spread / mean_ball_prob).clamp(0.0, 1.0);
+    let cv_balls = mean_ball_spread / mean_ball_prob.max(1e-15);
+    let ball_agreement = (-2.0 * cv_balls).exp();
 
     let mean_star_spread: f64 = star_spread.iter().sum::<f64>() / star_spread.len() as f64;
     let mean_star_prob: f64 = star_probs.iter().sum::<f64>() / star_probs.len() as f64;
-    let star_agreement = (1.0 - mean_star_spread / mean_star_prob).clamp(0.0, 1.0);
+    let cv_stars = mean_star_spread / mean_star_prob.max(1e-15);
+    let star_agreement = (-2.0 * cv_stars).exp();
 
     let overall = 0.4 * ball_concentration + 0.1 * star_concentration
         + 0.35 * ball_agreement + 0.15 * star_agreement;
 
-    let verdict = if overall >= 0.6 {
+    let verdict = if overall >= 0.55 {
         ConvictionVerdict::HighConviction
-    } else if overall >= 0.3 {
+    } else if overall >= 0.30 {
         ConvictionVerdict::MediumConviction
     } else {
         ConvictionVerdict::LowConviction
@@ -1817,16 +1941,40 @@ pub fn compute_conviction(
     }
 }
 
-/// Température adaptative basée sur la conviction de l'ensemble.
-/// - HighConviction → T=0.10 (concentration agressive, modèles d'accord)
-/// - MediumConviction → T=0.20
-/// - LowConviction → T=0.25 (sharpening même en basse conviction pour maximiser P(jackpot))
+/// Température adaptative basée sur la conviction de l'ensemble (jackpot mode).
+/// Relevée pour éviter le sharpening excessif quand le skill boules est faible.
+/// - HighConviction → T=0.60
+/// - MediumConviction → T=0.85
+/// - LowConviction → T=1.0 (pas de sharpening)
 pub fn conviction_temperature(verdict: &ConvictionVerdict) -> f64 {
     match verdict {
-        ConvictionVerdict::HighConviction => 0.10,
-        ConvictionVerdict::MediumConviction => 0.20,
-        ConvictionVerdict::LowConviction => 0.25,
+        ConvictionVerdict::HighConviction => 0.60,
+        ConvictionVerdict::MediumConviction => 0.85,
+        ConvictionVerdict::LowConviction => 1.0,
     }
+}
+
+/// Températures séparées balls/stars basées sur la conviction.
+/// Les étoiles ont plus de signal → température plus basse.
+pub fn conviction_temperature_split(conviction: &ConvictionScore) -> (f64, f64) {
+    let ball_score = 0.7 * conviction.ball_concentration + 0.3 * conviction.ball_agreement;
+    let star_score = 0.7 * conviction.star_concentration + 0.3 * conviction.star_agreement;
+    let ball_temp = if ball_score >= 0.5 {
+        0.50
+    } else if ball_score >= 0.2 {
+        0.75
+    } else {
+        1.0
+    };
+    // Étoiles : plancher T=0.75 (toujours au moins un peu de sharpening)
+    let star_temp = if star_score >= 0.5 {
+        0.40
+    } else if star_score >= 0.2 {
+        0.60
+    } else {
+        0.75
+    };
+    (ball_temp, star_temp)
 }
 
 #[cfg(test)]
@@ -2169,7 +2317,7 @@ mod tests {
         let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 5);
         assert!(result.total_jackpot_probability > 0.0);
         assert!(result.enumeration_size > 0);
@@ -2195,7 +2343,7 @@ mod tests {
         let total: f64 = star_probs.iter().sum();
         let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 100);
         assert!(result.improvement_factor > 1.0,
             "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
@@ -2208,7 +2356,7 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None).unwrap();
         for w in result.suggestions.windows(2) {
             assert!(w[0].score >= w[1].score,
                 "Suggestions non triées : {} < {}", w[0].score, w[1].score);
@@ -2222,8 +2370,8 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None).unwrap();
-        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None).unwrap();
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None).unwrap();
         for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
@@ -2241,11 +2389,63 @@ mod tests {
             spread_range: (10, 45),
         };
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter)).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None).unwrap();
         // Toutes les suggestions doivent passer le filtre
         for s in &result.suggestions {
             assert!(filter.accept_balls(&s.balls),
                 "Suggestion {:?} ne passe pas le filtre", s.balls);
         }
+    }
+
+    #[test]
+    fn test_ball_context_bins() {
+        // Low sum, low spread
+        assert_eq!(BallStarConditioner::ball_context(&[1, 2, 3, 4, 5]), 0 * 3 + 0);
+        // High sum (145 → bin 3), high spread (45 → bin 2)
+        assert_eq!(BallStarConditioner::ball_context(&[5, 20, 30, 40, 50]), 3 * 3 + 2);
+        // Mid sum (115-139), mid spread (20-34)
+        assert_eq!(BallStarConditioner::ball_context(&[10, 20, 25, 30, 40]), 2 * 3 + 1);
+    }
+
+    #[test]
+    fn test_conditioner_distributions_normalized() {
+        let draws = crate::models::make_test_draws(100);
+        let conditioner = BallStarConditioner::from_history(&draws);
+        for ctx in 0..BallStarConditioner::N_CONTEXTS {
+            let sum: f64 = conditioner.table[ctx].iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "Context {} should sum to 1.0, got {}", ctx, sum,
+            );
+        }
+    }
+
+    #[test]
+    fn test_conditioner_conditioned_lookup() {
+        let draws = crate::models::make_test_draws(100);
+        let conditioner = BallStarConditioner::from_history(&draws);
+        let balls = [5, 10, 20, 30, 40];
+        let probs = conditioner.conditioned_pair_probs(&balls);
+        let sum: f64 = probs.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_conviction_temperature_split() {
+        let conv = ConvictionScore {
+            ball_entropy: 3.0,
+            star_entropy: 2.0,
+            ball_concentration: 0.1,
+            star_concentration: 0.6,
+            ball_agreement: 0.1,
+            star_agreement: 0.5,
+            overall: 0.3,
+            verdict: ConvictionVerdict::MediumConviction,
+        };
+        let (bt, st) = conviction_temperature_split(&conv);
+        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.2 → T=1.0
+        assert!((bt - 1.0).abs() < 1e-10);
+        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.40
+        assert!((st - 0.40).abs() < 1e-10);
     }
 }

@@ -34,9 +34,28 @@ impl EnsembleCombiner {
     }
 
     pub fn predict(&self, draws: &[Draw], pool: Pool) -> EnsemblePrediction {
-        let weights = match pool {
+        let base_weights = match pool {
             Pool::Balls => &self.ball_weights,
             Pool::Stars => &self.star_weights,
+        };
+
+        // Zero out ball weights for star-only models and renormalize
+        let weights = if pool == Pool::Balls {
+            let mut w: Vec<f64> = base_weights.to_vec();
+            for (i, model) in self.models.iter().enumerate() {
+                if model.is_stars_only() {
+                    w[i] = 0.0;
+                }
+            }
+            let total: f64 = w.iter().sum();
+            if total > 0.0 {
+                for v in w.iter_mut() {
+                    *v /= total;
+                }
+            }
+            w
+        } else {
+            base_weights.to_vec()
         };
 
         let mut model_distributions = Vec::new();
@@ -152,7 +171,7 @@ pub fn compute_hedge_weights(
         }
 
         for (m, model) in models.iter().enumerate() {
-            let hit_bonus = 3.0;
+            let hit_bonus = 1.5;
 
             // Loss boules (asymétrique: bonus 3× pour les hits)
             let ball_uniform_ll = (1.0_f64 / 50.0).ln();

@@ -96,6 +96,32 @@ pub fn consensus_score(
         + stars.iter().map(|&s| score_entry(s, star_consensus)).sum::<f64>()
 }
 
+/// Compute a set of ball numbers to exclude from jackpot enumeration.
+/// Returns numbers classified as StrongAvoid with consensus_value < threshold,
+/// sorted by most negative first, capped at max_excluded.
+pub fn compute_exclusion_set(
+    consensus: &[ConsensusEntry],
+    threshold: f64,
+    max_excluded: usize,
+) -> Vec<u8> {
+    let mut candidates: Vec<&ConsensusEntry> = consensus
+        .iter()
+        .filter(|e| e.category == ConsensusCategory::StrongAvoid && e.consensus_value < threshold)
+        .collect();
+
+    candidates.sort_by(|a, b| {
+        a.consensus_value
+            .partial_cmp(&b.consensus_value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    candidates
+        .iter()
+        .take(max_excluded)
+        .map(|e| e.number)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +246,44 @@ mod tests {
         assert!(map[0].consensus_value > map[1].consensus_value,
             "Low spread should give higher consensus value: {} vs {}",
             map[0].consensus_value, map[1].consensus_value);
+    }
+
+    #[test]
+    fn test_exclusion_set_empty_if_all_positive() {
+        let entries: Vec<ConsensusEntry> = (1..=50).map(|i| ConsensusEntry {
+            number: i,
+            probability: 1.0 / 50.0,
+            spread: 0.001,
+            category: ConsensusCategory::StrongPick,
+            consensus_value: 0.5,
+        }).collect();
+        let excluded = compute_exclusion_set(&entries, -0.3, 10);
+        assert!(excluded.is_empty());
+    }
+
+    #[test]
+    fn test_exclusion_set_respects_max() {
+        let mut entries: Vec<ConsensusEntry> = (1..=50).map(|i| ConsensusEntry {
+            number: i,
+            probability: 0.01,
+            spread: 0.001,
+            category: ConsensusCategory::StrongAvoid,
+            consensus_value: -0.5 - i as f64 * 0.01,
+        }).collect();
+        let _ = &mut entries; // suppress
+        let excluded = compute_exclusion_set(&entries, -0.3, 5);
+        assert_eq!(excluded.len(), 5);
+    }
+
+    #[test]
+    fn test_exclusion_set_sorted_most_negative_first() {
+        let entries = vec![
+            ConsensusEntry { number: 10, probability: 0.01, spread: 0.001, category: ConsensusCategory::StrongAvoid, consensus_value: -0.4 },
+            ConsensusEntry { number: 20, probability: 0.01, spread: 0.001, category: ConsensusCategory::StrongAvoid, consensus_value: -0.8 },
+            ConsensusEntry { number: 30, probability: 0.01, spread: 0.001, category: ConsensusCategory::StrongAvoid, consensus_value: -0.6 },
+            ConsensusEntry { number: 5, probability: 0.03, spread: 0.001, category: ConsensusCategory::StrongPick, consensus_value: 0.5 },
+        ];
+        let excluded = compute_exclusion_set(&entries, -0.3, 10);
+        assert_eq!(excluded, vec![20, 30, 10]);
     }
 }

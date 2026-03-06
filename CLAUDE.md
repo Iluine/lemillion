@@ -22,8 +22,10 @@ cargo run -p lemillion-cli -- list --last 5   # show last N draws
 cargo run -p lemillion-cli -- stats --window 20  # frequency & gap statistics
 cargo run -p lemillion-cli -- predict --seed 42  # Dirichlet prediction
 cargo run -p lemillion-cli -- predict --model ewma --alpha 0.9 --seed 42  # EWMA prediction
-cargo run -p lemillion-ensemble -- calibrate                  # calibrate (8 default windows)
-cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate with custom windows
+cargo run -p lemillion-ensemble -- calibrate                  # calibrate (8 ball windows, 5 star windows)
+cargo run -p lemillion-ensemble -- calibrate --windows 20,50,100  # calibrate with custom ball windows
+cargo run -p lemillion-ensemble -- calibrate --pool stars --star-windows 50,100,200,500  # calibrate stars only
+cargo run -p lemillion-ensemble -- calibrate --pool balls         # calibrate balls only
 cargo run -p lemillion-ensemble -- weights     # show ensemble weights
 cargo run -p lemillion-ensemble -- predict --seed 42  # ensemble prediction (explicit seed)
 cargo run -p lemillion-ensemble -- predict              # ensemble prediction (auto-seed YYYYMMDD)
@@ -67,7 +69,7 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus,meta}.rs
     src/research/{mod,physical,mathematical,informational}.rs
@@ -118,7 +120,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-18 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+20 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
 
 **Active ensemble** (`base_models()` in `models/mod.rs`):
 1. **Logistic** — SGD with L2 regularization via ndarray, 14 features
@@ -139,6 +141,9 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 16. **GapDynamics** **(S×3)** — Fonction de hasard empirique + correction par autocorrélation. Exploite la compression des gaps (0.64 vs 0.78 théorique). Pour chaque numéro: hazard P(gap=g|gap≥g), prior géométrique, ajustement lag-1 autocorrélation. (prior_weight=0.20, autocorr_strength=0.40)
 17. **StarSpecialist** **(S×3)** — Modèle dédié étoiles: 4 micro-experts combinés via Hedge (gap-hazard, conditionnel ball→star, balance haut/bas EWMA, mod-4 transition étoiles). Retourne uniforme pour Pool::Balls. (smoothing=0.35, learning_rate=0.15, min_draws=30)
 18. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée. Score multiplicatif basé sur présence des sources dans le dernier tirage. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2 (coûteux). (alpha=2.0, te_threshold_factor=3.0, smoothing=0.40, n_top_sources=15)
+19. **StarPair** **(S×3)** — Prédit les 66 paires d'étoiles via 3 experts Hedge (fréquence paire, transition paire→paire par catégorie de somme, ball-conditionné). Marginalise vers 12 étoiles individuelles. Expose `predict_pair_distribution()` pour scoring direct par paires dans l'énumération jackpot. (smoothing=0.25, learning_rate=0.15, min_draws=50)
+20. **StarRecency** **(S×3)** — EWMA multi-échelle sur fréquence par étoile (3 alphas: 0.20, 0.10, 0.05). Retourne uniforme pour Pool::Balls. (smoothing=0.30, min_draws=20)
+21. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D (sum_norm, spread_norm, odd_count, mod4_cosine). Trouve les k=15 plus proches voisins historiques, pondère par 1/distance. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.40, min_draws=30)
 
 **Retired models** (modules still exist but excluded from `base_models()` — negative calibration skill): Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion.
 
@@ -160,7 +165,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `CoherenceScorer` — computes historical sum/spread stats, pair and triplet co-occurrence frequencies. Weights: 0.35*sum + 0.25*spread + 0.25*pair + 0.15*triplet
 - `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
-- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset), 5 nested loops, min-heap for large enumerations. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
+- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset), 5 nested loops, min-heap for large enumerations. Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
 - `conviction_temperature(verdict)` — adaptive temperature: HighConviction→0.10, MediumConviction→0.20, LowConviction→0.25
 
 **Expected Value** (`expected_value.rs`):
@@ -176,7 +181,9 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - Walk-forward validation (NO future data leakage): train on `draws[t+1..t+1+window]`, test on `draws[t]`
 - Stride sampling (~100 test points) for calibration performance
 - Weights: `exp(best_ll - uniform_ll)`, normalized to sum to 1.0
-- Default windows: `20,30,50,80,100,150,200,300` (8 windows)
+- Default ball windows: `20,30,50,80,100,150,200,300` (8 windows)
+- Default star windows: `50,100,200,300,500` (5 windows) — longer for sparser star patterns
+- `--pool balls|stars|both` for partial recalibration; `--star-windows` to override star windows
 - `SamplingStrategy::Sparse` models are calibrated on both consecutive AND sparse strategies, keeping the best
 - `CalibrationResult` includes `sparse: bool` field; `ModelCalibration` includes `best_sparse: bool`
 - Calibration results saved/loaded as JSON (`calibration.json`) — backward-compatible via `#[serde(default)]`
@@ -184,6 +191,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 **Consensus** (`ensemble/consensus.rs`):
 - `build_consensus_map` — 2D classification (prob × median_spread) -> `StrongPick | DivisivePick | StrongAvoid | Uncertain`
 - `consensus_score(balls, stars, ball_consensus, star_consensus)` — scores a grid against the consensus map: StrongPick=+2, DivisivePick=+1, Uncertain=0, StrongAvoid=-1. Range: -7 to +14
+- `compute_exclusion_set(consensus, threshold, max_excluded)` — returns StrongAvoid numbers with consensus_value < threshold, sorted most negative first, capped at max_excluded. Used for K-reduction in jackpot enumeration
 
 **Agreement boost** (`ensemble/mod.rs`):
 - `predict_with_agreement_boost(draws, pool, strength)` — boosts numbers where models agree (low spread), attenuates divisive ones

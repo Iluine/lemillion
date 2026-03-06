@@ -10,16 +10,17 @@ use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::{EnsembleCombiner, compute_hedge_weights};
 use lemillion_ensemble::ensemble::calibration::{
-    EnsembleWeights, STAR_DEFAULT_TEMPERATURE, calibrate_model, collect_detailed_ll,
-    compute_weights_with_params, compute_weights_with_threshold, detect_redundancy,
-    load_weights, save_weights,
+    EnsembleWeights, STAR_DEFAULT_TEMPERATURE, apply_decorrelation_penalty, calibrate_model,
+    collect_detailed_ll, compute_weights_with_params, compute_weights_with_threshold,
+    detect_redundancy, load_weights, save_weights,
 };
-use lemillion_ensemble::ensemble::consensus::{build_consensus_map, consensus_score};
+use lemillion_ensemble::ensemble::consensus::{build_consensus_map, compute_exclusion_set, consensus_score};
 use lemillion_ensemble::models::all_models;
 use lemillion_ensemble::sampler::{
-    apply_temperature, compute_bayesian_score, compute_conviction, conviction_temperature,
-    generate_suggestions_filtered, generate_diverse_grids_with_strategy,
-    generate_suggestions_ev, generate_suggestions_jackpot, optimal_grid,
+    apply_temperature, compute_bayesian_score, compute_conviction,
+    conviction_temperature_split, generate_suggestions_filtered,
+    generate_diverse_grids_with_strategy, generate_suggestions_ev,
+    generate_suggestions_jackpot, optimal_grid, BallStarConditioner, CoherenceScorer,
     ConvictionVerdict, StarStrategy, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
@@ -39,9 +40,13 @@ struct Cli {
 enum Command {
     /// Calibrer les modèles par walk-forward validation
     Calibrate {
-        /// Fenêtres d'analyse (séparées par des virgules)
+        /// Fenêtres d'analyse pour les boules (séparées par des virgules)
         #[arg(short, long, default_value = "20,30,50,80,100,150,200,300")]
         windows: String,
+
+        /// Fenêtres d'analyse pour les étoiles (séparées par des virgules)
+        #[arg(long)]
+        star_windows: Option<String>,
 
         /// Fichier de sortie pour les poids
         #[arg(short, long, default_value = "calibration.json")]
@@ -54,6 +59,10 @@ enum Command {
         /// Seuil de skill minimum (modèles avec skill <= seuil reçoivent poids 0)
         #[arg(long, default_value = "0.0")]
         min_skill: f64,
+
+        /// Pool à calibrer (balls, stars, both)
+        #[arg(long, default_value = "both")]
+        pool: String,
     },
 
     /// Afficher les poids de l'ensemble
@@ -249,7 +258,7 @@ fn main() -> Result<()> {
     migrate(&conn)?;
 
     match cli.command {
-        Command::Calibrate { windows, output, temperature, min_skill } => cmd_calibrate(&conn, &windows, &output, temperature, min_skill),
+        Command::Calibrate { windows, star_windows, output, temperature, min_skill, pool } => cmd_calibrate(&conn, &windows, star_windows.as_deref(), &output, temperature, min_skill, &pool),
         Command::Weights { calibration } => cmd_weights(&calibration),
         Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, star_strategy } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, &star_strategy),
         Command::History { last } => cmd_history(&conn, last),
@@ -266,159 +275,235 @@ fn main() -> Result<()> {
     }
 }
 
-pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, output: &str, temperature: f64, min_skill: f64) -> Result<()> {
+pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, star_windows_str: Option<&str>, output: &str, temperature: f64, min_skill: f64, pool_str: &str) -> Result<()> {
+    use lemillion_ensemble::ensemble::calibration::DEFAULT_STAR_WINDOWS;
+
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
     }
 
-    let windows: Vec<usize> = windows_str
+    let ball_windows: Vec<usize> = windows_str
         .split(',')
         .map(|s| s.trim().parse::<usize>())
         .collect::<Result<_, _>>()
-        .context("Format de fenêtres invalide")?;
+        .context("Format de fenêtres boules invalide")?;
+
+    let star_windows: Vec<usize> = if let Some(sw) = star_windows_str {
+        sw.split(',')
+            .map(|s| s.trim().parse::<usize>())
+            .collect::<Result<_, _>>()
+            .context("Format de fenêtres étoiles invalide")?
+    } else {
+        DEFAULT_STAR_WINDOWS.to_vec()
+    };
+
+    let calibrate_balls = pool_str == "both" || pool_str == "balls";
+    let calibrate_stars = pool_str == "both" || pool_str == "stars";
 
     let draws = fetch_last_draws(conn, n)?;
     let models = all_models();
 
-    println!("Calibration de {} modèles sur {} tirages avec {} fenêtres...",
-        models.len(), draws.len(), windows.len());
+    // Load existing weights if doing partial calibration
+    let existing_weights = if !calibrate_balls || !calibrate_stars {
+        load_weights(&PathBuf::from(output)).ok()
+    } else {
+        None
+    };
 
-    let total_steps = (models.len() * 2) as u64; // balls + stars pour chaque modèle
+    let pool_label = match (calibrate_balls, calibrate_stars) {
+        (true, true) => "boules+étoiles",
+        (true, false) => "boules uniquement",
+        (false, true) => "étoiles uniquement",
+        _ => bail!("--pool doit être balls, stars ou both"),
+    };
+    println!("Calibration de {} modèles sur {} tirages [{}]",
+        models.len(), draws.len(), pool_label);
+    if calibrate_balls {
+        println!("  Fenêtres boules : {:?}", ball_windows);
+    }
+    if calibrate_stars {
+        println!("  Fenêtres étoiles : {:?}", star_windows);
+    }
+
+    use rayon::prelude::*;
+
+    let total_steps = models.len() as u64 * (calibrate_balls as u64 + calibrate_stars as u64);
     let pb = ProgressBar::new(total_steps);
     pb.set_style(ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
         .unwrap()
         .progress_chars("=> "));
 
-    use rayon::prelude::*;
+    let ball_calibrations: Vec<_> = if calibrate_balls {
+        let cals: Vec<_> = models.par_iter().map(|model| {
+            let cal = calibrate_model(model.as_ref(), &draws, &ball_windows, Pool::Balls);
+            pb.inc(1);
+            cal
+        }).collect();
+        cals
+    } else {
+        // Build from existing weights
+        models.iter().map(|model| {
+            lemillion_ensemble::ensemble::calibration::ModelCalibration {
+                model_name: model.name().to_string(),
+                results: vec![],
+                best_window: 100,
+                best_sparse: false,
+                best_ll: existing_weights.as_ref()
+                    .and_then(|w| w.calibrations.iter()
+                        .find(|c| c.model_name == model.name())
+                        .map(|c| c.best_ll))
+                    .unwrap_or(f64::NEG_INFINITY),
+            }
+        }).collect()
+    };
 
-    let model_results: Vec<_> = models
-        .par_iter()
-        .map(|model| {
-            let ball_cal = calibrate_model(model.as_ref(), &draws, &windows, Pool::Balls);
-            let star_cal = calibrate_model(model.as_ref(), &draws, &windows, Pool::Stars);
-            pb.inc(2);
-            (ball_cal, star_cal)
-        })
-        .collect();
-
-    let (ball_calibrations, star_calibrations): (Vec<_>, Vec<_>) =
-        model_results.into_iter().unzip();
+    let star_calibrations: Vec<_> = if calibrate_stars {
+        let cals: Vec<_> = models.par_iter().map(|model| {
+            let cal = calibrate_model(model.as_ref(), &draws, &star_windows, Pool::Stars);
+            pb.inc(1);
+            cal
+        }).collect();
+        cals
+    } else {
+        models.iter().map(|model| {
+            lemillion_ensemble::ensemble::calibration::ModelCalibration {
+                model_name: model.name().to_string(),
+                results: vec![],
+                best_window: 100,
+                best_sparse: false,
+                best_ll: existing_weights.as_ref()
+                    .and_then(|w| w.calibrations.iter()
+                        .find(|c| c.model_name == model.name())
+                        .map(|c| c.best_ll))
+                    .unwrap_or(f64::NEG_INFINITY),
+            }
+        }).collect()
+    };
 
     pb.finish_with_message("Calibration terminée");
 
     // Afficher les résultats
-    println!("\n── Boules ──");
-    display::display_calibration_results(&ball_calibrations, &windows);
-    println!("\n── Étoiles ──");
-    display::display_calibration_results(&star_calibrations, &windows);
+    if calibrate_balls {
+        println!("\n── Boules ──");
+        display::display_calibration_results(&ball_calibrations, &ball_windows);
+    }
+    if calibrate_stars {
+        println!("\n── Étoiles ──");
+        display::display_calibration_results(&star_calibrations, &star_windows);
+    }
 
-    // Afficher le graphique
-    display::display_calibration_chart(&ball_calibrations, &windows);
+    if calibrate_balls {
+        display::display_calibration_chart(&ball_calibrations, &ball_windows);
+    }
 
-    // Collecter les detailed_ll pour le meta-predictor (boules + étoiles)
+    // Collecter les detailed_ll pour le meta-predictor
     println!("\nCollecte des LL détaillés pour le méta-apprentissage...");
-    let detailed_ll: Vec<(String, Vec<f64>)> = models
-        .par_iter()
-        .zip(ball_calibrations.par_iter())
-        .map(|(model, ball_cal)| {
-            let strategy = model.sampling_strategy();
-            let lls = collect_detailed_ll(
-                model.as_ref(), &draws, ball_cal.best_window, Pool::Balls, strategy,
-            );
-            (model.name().to_string(), lls)
-        })
-        .collect();
+    let detailed_ll: Vec<(String, Vec<f64>)> = if calibrate_balls {
+        models.par_iter()
+            .zip(ball_calibrations.par_iter())
+            .map(|(model, ball_cal)| {
+                let strategy = model.sampling_strategy();
+                let lls = collect_detailed_ll(
+                    model.as_ref(), &draws, ball_cal.best_window, Pool::Balls, strategy,
+                );
+                (model.name().to_string(), lls)
+            })
+            .collect()
+    } else {
+        existing_weights.as_ref().map(|w| w.detailed_ll.clone()).unwrap_or_default()
+    };
 
-    let star_detailed_ll: Vec<(String, Vec<f64>)> = models
-        .par_iter()
-        .zip(star_calibrations.par_iter())
-        .map(|(model, star_cal)| {
-            let strategy = model.sampling_strategy();
-            let lls = collect_detailed_ll(
-                model.as_ref(), &draws, star_cal.best_window, Pool::Stars, strategy,
-            );
-            (model.name().to_string(), lls)
-        })
-        .collect();
+    let star_detailed_ll: Vec<(String, Vec<f64>)> = if calibrate_stars {
+        models.par_iter()
+            .zip(star_calibrations.par_iter())
+            .map(|(model, star_cal)| {
+                let strategy = model.sampling_strategy();
+                let lls = collect_detailed_ll(
+                    model.as_ref(), &draws, star_cal.best_window, Pool::Stars, strategy,
+                );
+                (model.name().to_string(), lls)
+            })
+            .collect()
+    } else {
+        vec![]
+    };
 
     // Détection de redondance (boules)
-    let redundancies = detect_redundancy(&detailed_ll, 0.90);
-    if !redundancies.is_empty() {
-        println!("\n── Redondance boules (corrélation LL > 0.90) ──");
-        for r in &redundancies {
-            let severity = if r.correlation > 0.95 { " [HALVING]" } else { "" };
-            println!("  {} <-> {} : {:.3}{}", r.model_a, r.model_b, r.correlation, severity);
+    let redundancies = if calibrate_balls {
+        let r = detect_redundancy(&detailed_ll, 0.75);
+        if !r.is_empty() {
+            println!("\n── Redondance boules (corrélation LL > 0.75) ──");
+            for rd in &r {
+                let penalty_pct = if rd.correlation > 0.80 {
+                    let p = (1.0 - 0.5 * (rd.correlation - 0.80) / 0.20).max(0.30);
+                    format!(" [×{:.2}]", p)
+                } else {
+                    String::new()
+                };
+                println!("  {} <-> {} : {:.3}{}", rd.model_a, rd.model_b, rd.correlation, penalty_pct);
+            }
         }
-    }
+        r
+    } else {
+        vec![]
+    };
 
     // Détection de redondance (étoiles)
-    let star_redundancies = detect_redundancy(&star_detailed_ll, 0.90);
-    if !star_redundancies.is_empty() {
-        println!("\n── Redondance étoiles (corrélation LL > 0.90) ──");
-        for r in &star_redundancies {
-            let severity = if r.correlation > 0.95 { " [HALVING]" } else { "" };
-            println!("  {} <-> {} : {:.3}{}", r.model_a, r.model_b, r.correlation, severity);
+    let star_redundancies = if calibrate_stars {
+        let r = detect_redundancy(&star_detailed_ll, 0.75);
+        if !r.is_empty() {
+            println!("\n── Redondance étoiles (corrélation LL > 0.75) ──");
+            for rd in &r {
+                let penalty_pct = if rd.correlation > 0.80 {
+                    let p = (1.0 - 0.5 * (rd.correlation - 0.80) / 0.20).max(0.30);
+                    format!(" [×{:.2}]", p)
+                } else {
+                    String::new()
+                };
+                println!("  {} <-> {} : {:.3}{}", rd.model_a, rd.model_b, rd.correlation, penalty_pct);
+            }
         }
-    }
+        r
+    } else {
+        vec![]
+    };
 
     // Calculer et afficher les poids
-    // Température séparée pour les étoiles : STAR_DEFAULT_TEMPERATURE (0.25) par défaut
     let star_temp = if (temperature - 1.0).abs() < 1e-9 {
-        // Si température = 1.0 (valeur par défaut CLI), utiliser la température spécifique étoiles
         STAR_DEFAULT_TEMPERATURE
     } else {
-        // Si l'utilisateur a spécifié une température explicite, l'utiliser pour les deux
         temperature
     };
     println!("\nTempérature boules : {:.2}, étoiles : {:.2}, seuil skill : {:.4}", temperature, star_temp, min_skill);
-    let mut ball_weights = compute_weights_with_threshold(&ball_calibrations, Pool::Balls, temperature, min_skill);
-    let mut star_weights = compute_weights_with_threshold(&star_calibrations, Pool::Stars, star_temp, min_skill);
 
-    // Halver le poids du modèle le plus faible pour les paires boules > 0.95
-    for r in &redundancies {
-        if r.correlation > 0.95 {
-            let w_a = ball_weights.iter().find(|(n, _)| *n == r.model_a).map(|(_, w)| *w).unwrap_or(0.0);
-            let w_b = ball_weights.iter().find(|(n, _)| *n == r.model_b).map(|(_, w)| *w).unwrap_or(0.0);
-            let weaker = if w_a <= w_b { &r.model_a } else { &r.model_b };
-            if let Some((_, w)) = ball_weights.iter_mut().find(|(n, _)| n == weaker) {
-                *w *= 0.5;
-            }
-        }
-    }
-    // Renormaliser les poids boules après halving
-    let total_bw: f64 = ball_weights.iter().map(|(_, w)| w).sum();
-    if total_bw > 0.0 {
-        for (_, w) in ball_weights.iter_mut() {
-            *w /= total_bw;
-        }
-    }
+    let mut ball_weights = if calibrate_balls {
+        compute_weights_with_threshold(&ball_calibrations, Pool::Balls, temperature, min_skill)
+    } else {
+        existing_weights.as_ref().map(|w| w.ball_weights.clone()).unwrap_or_else(|| {
+            models.iter().map(|m| (m.name().to_string(), 1.0 / models.len() as f64)).collect()
+        })
+    };
 
-    // Halver le poids du modèle le plus faible pour les paires étoiles > 0.95
-    for r in &star_redundancies {
-        if r.correlation > 0.95 {
-            let w_a = star_weights.iter().find(|(n, _)| *n == r.model_a).map(|(_, w)| *w).unwrap_or(0.0);
-            let w_b = star_weights.iter().find(|(n, _)| *n == r.model_b).map(|(_, w)| *w).unwrap_or(0.0);
-            let weaker = if w_a <= w_b { &r.model_a } else { &r.model_b };
-            if let Some((_, w)) = star_weights.iter_mut().find(|(n, _)| n == weaker) {
-                *w *= 0.5;
-            }
-        }
-    }
-    // Renormaliser les poids étoiles après halving
-    let total_sw: f64 = star_weights.iter().map(|(_, w)| w).sum();
-    if total_sw > 0.0 {
-        for (_, w) in star_weights.iter_mut() {
-            *w /= total_sw;
-        }
-    }
+    let mut star_weights = if calibrate_stars {
+        compute_weights_with_threshold(&star_calibrations, Pool::Stars, star_temp, min_skill)
+    } else {
+        existing_weights.as_ref().map(|w| w.star_weights.clone()).unwrap_or_else(|| {
+            models.iter().map(|m| (m.name().to_string(), 1.0 / models.len() as f64)).collect()
+        })
+    };
+
+    // Décorrélation continue : pénaliser les modèles corrélés (corr > 0.80)
+    apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.80, 0.5, 0.30);
+    apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.80, 0.5, 0.30);
 
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
         calibrations: ball_calibrations.into_iter().chain(star_calibrations).collect(),
         detailed_ll,
+        star_detailed_ll,
     };
 
     display::display_weights(&ensemble_weights);
@@ -566,20 +651,44 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
     }
 
-    // Hedge weights : ajustement multiplicatif basé sur les 20 derniers tirages (activé par défaut)
+    // MetaPredictor ÉTOILES : ajuster les poids étoiles selon le régime courant
+    if !no_meta_predictor
+        && let Ok(ref w) = weights
+        && !w.star_detailed_ll.is_empty()
+    {
+        use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+        let features = RegimeFeatures::from_draws(&draws);
+        if let Some(meta) = MetaPredictor::train(&draws, &w.star_detailed_ll, 1e-3) {
+            let adjustments = meta.weight_adjustments(&features);
+            let mut n_adjusted = 0;
+            for (name, adj) in &adjustments {
+                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                    && idx < combiner.star_weights.len()
+                {
+                    combiner.star_weights[idx] *= adj;
+                    n_adjusted += 1;
+                }
+            }
+            let total: f64 = combiner.star_weights.iter().sum();
+            if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
+            println!("(MetaPredictor étoiles : {} poids ajustés)", n_adjusted);
+        }
+    }
+
+    // Hedge weights : ajustement multiplicatif réactif (activé par défaut)
     // Boules seulement si signal, étoiles toujours
     if !no_hedge {
         let (hedged_ball, hedged_star) = compute_hedge_weights(
             &combiner.models, &draws,
             &combiner.ball_weights, &combiner.star_weights,
-            20,    // n_recent : 20 derniers tirages
-            0.05,  // eta : learning rate conservateur
+            30,    // n_recent : 30 derniers tirages
+            0.10,  // eta : learning rate réactif
         );
         if balls_have_signal {
             combiner.ball_weights = hedged_ball;
         }
         combiner.star_weights = hedged_star;
-        println!("(Hedge weights appliqués sur les 20 derniers tirages{})",
+        println!("(Hedge weights appliqués sur les 30 derniers tirages, η=0.10{})",
             if !balls_have_signal { " [étoiles seulement]" } else { "" });
     }
 
@@ -622,13 +731,13 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         &star_pred.spread,
     );
 
-    // Température adaptative : utiliser la conviction en mode jackpot ET en mode EV
-    let effective_temp = if let Some(t) = temperature {
-        t
+    // Température adaptative : split balls/stars en mode jackpot
+    let (eff_bt, eff_st) = if let Some(t) = temperature {
+        (t, t)
     } else if jackpot_mode {
-        let ct = conviction_temperature(&conviction.verdict);
-        println!("\n(Température adaptative par conviction [{:.0}%] : {:.2})", conviction.overall * 100.0, ct);
-        ct
+        let (bt, st) = conviction_temperature_split(&conviction);
+        println!("\n(Temp split — balls: {:.2}, stars: {:.2})", bt, st);
+        (bt, st)
     } else {
         // Mode EV : sharpening modéré basé sur la conviction
         let ct: f64 = match conviction.verdict {
@@ -639,15 +748,20 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         if (ct - 1.0).abs() > 1e-9 {
             println!("\n(Température EV par conviction [{:.0}%] : {:.2})", conviction.overall * 100.0, ct);
         }
-        ct
+        (ct, ct)
     };
 
-    let (ball_dist, star_dist) = if (effective_temp - 1.0).abs() > 1e-9 {
-        println!("(Température appliquée : {:.2})", effective_temp);
-        (apply_temperature(&ball_pred.distribution, effective_temp),
-         apply_temperature(&star_pred.distribution, effective_temp))
+    let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
+        println!("(Température boules : {:.2})", eff_bt);
+        apply_temperature(&ball_pred.distribution, eff_bt)
     } else {
-        (ball_pred.distribution.clone(), star_pred.distribution.clone())
+        ball_pred.distribution.clone()
+    };
+    let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
+        println!("(Température étoiles : {:.2})", eff_st);
+        apply_temperature(&star_pred.distribution, eff_st)
+    } else {
+        star_pred.distribution.clone()
     };
 
     // Grille optimale
@@ -656,87 +770,125 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     display::display_optimal_grid(&optimal, optimal_cs);
 
     if jackpot_mode {
-        // Mode Jackpot : énumération exhaustive par P(5+2)
+        // Mode Jackpot multi-perspectives : N profils de poids → N grilles diversifiées
         let filter = if no_filter {
             None
         } else {
-            Some(StructuralFilter::from_history(&draws, Pool::Balls))
+            Some(StructuralFilter::adaptive(&draws))
         };
 
-        let result = generate_suggestions_jackpot(
-            &ball_dist,
-            &star_dist,
-            n_suggestions,
-            filter.as_ref(),
-        )?;
+        let coherence = CoherenceScorer::from_history(&draws, Pool::Balls);
+        let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
+        joint_model.train(&draws);
 
-        // Extraire les 3 meilleures grilles par P(5+2) avec min 2 boules de différence
-        // (pas de diversification artificielle — chaque grille maximise P(5+2))
-        if !result.suggestions.is_empty() {
-            const TOTAL_COMBINATIONS: f64 = 139_838_160.0;
-            let mut top3: Vec<&lemillion_db::models::Suggestion> = Vec::new();
+        // Star pair distribution for pair-aware scoring
+        let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
+        let star_pair_probs = star_pair_model.predict_pair_distribution(&draws);
+
+        // Exclusion set from consensus
+        let ball_pred_for_excl = combiner.predict(&draws, Pool::Balls);
+        let ball_consensus_for_excl = build_consensus_map(&ball_pred_for_excl, Pool::Balls);
+        let excluded = compute_exclusion_set(&ball_consensus_for_excl, -0.3, 10);
+        let excluded_ref = if excluded.is_empty() { None } else {
+            println!("K-réduction : {} boules exclues {:?}", excluded.len(), excluded);
+            Some(excluded.as_slice())
+        };
+
+        // Ball→star conditioner
+        let conditioner = BallStarConditioner::from_history(&draws);
+
+        // Build weight profiles from current combiner weights
+        let model_names: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+        let profiles = build_weight_profiles(&combiner.ball_weights, &combiner.star_weights, &model_names, eff_bt, eff_st);
+        let n_profiles = profiles.len();
+        let n_per_profile = (n_suggestions / n_profiles).max(100);
+
+        let mut selected_grids: Vec<(&str, lemillion_db::models::Suggestion, Vec<f64>, Vec<f64>)> = Vec::new();
+        let mut last_result = None;
+
+        for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
+            let prof_models = all_models();
+            let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
+            let bp = prof_combiner.predict(&draws, Pool::Balls);
+            let sp = prof_combiner.predict(&draws, Pool::Stars);
+
+            let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
+                apply_temperature(&bp.distribution, *prof_bt)
+            } else {
+                bp.distribution.clone()
+            };
+            let sd = if (*prof_st - 1.0).abs() > 1e-9 {
+                apply_temperature(&sp.distribution, *prof_st)
+            } else {
+                sp.distribution.clone()
+            };
+
+            let result = generate_suggestions_jackpot(
+                &bd, &sd, n_per_profile, filter.as_ref(),
+                Some(&coherence), Some(&joint_model),
+                star_pair_probs.as_ref(), excluded_ref,
+                Some(&conditioner),
+            )?;
+
+            // Pick best grid with max 2 common balls with any already selected grid
+            let mut picked = false;
             for s in &result.suggestions {
-                let dominated = top3.iter().any(|t| {
+                let dominated = selected_grids.iter().any(|(_, t, _, _)| {
                     let common = s.balls.iter().filter(|b| t.balls.contains(b)).count();
-                    common >= 4 && s.stars == t.stars
+                    common >= 3
                 });
                 if !dominated {
-                    top3.push(s);
-                }
-                if top3.len() >= 3 {
+                    selected_grids.push((label, s.clone(), bd.clone(), sd.clone()));
+                    picked = true;
                     break;
                 }
             }
-            // Si on n'a pas 3 grilles assez différentes, compléter avec les top restantes
-            if top3.len() < 3 {
-                for s in &result.suggestions {
-                    if top3.len() >= 3 { break; }
-                    if !top3.iter().any(|t| std::ptr::eq(*t, s)) {
-                        top3.push(s);
-                    }
+            if !picked {
+                if let Some(s) = result.suggestions.first() {
+                    selected_grids.push((label, s.clone(), bd.clone(), sd.clone()));
                 }
             }
 
-            println!("\n== 3 Grilles Jackpot (top P(5+2), min 2 boules diff) ==\n");
-            for (i, g) in top3.iter().enumerate() {
+            last_result = Some(result);
+        }
+
+        // Display the N perspective grids
+        const TOTAL_COMBINATIONS: f64 = 139_838_160.0;
+        if !selected_grids.is_empty() {
+            println!("\n== {} Grilles Jackpot Multi-Perspectives ==\n", selected_grids.len());
+            let mut grid_probs = Vec::new();
+            for (i, (label, g, bd, sd)) in selected_grids.iter().enumerate() {
                 let p_balls: f64 = g.balls.iter()
-                    .map(|&b| ball_dist[(b as usize) - 1])
+                    .map(|&b| bd[(b as usize) - 1])
                     .product();
                 let p_stars: f64 = g.stars.iter()
-                    .map(|&s| star_dist[(s as usize) - 1])
+                    .map(|&s| sd[(s as usize) - 1])
                     .product();
                 let p52 = p_balls * p_stars * TOTAL_COMBINATIONS;
                 let cs = consensus_score(&g.balls, &g.stars, &ball_consensus, &star_consensus);
                 println!(
-                    "  Grille {} : {:2} - {:2} - {:2} - {:2} - {:2}  + {:2} - {:2}   P(5+2)={:.2e}  consensus={:+.2}  score={:.4}",
-                    i + 1, g.balls[0], g.balls[1], g.balls[2], g.balls[3], g.balls[4],
-                    g.stars[0], g.stars[1], p52, cs, g.score,
+                    "  Grille {} [{}] : {:2} - {:2} - {:2} - {:2} - {:2}  + {:2} - {:2}   P(5+2)={:.2e}  consensus={:+.2}",
+                    i + 1, label, g.balls[0], g.balls[1], g.balls[2], g.balls[3], g.balls[4],
+                    g.stars[0], g.stars[1], p52, cs,
                 );
+                grid_probs.push(p52);
             }
 
-            let grid_probs: Vec<f64> = top3.iter().map(|g| {
-                let p_balls: f64 = g.balls.iter()
-                    .map(|&b| ball_dist[(b as usize) - 1])
-                    .product();
-                let p_stars: f64 = g.stars.iter()
-                    .map(|&s| star_dist[(s as usize) - 1])
-                    .product();
-                p_balls * p_stars * TOTAL_COMBINATIONS
-            }).collect();
-
-            let p_jackpot_3 = 1.0 - grid_probs.iter().map(|&p| 1.0 - p).product::<f64>();
-            let p_random_3 = 3.0 / TOTAL_COMBINATIONS;
-            let factor = p_jackpot_3 / p_random_3;
+            let p_jackpot = 1.0 - grid_probs.iter().map(|&p| 1.0 - p).product::<f64>();
+            let p_random = selected_grids.len() as f64 / TOTAL_COMBINATIONS;
+            let factor = p_jackpot / p_random;
 
             println!("\n── Verdict Jackpot ──");
             for (i, &p) in grid_probs.iter().enumerate() {
                 println!("  P(5+2) grille {} : {:.2e}", i + 1, p);
             }
-            println!("  P(5+2) combiné (3 grilles) : {:.2e}", p_jackpot_3);
-            println!("  Facteur vs 3 grilles aléatoires : {:.1}x", factor);
+            println!("  P(5+2) combiné ({} grilles) : {:.2e}", selected_grids.len(), p_jackpot);
+            println!("  Facteur vs {} grilles aléatoires : {:.1}x", selected_grids.len(), factor);
         }
 
-        display::display_jackpot_results(&result, &ball_consensus, &star_consensus, &conviction);
+        if let Some(result) = last_result {
+            display::display_jackpot_results(&result, &ball_consensus, &star_consensus, &conviction);
+        }
     } else {
         // Mode EV : grilles diversifiées + suggestions EV
         let effective_seed = seed.unwrap_or_else(lemillion_ensemble::sampler::date_seed);
@@ -873,7 +1025,7 @@ fn cmd_add_draw(conn: &lemillion_db::rusqlite::Connection, args: &[String]) -> R
     if args.len() != 10 {
         bail!("Attendu 10 arguments: draw_id jour date b1 b2 b3 b4 b5 s1 s2\nExemple: add-draw 26016 MARDI 2026-02-24 10 27 40 43 47 6 10");
     }
-    let draw = Draw {
+    let mut draw = Draw {
         draw_id: args[0].clone(),
         day: args[1].clone(),
         date: args[2].clone(),
@@ -892,6 +1044,7 @@ fn cmd_add_draw(conn: &lemillion_db::rusqlite::Connection, args: &[String]) -> R
         winner_prize: 0.0,
         my_million: String::new(),
     };
+    draw.normalize();
     lemillion_db::models::validate_draw(&draw.balls, &draw.stars)?;
     let inserted = insert_draw(conn, &draw)?;
     if inserted {
@@ -977,6 +1130,11 @@ fn cmd_backtest(
     // Sweep de température
     if sweep_temperature {
         return cmd_backtest_sweep(&draws, weights.as_ref().ok(), last, n_suggestions, oversample);
+    }
+
+    // Mode jackpot multi-perspectives : générer N grilles jackpot diversifiées
+    if jackpot_mode && backtest_3_grids {
+        return cmd_backtest_jackpot_top3(&draws, weights.as_ref().ok(), last, n_suggestions, temperature, top_models);
     }
 
     // Mode jackpot backtest
@@ -1415,6 +1573,62 @@ fn cmd_backtest_jackpot(
             let _ = model_names; // suppress unused warning
         }
 
+        // MetaPredictor : ajuster les poids boules selon le régime courant
+        let balls_have_signal = {
+            let max_w = combiner.ball_weights.iter().cloned().fold(0.0_f64, f64::max);
+            let min_w = combiner.ball_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::MAX, f64::min);
+            (max_w - min_w) > 1e-6
+        };
+        if balls_have_signal {
+            if let Some(w) = weights {
+                if !w.detailed_ll.is_empty() {
+                    use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+                    let features = RegimeFeatures::from_draws(training_draws);
+                    if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1e-3) {
+                        let adjustments = meta.weight_adjustments(&features);
+                        for (name, adj) in &adjustments {
+                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
+                                if idx < combiner.ball_weights.len() {
+                                    combiner.ball_weights[idx] *= adj;
+                                }
+                            }
+                        }
+                        let total_b: f64 = combiner.ball_weights.iter().sum();
+                        if total_b > 0.0 { combiner.ball_weights.iter_mut().for_each(|w| *w /= total_b); }
+                    }
+                }
+            }
+        }
+
+        // MetaPredictor étoiles
+        if let Some(w) = weights {
+            if !w.star_detailed_ll.is_empty() {
+                use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+                let features = RegimeFeatures::from_draws(training_draws);
+                if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1e-3) {
+                    let adjustments = meta.weight_adjustments(&features);
+                    for (name, adj) in &adjustments {
+                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
+                            if idx < combiner.star_weights.len() {
+                                combiner.star_weights[idx] *= adj;
+                            }
+                        }
+                    }
+                    let total_s: f64 = combiner.star_weights.iter().sum();
+                    if total_s > 0.0 { combiner.star_weights.iter_mut().for_each(|w| *w /= total_s); }
+                }
+            }
+        }
+
+        // Hedge : ajustement multiplicatif réactif
+        let (hedged_ball, hedged_star) = compute_hedge_weights(
+            &combiner.models, training_draws,
+            &combiner.ball_weights, &combiner.star_weights,
+            30, 0.10,
+        );
+        if balls_have_signal { combiner.ball_weights = hedged_ball; }
+        combiner.star_weights = hedged_star;
+
         let ball_pred = combiner.predict(training_draws, Pool::Balls);
         let star_pred = combiner.predict(training_draws, Pool::Stars);
 
@@ -1426,16 +1640,20 @@ fn cmd_backtest_jackpot(
             &star_pred.spread,
         );
 
-        // Température adaptative par conviction si pas de --temperature explicite
-        let effective_temp = temperature.unwrap_or_else(|| conviction_temperature(&conviction.verdict));
+        // Température adaptative split par conviction si pas de --temperature explicite
+        let (eff_bt, eff_st) = if let Some(t) = temperature {
+            (t, t)
+        } else {
+            conviction_temperature_split(&conviction)
+        };
 
-        let ball_dist = if (effective_temp - 1.0).abs() > 1e-9 {
-            apply_temperature(&ball_pred.distribution, effective_temp)
+        let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
+            apply_temperature(&ball_pred.distribution, eff_bt)
         } else {
             ball_pred.distribution.clone()
         };
-        let star_dist = if (effective_temp - 1.0).abs() > 1e-9 {
-            apply_temperature(&star_pred.distribution, effective_temp)
+        let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
+            apply_temperature(&star_pred.distribution, eff_st)
         } else {
             star_pred.distribution.clone()
         };
@@ -1444,9 +1662,19 @@ fn cmd_backtest_jackpot(
             &test_draw.balls, &test_draw.stars, &ball_dist, &star_dist,
         );
 
-        let filter = StructuralFilter::from_history(training_draws, Pool::Balls);
+        let filter = StructuralFilter::adaptive(training_draws);
+        let coherence = CoherenceScorer::from_history(training_draws, Pool::Balls);
+        let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
+        joint_model.train(training_draws);
+        let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
+        let star_pair_probs = star_pair_model.predict_pair_distribution(training_draws);
+        let conditioner = BallStarConditioner::from_history(training_draws);
+
         let result = generate_suggestions_jackpot(
             &ball_dist, &star_dist, n_suggestions, Some(&filter),
+            Some(&coherence), Some(&joint_model),
+            star_pair_probs.as_ref(), None,
+            Some(&conditioner),
         )?;
 
         // Vérifier si le tirage réel est dans le top-N
@@ -1504,6 +1732,46 @@ fn cmd_backtest_jackpot(
     Ok(())
 }
 
+/// Construit 6 profils de poids diversifiés pour les grilles jackpot.
+/// Chaque profil a ses propres poids ET ses propres températures balls/stars.
+fn build_weight_profiles(
+    ball_w: &[f64],
+    star_w: &[f64],
+    model_names: &[String],
+    base_bt: f64,
+    base_st: f64,
+) -> Vec<(&'static str, Vec<f64>, Vec<f64>, f64, f64)> {
+    let physical_keywords = ["Stresa", "Physics", "Mod4"];
+    let statistical_keywords = ["Logistic", "RandomForest", "Spectral", "CTW", "CondSummary", "GapDyn", "Transfer"];
+    let context_keywords = ["ContextKNN", "CondSummary"];
+    let stresa_keywords = ["StresaChaos", "StresaSGD", "Physics"];
+
+    let boost = |weights: &[f64], keywords: &[&str], factor: f64| -> Vec<f64> {
+        let mut w: Vec<f64> = weights.to_vec();
+        for (i, name) in model_names.iter().enumerate() {
+            if keywords.iter().any(|kw| name.contains(kw)) {
+                w[i] *= factor;
+            }
+        }
+        let total: f64 = w.iter().sum();
+        if total > 0.0 {
+            for v in w.iter_mut() {
+                *v /= total;
+            }
+        }
+        w
+    };
+
+    vec![
+        ("Calibré", ball_w.to_vec(), star_w.to_vec(), base_bt.max(1.0), base_st.max(0.70)),
+        ("Physique", boost(ball_w, &physical_keywords, 8.0), boost(star_w, &physical_keywords, 8.0), base_bt, base_st),
+        ("Statistique", boost(ball_w, &statistical_keywords, 8.0), boost(star_w, &statistical_keywords, 8.0), (base_bt * 0.95).max(0.85), (base_st * 0.85).max(0.50)),
+        ("Context", boost(ball_w, &context_keywords, 12.0), boost(star_w, &context_keywords, 12.0), base_bt, base_st),
+        ("Stresa", boost(ball_w, &stresa_keywords, 12.0), boost(star_w, &stresa_keywords, 12.0), base_bt, base_st),
+        ("Diversité", ball_w.to_vec(), star_w.to_vec(), 1.30, 1.10),
+    ]
+}
+
 fn proximity_score(balls: u8, stars: u8) -> f64 {
     match (balls, stars) {
         (5, 2) => 1000.0,
@@ -1530,6 +1798,390 @@ fn random_match_prob(b: u8, s: u8) -> f64 {
     let p_balls = comb(5, b as u64) as f64 * comb(45, 5 - b as u64) as f64 / comb(50, 5) as f64;
     let p_stars = comb(2, s as u64) as f64 * comb(10, 2 - s as u64) as f64 / comb(12, 2) as f64;
     p_balls * p_stars
+}
+
+fn cmd_backtest_jackpot_top3(
+    draws: &[Draw],
+    weights: Option<&EnsembleWeights>,
+    last: usize,
+    n_suggestions: usize,
+    temperature: Option<f64>,
+    top_models: usize,
+) -> Result<()> {
+    let temp_label = match temperature {
+        Some(t) => format!("T={:.2}", t),
+        None => "T=adaptive".to_string(),
+    };
+    // Dummy call to get n_profiles for display
+    let n_profiles_display = 6;
+    println!(
+        "Backtest jackpot multi-perspectives — {} tirages, {} suggestions/profil, {} profils ({})\n",
+        last, n_suggestions / n_profiles_display, n_profiles_display, temp_label,
+    );
+
+    let pb = ProgressBar::new(last as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    struct DrawResult {
+        date: String,
+        actual_balls: [u8; 5],
+        actual_stars: [u8; 2],
+        grids: Vec<(String, [u8; 5], [u8; 2], u8, u8)>, // (profil, balls, stars, match_b, match_s)
+        best_balls: u8,
+        best_stars: u8,
+        best_profile: String,
+        proximity: f64,
+        conviction: f64,
+    }
+
+    let mut results: Vec<DrawResult> = Vec::new();
+    let mut match_matrix = [[0u32; 3]; 6];
+    let mut profile_best_count: Vec<u32> = Vec::new(); // initialized per-iteration from profile count
+
+    for i in 0..last {
+        let test_draw = &draws[i];
+        let training_draws = &draws[i + 1..];
+
+        pb.set_message(test_draw.date.to_string());
+
+        // Build base combiner to extract weights
+        let models = all_models();
+        let model_names: Vec<String> = models.iter().map(|m| m.name().to_string()).collect();
+        let (base_ball_w, base_star_w) = match weights {
+            Some(w) => {
+                let bw: Vec<f64> = models.iter()
+                    .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                    .collect();
+                let sw: Vec<f64> = models.iter()
+                    .map(|m| w.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                    .collect();
+                (bw, sw)
+            }
+            None => {
+                let n = models.len();
+                (vec![1.0 / n as f64; n], vec![1.0 / n as f64; n])
+            }
+        };
+        drop(models);
+
+        // Apply top_models filtering if requested
+        let (mut ball_w, mut star_w) = (base_ball_w, base_star_w);
+        if top_models > 0 {
+            filter_top_models_silent(&mut ball_w, &mut star_w, top_models);
+        }
+
+        // Compute conviction on calibrated profile
+        let cal_models = all_models();
+        let cal_combiner = EnsembleCombiner::with_weights(cal_models, ball_w.clone(), star_w.clone());
+        let ball_pred = cal_combiner.predict(training_draws, Pool::Balls);
+        let star_pred = cal_combiner.predict(training_draws, Pool::Stars);
+        let conviction = compute_conviction(
+            &ball_pred.distribution, &star_pred.distribution,
+            &ball_pred.spread, &star_pred.spread,
+        );
+        let (eff_bt, eff_st) = if let Some(t) = temperature {
+            (t, t)
+        } else {
+            conviction_temperature_split(&conviction)
+        };
+
+        // Build shared resources once
+        let filter = StructuralFilter::adaptive(training_draws);
+        let coherence = CoherenceScorer::from_history(training_draws, Pool::Balls);
+        let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
+        joint_model.train(training_draws);
+
+        // Star pair distribution for pair-aware scoring
+        let bt_star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
+        let bt_star_pair_probs = bt_star_pair_model.predict_pair_distribution(training_draws);
+
+        // Exclusion set from consensus
+        let bt_ball_pred = cal_combiner.predict(training_draws, Pool::Balls);
+        let bt_ball_consensus = build_consensus_map(&bt_ball_pred, Pool::Balls);
+        let bt_excluded = compute_exclusion_set(&bt_ball_consensus, -0.3, 10);
+        let bt_excluded_ref = if bt_excluded.is_empty() { None } else { Some(bt_excluded.as_slice()) };
+
+        // Ball→star conditioner
+        let bt_conditioner = BallStarConditioner::from_history(training_draws);
+
+        // Build weight profiles with per-profile temperatures
+        let profiles = build_weight_profiles(&ball_w, &star_w, &model_names, eff_bt, eff_st);
+        let n_per_profile = (n_suggestions / profiles.len()).max(100);
+
+        // Initialize profile_best_count on first iteration
+        if profile_best_count.is_empty() {
+            profile_best_count = vec![0u32; profiles.len()];
+        }
+
+        // Generate one grid per profile with diversity constraint
+        let mut selected_grids: Vec<(String, lemillion_db::models::Suggestion)> = Vec::new();
+
+        for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
+            let prof_models = all_models();
+            let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
+            let bp = prof_combiner.predict(training_draws, Pool::Balls);
+            let sp = prof_combiner.predict(training_draws, Pool::Stars);
+
+            let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
+                apply_temperature(&bp.distribution, *prof_bt)
+            } else {
+                bp.distribution.clone()
+            };
+            let sd = if (*prof_st - 1.0).abs() > 1e-9 {
+                apply_temperature(&sp.distribution, *prof_st)
+            } else {
+                sp.distribution.clone()
+            };
+
+            let result = generate_suggestions_jackpot(
+                &bd, &sd, n_per_profile, Some(&filter),
+                Some(&coherence), Some(&joint_model),
+                bt_star_pair_probs.as_ref(), bt_excluded_ref,
+                Some(&bt_conditioner),
+            )?;
+
+            // Pick best grid with max 2 common balls with any already selected grid
+            let mut picked = false;
+            for s in &result.suggestions {
+                let dominated = selected_grids.iter().any(|(_, t)| {
+                    let common = s.balls.iter().filter(|b| t.balls.contains(b)).count();
+                    common >= 3
+                });
+                if !dominated {
+                    selected_grids.push((label.to_string(), s.clone()));
+                    picked = true;
+                    break;
+                }
+            }
+            // Fallback: take top-1 if nothing diverse enough
+            if !picked {
+                if let Some(s) = result.suggestions.first() {
+                    selected_grids.push((label.to_string(), s.clone()));
+                }
+            }
+        }
+
+        // Evaluate the 3 grids vs actual draw
+        let mut best_balls = 0u8;
+        let mut best_stars = 0u8;
+        let mut best_prox = 0.0f64;
+        let mut best_profile = String::new();
+        let mut best_profile_idx = 0usize;
+        let mut grids_info = Vec::new();
+
+        for (idx, (label, grid)) in selected_grids.iter().enumerate() {
+            let (bm, sm) = count_matches(&grid.balls, &grid.stars, test_draw);
+            let prox = proximity_score(bm, sm);
+            grids_info.push((label.clone(), grid.balls, grid.stars, bm, sm));
+            if prox > best_prox || (prox == best_prox && bm + sm > best_balls + best_stars) {
+                best_balls = bm;
+                best_stars = sm;
+                best_prox = prox;
+                best_profile = label.clone();
+                best_profile_idx = idx;
+            }
+        }
+
+        match_matrix[best_balls as usize][best_stars as usize] += 1;
+        if best_profile_idx < profile_best_count.len() {
+            profile_best_count[best_profile_idx] += 1;
+        }
+
+        results.push(DrawResult {
+            date: test_draw.date.clone(),
+            actual_balls: test_draw.balls,
+            actual_stars: test_draw.stars,
+            grids: grids_info,
+            best_balls,
+            best_stars,
+            best_profile,
+            proximity: best_prox,
+            conviction: conviction.overall,
+        });
+
+        pb.inc(1);
+    }
+
+    pb.finish_and_clear();
+
+    // Detailed table
+    use comfy_table::{Table, Cell, Color};
+    let mut table = Table::new();
+    table.load_preset(comfy_table::presets::UTF8_FULL);
+    let n_grids = profile_best_count.len();
+    let mut header: Vec<String> = vec!["Date".into(), "Tirage réel".into()];
+    for i in 1..=n_grids {
+        header.push(format!("G{}", i));
+    }
+    header.extend(["Best".into(), "Prox.".into(), "Conv.".into()]);
+    table.set_header(header);
+
+    for r in &results {
+        let draw_str = format!(
+            "{:2}-{:2}-{:2}-{:2}-{:2}+{:2}-{:2}",
+            r.actual_balls[0], r.actual_balls[1], r.actual_balls[2],
+            r.actual_balls[3], r.actual_balls[4],
+            r.actual_stars[0], r.actual_stars[1],
+        );
+
+        let mut row_cells = vec![
+            Cell::new(&r.date),
+            Cell::new(&draw_str),
+        ];
+
+        for (label, _balls, _stars, bm, sm) in &r.grids {
+            let match_str = format!("{}+{}", bm, sm);
+            let is_best = label == &r.best_profile;
+            let color = if *bm >= 3 && *sm >= 2 {
+                Color::Green
+            } else if proximity_score(*bm, *sm) >= 1.0 {
+                Color::Yellow
+            } else if proximity_score(*bm, *sm) > 0.0 {
+                Color::Cyan
+            } else {
+                Color::DarkGrey
+            };
+            let cell_str = if is_best { format!("[{}]", match_str) } else { match_str };
+            row_cells.push(Cell::new(&cell_str).fg(color));
+        }
+        // Pad if less than n_grids
+        while row_cells.len() < 2 + n_grids {
+            row_cells.push(Cell::new("-"));
+        }
+
+        let best_match = format!("{}+{}", r.best_balls, r.best_stars);
+        let best_color = if r.proximity >= 30.0 {
+            Color::Green
+        } else if r.proximity >= 1.0 {
+            Color::Yellow
+        } else if r.proximity > 0.0 {
+            Color::Cyan
+        } else {
+            Color::DarkGrey
+        };
+        row_cells.push(Cell::new(&best_match).fg(best_color));
+        row_cells.push(Cell::new(format!("{:.1}", r.proximity)).fg(best_color));
+        row_cells.push(Cell::new(format!("{:.2}", r.conviction)));
+
+        table.add_row(row_cells);
+    }
+    println!("{table}");
+
+    // B×S matrix: observed vs expected
+    let mut expected_matrix = [[0.0f64; 3]; 6];
+    struct MatchCell { b: u8, s: u8, prob: f64, prox: f64 }
+    let mut cells: Vec<MatchCell> = Vec::new();
+    for b in 0..=5u8 {
+        for s in 0..=2u8 {
+            cells.push(MatchCell { b, s, prob: random_match_prob(b, s), prox: proximity_score(b, s) });
+        }
+    }
+    cells.sort_by(|a, b| {
+        b.prox.partial_cmp(&a.prox).unwrap_or(std::cmp::Ordering::Equal)
+            .then((b.b + b.s).cmp(&(a.b + a.s)))
+    });
+    let n_grids_for_expected = n_grids;
+    let mut cum_prob = 0.0f64;
+    let mut prev_p_at_least = 0.0f64;
+    let mut ci = 0;
+    while ci < cells.len() {
+        let prox = cells[ci].prox;
+        let bs = cells[ci].b + cells[ci].s;
+        let start = ci;
+        while ci < cells.len()
+            && (cells[ci].prox - prox).abs() < 1e-10
+            && cells[ci].b + cells[ci].s == bs
+        {
+            ci += 1;
+        }
+        let group = &cells[start..ci];
+        let group_single_prob: f64 = group.iter().map(|c| c.prob).sum();
+        let p_at_least_group = 1.0 - (1.0 - cum_prob - group_single_prob).powi(n_grids_for_expected as i32);
+        let p_exactly_group = (p_at_least_group - prev_p_at_least).max(0.0);
+        if group_single_prob > 0.0 {
+            for cell in group {
+                let fraction = cell.prob / group_single_prob;
+                expected_matrix[cell.b as usize][cell.s as usize] =
+                    (p_exactly_group * fraction * last as f64).max(0.0);
+            }
+        }
+        cum_prob += group_single_prob;
+        prev_p_at_least = p_at_least_group;
+    }
+
+    println!("\n── Matrice Boules × Étoiles (meilleur match parmi {} perspectives) ──", n_grids);
+    println!("         0★         1★         2★");
+    for b in (0..=5u8).rev() {
+        let mut row = format!("{}B :", b);
+        for s in 0..=2u8 {
+            let obs = match_matrix[b as usize][s as usize];
+            let exp = expected_matrix[b as usize][s as usize];
+            row.push_str(&format!("  {:3} ({:5.1})", obs, exp));
+        }
+        println!("{row}");
+    }
+    println!("  (observé (attendu aléatoire pour {} grilles))", n_grids);
+
+    // Aggregated proximity scores
+    let total_proximity: f64 = results.iter().map(|r| r.proximity).sum();
+    let expected_proximity: f64 = cells.iter().map(|c| {
+        let p_exactly = expected_matrix[c.b as usize][c.s as usize] / last as f64;
+        p_exactly * c.prox
+    }).sum::<f64>() * last as f64;
+    let avg_proximity = total_proximity / last as f64;
+    let avg_expected = expected_proximity / last as f64;
+    let prox_ratio = if avg_expected > 0.0 { avg_proximity / avg_expected } else { 0.0 };
+
+    println!("\n── Score de proximité jackpot ──");
+    println!("  Proximité totale      : {:.1}", total_proximity);
+    println!("  Proximité moyenne     : {:.2} (attendu aléatoire : {:.2})", avg_proximity, avg_expected);
+    println!("  Ratio vs aléatoire    : {:.2}x", prox_ratio);
+
+    let draws_3plus = results.iter().filter(|r| r.best_balls >= 3).count();
+    let draws_2stars = results.iter().filter(|r| r.best_stars >= 2).count();
+    let draws_3plus2 = results.iter().filter(|r| r.best_balls >= 3 && r.best_stars >= 2).count();
+
+    println!("\n── Highlights ──");
+    println!("  3+ boules matchées    : {}/{}", draws_3plus, last);
+    println!("  2 étoiles matchées    : {}/{} ({:.1}%)", draws_2stars, last, 100.0 * draws_2stars as f64 / last as f64);
+    println!("  3+ boules + 2 étoiles : {}/{}", draws_3plus2, last);
+
+    // Profile contribution (dynamic labels from last iteration's profiles)
+    let profile_labels = ["Calibré", "Physique", "Statistique", "Context", "Stresa", "Diversité"];
+    println!("\n── Contribution par profil (meilleur match) ──");
+    for (idx, count) in profile_best_count.iter().enumerate() {
+        let label = if idx < profile_labels.len() { profile_labels[idx] } else { "?" };
+        println!("  {:12} : {:3}/{} ({:.0}%)", label, count, last,
+            100.0 * *count as f64 / last as f64);
+    }
+
+    Ok(())
+}
+
+/// Silent version of filter_top_models (no println output, for backtest inner loop)
+fn filter_top_models_silent(ball_weights: &mut [f64], star_weights: &mut [f64], top_n: usize) {
+    let mut ball_indexed: Vec<(usize, f64)> = ball_weights.iter().copied().enumerate().collect();
+    ball_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_ball: Vec<usize> = ball_indexed.iter().take(top_n).map(|(i, _)| *i).collect();
+    for (i, w) in ball_weights.iter_mut().enumerate() {
+        if !top_ball.contains(&i) { *w = 0.0; }
+    }
+    let bs: f64 = ball_weights.iter().sum();
+    if bs > 0.0 { for w in ball_weights.iter_mut() { *w /= bs; } }
+
+    let mut star_indexed: Vec<(usize, f64)> = star_weights.iter().copied().enumerate().collect();
+    star_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top_star: Vec<usize> = star_indexed.iter().take(top_n).map(|(i, _)| *i).collect();
+    for (i, w) in star_weights.iter_mut().enumerate() {
+        if !top_star.contains(&i) { *w = 0.0; }
+    }
+    let ss: f64 = star_weights.iter().sum();
+    if ss > 0.0 { for w in star_weights.iter_mut() { *w /= ss; } }
 }
 
 fn cmd_backtest_3grids(
@@ -1616,12 +2268,32 @@ fn cmd_backtest_3grids(
             }
         }
 
-        // Hedge : ajustement multiplicatif basé sur les 20 derniers tirages
+        // MetaPredictor étoiles
+        if let Some(w) = weights {
+            if !w.star_detailed_ll.is_empty() {
+                use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+                let features = RegimeFeatures::from_draws(training_draws);
+                if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1e-3) {
+                    let adjustments = meta.weight_adjustments(&features);
+                    for (name, adj) in &adjustments {
+                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
+                            if idx < combiner.star_weights.len() {
+                                combiner.star_weights[idx] *= adj;
+                            }
+                        }
+                    }
+                    let total_s: f64 = combiner.star_weights.iter().sum();
+                    if total_s > 0.0 { combiner.star_weights.iter_mut().for_each(|w| *w /= total_s); }
+                }
+            }
+        }
+
+        // Hedge : ajustement multiplicatif réactif
         // Boules seulement si signal, étoiles toujours
         let (hedged_ball, hedged_star) = compute_hedge_weights(
             &combiner.models, training_draws,
             &combiner.ball_weights, &combiner.star_weights,
-            20, 0.05,
+            30, 0.10,
         );
         if balls_have_signal {
             combiner.ball_weights = hedged_ball;
@@ -1631,22 +2303,27 @@ fn cmd_backtest_3grids(
         let ball_pred = combiner.predict(training_draws, Pool::Balls);
         let star_pred = combiner.predict(training_draws, Pool::Stars);
 
-        let effective_temp = match temperature {
-            Some(t) => t,
-            None => {
-                // Aligner le backtest avec le comportement production (jackpot mode) :
-                // température adaptative basée sur la conviction des distributions
-                let conviction = compute_conviction(
-                    &ball_pred.distribution,
-                    &star_pred.distribution,
-                    &ball_pred.spread,
-                    &star_pred.spread,
-                );
-                conviction_temperature(&conviction.verdict)
-            }
+        let conviction = compute_conviction(
+            &ball_pred.distribution,
+            &star_pred.distribution,
+            &ball_pred.spread,
+            &star_pred.spread,
+        );
+        let (eff_bt, eff_st) = if let Some(t) = temperature {
+            (t, t)
+        } else {
+            conviction_temperature_split(&conviction)
         };
-        let ball_dist = apply_temperature(&ball_pred.distribution, effective_temp);
-        let star_dist = apply_temperature(&star_pred.distribution, effective_temp);
+        let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
+            apply_temperature(&ball_pred.distribution, eff_bt)
+        } else {
+            ball_pred.distribution.clone()
+        };
+        let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
+            apply_temperature(&star_pred.distribution, eff_st)
+        } else {
+            star_pred.distribution.clone()
+        };
 
         let popularity = PopularityModel::from_history(training_draws);
         let diverse = generate_diverse_grids_with_strategy(

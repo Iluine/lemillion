@@ -81,7 +81,7 @@ pub fn fetch_last_draws(conn: &Connection, limit: u32) -> Result<Vec<Draw>> {
         "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
          FROM draws ORDER BY date DESC, draw_id DESC LIMIT ?1"
     )?;
-    let draws = stmt.query_map([limit], |row| {
+    let mut draws: Vec<Draw> = stmt.query_map([limit], |row| {
         Ok(Draw {
             draw_id: row.get(0)?,
             day: row.get(1)?,
@@ -102,6 +102,7 @@ pub fn fetch_last_draws(conn: &Connection, limit: u32) -> Result<Vec<Draw>> {
             my_million: row.get(12)?,
         })
     })?.collect::<Result<Vec<_>, _>>()?;
+    for d in &mut draws { d.normalize(); }
     Ok(draws)
 }
 
@@ -110,20 +111,21 @@ pub fn fetch_last_draws_numbers(conn: &Connection, limit: u32) -> Result<Vec<([u
         "SELECT ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2
          FROM draws ORDER BY date DESC, draw_id DESC LIMIT ?1"
     )?;
-    let rows = stmt.query_map([limit], |row| {
-        Ok((
-            [
-                row.get::<_, u8>(0)?,
-                row.get::<_, u8>(1)?,
-                row.get::<_, u8>(2)?,
-                row.get::<_, u8>(3)?,
-                row.get::<_, u8>(4)?,
-            ],
-            [
-                row.get::<_, u8>(5)?,
-                row.get::<_, u8>(6)?,
-            ],
-        ))
+    let rows: Vec<([u8; 5], [u8; 2])> = stmt.query_map([limit], |row| {
+        let mut balls = [
+            row.get::<_, u8>(0)?,
+            row.get::<_, u8>(1)?,
+            row.get::<_, u8>(2)?,
+            row.get::<_, u8>(3)?,
+            row.get::<_, u8>(4)?,
+        ];
+        let mut stars = [
+            row.get::<_, u8>(5)?,
+            row.get::<_, u8>(6)?,
+        ];
+        balls.sort();
+        stars.sort();
+        Ok((balls, stars))
     })?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -134,7 +136,7 @@ pub fn fetch_draw_by_date(conn: &Connection, date: &str) -> Result<Option<Draw>>
         "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
          FROM draws WHERE date = ?1 ORDER BY draw_id DESC LIMIT 1"
     )?;
-    let mut draws = stmt.query_map([date], |row| {
+    let mut draws: Vec<Draw> = stmt.query_map([date], |row| {
         Ok(Draw {
             draw_id: row.get(0)?,
             day: row.get(1)?,
@@ -155,6 +157,7 @@ pub fn fetch_draw_by_date(conn: &Connection, date: &str) -> Result<Option<Draw>>
             my_million: row.get(12)?,
         })
     })?.collect::<Result<Vec<_>, _>>()?;
+    for d in &mut draws { d.normalize(); }
     Ok(draws.pop())
 }
 
@@ -164,7 +167,7 @@ pub fn fetch_draws_before_date(conn: &Connection, before_date: &str) -> Result<V
         "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
          FROM draws WHERE date < ?1 ORDER BY date DESC, draw_id DESC"
     )?;
-    let draws = stmt.query_map([before_date], |row| {
+    let mut draws: Vec<Draw> = stmt.query_map([before_date], |row| {
         Ok(Draw {
             draw_id: row.get(0)?,
             day: row.get(1)?,
@@ -185,6 +188,7 @@ pub fn fetch_draws_before_date(conn: &Connection, before_date: &str) -> Result<V
             my_million: row.get(12)?,
         })
     })?.collect::<Result<Vec<_>, _>>()?;
+    for d in &mut draws { d.normalize(); }
     Ok(draws)
 }
 

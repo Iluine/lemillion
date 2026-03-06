@@ -951,9 +951,10 @@ fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
 ///
 /// 2 features : sum_norm et spread_norm.
 fn encode_state_stars(draw: &Draw, _prev: Option<&Draw>) -> Vec<f64> {
-    let stars = &draw.stars;
-    let sum = (stars[0] as f64 + stars[1] as f64) / 24.0;
-    let spread = (stars[1] - stars[0]) as f64 / 11.0;
+    let s0 = draw.stars[0].min(draw.stars[1]);
+    let s1 = draw.stars[0].max(draw.stars[1]);
+    let sum = (s0 as f64 + s1 as f64) / 24.0;
+    let spread = (s1 - s0) as f64 / 11.0;
     vec![sum, spread]
 }
 
