@@ -21,7 +21,7 @@ use lemillion_ensemble::sampler::{
     conviction_temperature_split, generate_suggestions_filtered,
     generate_diverse_grids_with_strategy, generate_suggestions_ev,
     generate_suggestions_jackpot, optimal_grid, BallStarConditioner, CoherenceScorer,
-    ConvictionVerdict, StarStrategy, StructuralFilter,
+    StarStrategy, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
     PopularityModel, count_matches, match_to_tier, PRIZE_TIERS, TICKET_PRICE,
@@ -125,6 +125,14 @@ enum Command {
         /// Force du agreement boost (0.0 = désactivé)
         #[arg(long, default_value = "0.0")]
         agreement_boost: f64,
+
+        /// Désactiver le stacking (blending level-2)
+        #[arg(long)]
+        no_stacking: bool,
+
+        /// Activer le neural reranking en mode jackpot
+        #[arg(long)]
+        neural_rerank: bool,
 
         /// Stratégie de diversification des étoiles (concentrated/triangular/disjoint)
         #[arg(long, default_value = "triangular")]
@@ -260,7 +268,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Calibrate { windows, star_windows, output, temperature, min_skill, pool } => cmd_calibrate(&conn, &windows, star_windows.as_deref(), &output, temperature, min_skill, &pool),
         Command::Weights { calibration } => cmd_weights(&calibration),
-        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, star_strategy } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, &star_strategy),
+        Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, no_stacking, neural_rerank, star_strategy } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, no_stacking, neural_rerank, &star_strategy),
         Command::History { last } => cmd_history(&conn, last),
         Command::Compare { numbers, date, calibration } => cmd_compare(&conn, &numbers, date.as_deref(), &calibration),
         Command::AddDraw { args } => cmd_add_draw(&conn, &args),
@@ -498,12 +506,52 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.80, 0.5, 0.30);
     apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.80, 0.5, 0.30);
 
+    // Stacking : collecter données + entraîner
+    println!("\nEntraînement du stacking...");
+    let stacking_balls = if calibrate_balls {
+        use lemillion_ensemble::ensemble::stacking::{collect_stacking_data, train_stacking};
+        let best_window = ball_calibrations.iter()
+            .max_by(|a, b| a.best_ll.partial_cmp(&b.best_ll).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|c| c.best_window)
+            .unwrap_or(100);
+        let data = collect_stacking_data(&models, &draws, Pool::Balls, best_window);
+        let result = train_stacking(&data, Pool::Balls, 0.01);
+        if result.is_some() {
+            println!("  Stacking boules : entraîné ({} points)", data.len());
+        } else {
+            println!("  Stacking boules : pas assez de données");
+        }
+        result
+    } else {
+        existing_weights.as_ref().and_then(|w| w.stacking_balls.clone())
+    };
+
+    let stacking_stars = if calibrate_stars {
+        use lemillion_ensemble::ensemble::stacking::{collect_stacking_data, train_stacking};
+        let best_window = star_calibrations.iter()
+            .max_by(|a, b| a.best_ll.partial_cmp(&b.best_ll).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|c| c.best_window)
+            .unwrap_or(200);
+        let data = collect_stacking_data(&models, &draws, Pool::Stars, best_window);
+        let result = train_stacking(&data, Pool::Stars, 0.01);
+        if result.is_some() {
+            println!("  Stacking étoiles : entraîné ({} points)", data.len());
+        } else {
+            println!("  Stacking étoiles : pas assez de données");
+        }
+        result
+    } else {
+        existing_weights.as_ref().and_then(|w| w.stacking_stars.clone())
+    };
+
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
         calibrations: ball_calibrations.into_iter().chain(star_calibrations).collect(),
         detailed_ll,
         star_detailed_ll,
+        stacking_balls,
+        stacking_stars,
     };
 
     display::display_weights(&ensemble_weights);
@@ -512,6 +560,13 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     let output_path = PathBuf::from(output);
     save_weights(&ensemble_weights, &output_path)?;
     println!("\nPoids sauvegardés dans : {}", output);
+
+    // Entraîner le neural scorer
+    println!("\nEntraînement du Neural Scorer...");
+    let ns = lemillion_ensemble::models::neural_scorer::NeuralScorer::train(&draws, 42);
+    let ns_path = std::path::PathBuf::from("neural_scorer.json");
+    ns.save(&ns_path)?;
+    println!("Neural Scorer sauvegardé dans : {}", ns_path.display());
 
     Ok(())
 }
@@ -578,7 +633,8 @@ fn filter_top_models(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64, jackpot_mode: bool, no_filter: bool, top_models: usize, no_meta_predictor: bool, no_hedge: bool, agreement_boost_strength: f64, star_strategy_str: &str) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration_path: &str, n_suggestions: usize, seed: Option<u64>, oversample: usize, min_diff: usize, temperature: Option<f64>, jackpot: f64, jackpot_mode: bool, no_filter: bool, top_models: usize, no_meta_predictor: bool, no_hedge: bool, agreement_boost_strength: f64, no_stacking: bool, neural_rerank: bool, star_strategy_str: &str) -> Result<()> {
     let n = count_draws(conn)?;
     if n == 0 {
         bail!("Base vide. Lancez d'abord : lemillion-cli import");
@@ -698,10 +754,40 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         filter_top_models(&mut combiner.ball_weights, &mut combiner.star_weights, &model_names, top_models);
     }
 
-    let (ball_pred, star_pred) = if agreement_boost_strength > 0.0 {
-        println!("(Agreement boost : {:.2})", agreement_boost_strength);
-        (combiner.predict_with_agreement_boost(&draws, Pool::Balls, agreement_boost_strength),
-         combiner.predict_with_agreement_boost(&draws, Pool::Stars, agreement_boost_strength))
+    let effective_boost = if agreement_boost_strength > 0.0 {
+        agreement_boost_strength
+    } else if jackpot_mode {
+        0.15
+    } else {
+        0.0
+    };
+    // Stacking : utiliser les poids de stacking si disponibles
+    let use_stacking = !no_stacking && weights.as_ref().map(|w| w.stacking_balls.is_some() || w.stacking_stars.is_some()).unwrap_or(false);
+
+    let (ball_pred, star_pred) = if use_stacking {
+        let w = weights.as_ref().unwrap();
+        let blend = 0.6;
+        let bp = if let Some(ref sw) = w.stacking_balls {
+            println!("(Stacking boules : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
+            combiner.predict_stacked(&draws, Pool::Balls, sw, blend)
+        } else if effective_boost > 0.0 {
+            combiner.predict_with_agreement_boost(&draws, Pool::Balls, effective_boost)
+        } else {
+            combiner.predict(&draws, Pool::Balls)
+        };
+        let sp = if let Some(ref sw) = w.stacking_stars {
+            println!("(Stacking étoiles : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
+            combiner.predict_stacked(&draws, Pool::Stars, sw, blend)
+        } else if effective_boost > 0.0 {
+            combiner.predict_with_agreement_boost(&draws, Pool::Stars, effective_boost)
+        } else {
+            combiner.predict(&draws, Pool::Stars)
+        };
+        (bp, sp)
+    } else if effective_boost > 0.0 {
+        println!("(Agreement boost : {:.2}{})", effective_boost, if agreement_boost_strength == 0.0 && jackpot_mode { " [auto jackpot]" } else { "" });
+        (combiner.predict_with_agreement_boost(&draws, Pool::Balls, effective_boost),
+         combiner.predict_with_agreement_boost(&draws, Pool::Stars, effective_boost))
     } else {
         (combiner.predict(&draws, Pool::Balls),
          combiner.predict(&draws, Pool::Stars))
@@ -739,16 +825,10 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         println!("\n(Temp split — balls: {:.2}, stars: {:.2})", bt, st);
         (bt, st)
     } else {
-        // Mode EV : sharpening modéré basé sur la conviction
-        let ct: f64 = match conviction.verdict {
-            ConvictionVerdict::HighConviction => 0.5,
-            ConvictionVerdict::MediumConviction => 0.7,
-            ConvictionVerdict::LowConviction => 1.0,
-        };
-        if (ct - 1.0).abs() > 1e-9 {
-            println!("\n(Température EV par conviction [{:.0}%] : {:.2})", conviction.overall * 100.0, ct);
-        }
-        (ct, ct)
+        // Mode EV : split balls/stars comme jackpot
+        let (bt, st) = conviction_temperature_split(&conviction);
+        println!("\n(Temp split EV — balls: {:.2}, stars: {:.2})", bt, st);
+        (bt, st)
     };
 
     let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
@@ -785,10 +865,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
         let star_pair_probs = star_pair_model.predict_pair_distribution(&draws);
 
-        // Exclusion set from consensus
-        let ball_pred_for_excl = combiner.predict(&draws, Pool::Balls);
-        let ball_consensus_for_excl = build_consensus_map(&ball_pred_for_excl, Pool::Balls);
-        let excluded = compute_exclusion_set(&ball_consensus_for_excl, -0.3, 10);
+        // Exclusion set from consensus (réutilise ball_consensus déjà calculée)
+        let excluded = compute_exclusion_set(&ball_consensus, -0.3, 10);
         let excluded_ref = if excluded.is_empty() { None } else {
             println!("K-réduction : {} boules exclues {:?}", excluded.len(), excluded);
             Some(excluded.as_slice())
@@ -796,6 +874,26 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
 
         // Ball→star conditioner
         let conditioner = BallStarConditioner::from_history(&draws);
+
+        // Neural scorer (optional, loaded or trained on the fly)
+        let neural_scorer_opt = if neural_rerank {
+            let path = std::path::PathBuf::from("neural_scorer.json");
+            match lemillion_ensemble::models::neural_scorer::NeuralScorer::load(&path) {
+                Ok(ns) => {
+                    println!("(Neural scorer chargé depuis {})", path.display());
+                    Some(ns)
+                }
+                Err(_) => {
+                    println!("(Neural scorer : entraînement à la volée...)");
+                    let ns = lemillion_ensemble::models::neural_scorer::NeuralScorer::train(&draws, 42);
+                    let _ = ns.save(&path);
+                    println!("(Neural scorer entraîné et sauvegardé)");
+                    Some(ns)
+                }
+            }
+        } else {
+            None
+        };
 
         // Build weight profiles from current combiner weights
         let model_names: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
@@ -823,11 +921,15 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 sp.distribution.clone()
             };
 
+            // Neural scorer for reranking if enabled
+            let neural_scorer_ref = if neural_rerank { neural_scorer_opt.as_ref() } else { None };
+
             let result = generate_suggestions_jackpot(
                 &bd, &sd, n_per_profile, filter.as_ref(),
                 Some(&coherence), Some(&joint_model),
                 star_pair_probs.as_ref(), excluded_ref,
                 Some(&conditioner),
+                neural_scorer_ref,
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid
@@ -1629,8 +1731,8 @@ fn cmd_backtest_jackpot(
         if balls_have_signal { combiner.ball_weights = hedged_ball; }
         combiner.star_weights = hedged_star;
 
-        let ball_pred = combiner.predict(training_draws, Pool::Balls);
-        let star_pred = combiner.predict(training_draws, Pool::Stars);
+        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
+        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
 
         // Conviction calculée sur la distribution BRUTE (avant température)
         let conviction = compute_conviction(
@@ -1675,6 +1777,7 @@ fn cmd_backtest_jackpot(
             Some(&coherence), Some(&joint_model),
             star_pair_probs.as_ref(), None,
             Some(&conditioner),
+            None,
         )?;
 
         // Vérifier si le tirage réel est dans le top-N
@@ -1943,6 +2046,7 @@ fn cmd_backtest_jackpot_top3(
                 Some(&coherence), Some(&joint_model),
                 bt_star_pair_probs.as_ref(), bt_excluded_ref,
                 Some(&bt_conditioner),
+                None,
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid

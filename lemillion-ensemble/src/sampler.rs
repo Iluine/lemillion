@@ -1015,12 +1015,12 @@ fn compute_adaptive_k(count: usize) -> (usize, usize) {
     let target = 3 * count as u64;
 
     // Commencer avec K_stars=6, K_balls=10 et augmenter
-    for k_stars in 6..=12usize {
+    for k_stars in 10..=12usize {
         let star_combs = comb(k_stars, 2);
         for k_balls in 10..=50usize {
             let ball_combs = comb(k_balls, 5);
             if ball_combs.saturating_mul(star_combs) >= target {
-                return (k_balls.max(30), k_stars);
+                return (k_balls.max(30), k_stars.max(10));
             }
         }
     }
@@ -1065,6 +1065,7 @@ pub fn generate_suggestions_jackpot(
     star_pair_probs: Option<&[f64; 66]>,
     excluded_balls: Option<&[u8]>,
     conditioner: Option<&BallStarConditioner>,
+    neural_scorer: Option<&crate::models::neural_scorer::NeuralScorer>,
 ) -> Result<JackpotResult> {
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
@@ -1162,7 +1163,7 @@ pub fn generate_suggestions_jackpot(
                                 let star_score = if let Some(cp) = cond_probs {
                                     let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                     let conditioned = cp[pidx] / uniform_pair;
-                                    0.6 * conditioned + 0.4 * base_star_score
+                                    0.70 * conditioned + 0.30 * base_star_score
                                 } else {
                                     base_star_score
                                 };
@@ -1206,6 +1207,15 @@ pub fn generate_suggestions_jackpot(
         suggestions.sort_by(|a, b| {
             b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
         });
+
+        // Neural reranking
+        if let Some(ns) = neural_scorer {
+            for s in &mut suggestions {
+                let neural = ns.score(&s.balls, &s.stars);
+                s.score = 0.7 * s.score + 0.3 * neural * s.score;
+            }
+            suggestions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal));
+        }
 
         // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
         let total_prob: f64 = suggestions.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
@@ -1261,7 +1271,7 @@ pub fn generate_suggestions_jackpot(
                                     let star_score = if let Some(cp) = cond_probs {
                                         let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                         let conditioned = cp[pidx] / uniform_pair;
-                                        0.6 * conditioned + 0.4 * base_star_score
+                                        0.70 * conditioned + 0.30 * base_star_score
                                     } else {
                                         base_star_score
                                     };
@@ -1283,6 +1293,15 @@ pub fn generate_suggestions_jackpot(
             b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
         });
         all.truncate(count);
+
+        // Neural reranking
+        if let Some(ns) = neural_scorer {
+            for s in &mut all {
+                let neural = ns.score(&s.balls, &s.stars);
+                s.score = 0.7 * s.score + 0.3 * neural * s.score;
+            }
+            all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal));
+        }
 
         // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
         let total_prob: f64 = all.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
@@ -1966,13 +1985,13 @@ pub fn conviction_temperature_split(conviction: &ConvictionScore) -> (f64, f64) 
     } else {
         1.0
     };
-    // Étoiles : plancher T=0.75 (toujours au moins un peu de sharpening)
+    // Étoiles : plancher T=0.60 (toujours au moins un peu de sharpening)
     let star_temp = if star_score >= 0.5 {
-        0.40
+        0.30
     } else if star_score >= 0.2 {
-        0.60
+        0.50
     } else {
-        0.75
+        0.60
     };
     (ball_temp, star_temp)
 }
@@ -2317,7 +2336,7 @@ mod tests {
         let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 5);
         assert!(result.total_jackpot_probability > 0.0);
         assert!(result.enumeration_size > 0);
@@ -2343,7 +2362,7 @@ mod tests {
         let total: f64 = star_probs.iter().sum();
         let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 100);
         assert!(result.improvement_factor > 1.0,
             "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
@@ -2356,7 +2375,7 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None).unwrap();
         for w in result.suggestions.windows(2) {
             assert!(w[0].score >= w[1].score,
                 "Suggestions non triées : {} < {}", w[0].score, w[1].score);
@@ -2370,8 +2389,8 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None).unwrap();
-        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None).unwrap();
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None).unwrap();
         for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
@@ -2389,7 +2408,7 @@ mod tests {
             spread_range: (10, 45),
         };
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None).unwrap();
         // Toutes les suggestions doivent passer le filtre
         for s in &result.suggestions {
             assert!(filter.accept_balls(&s.balls),
@@ -2445,7 +2464,7 @@ mod tests {
         let (bt, st) = conviction_temperature_split(&conv);
         // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.2 → T=1.0
         assert!((bt - 1.0).abs() < 1e-10);
-        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.40
-        assert!((st - 0.40).abs() < 1e-10);
+        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.30
+        assert!((st - 0.30).abs() < 1e-10);
     }
 }

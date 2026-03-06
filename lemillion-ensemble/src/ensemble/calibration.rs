@@ -44,6 +44,12 @@ pub struct EnsembleWeights {
     /// LL détaillé étoiles par tirage par modèle (optionnel, pour méta-apprentissage étoiles).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub star_detailed_ll: Vec<(String, Vec<f64>)>,
+    /// Poids de stacking boules (optionnel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacking_balls: Option<crate::ensemble::stacking::StackingWeights>,
+    /// Poids de stacking étoiles (optionnel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacking_stars: Option<crate::ensemble::stacking::StackingWeights>,
 }
 
 /// Walk-forward evaluation: pour chaque tirage test t, on entraîne sur draws[t+1..t+1+window]
@@ -994,6 +1000,8 @@ mod tests {
             calibrations: vec![],
             detailed_ll: Vec::new(),
             star_detailed_ll: Vec::new(),
+            stacking_balls: None,
+            stacking_stars: None,
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

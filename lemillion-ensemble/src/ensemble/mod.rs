@@ -1,6 +1,7 @@
 pub mod calibration;
 pub mod consensus;
 pub mod meta;
+pub mod stacking;
 
 use lemillion_db::models::{Draw, Pool};
 use crate::models::ForecastModel;
@@ -89,6 +90,49 @@ impl EnsembleCombiner {
     }
 }
 
+impl EnsembleCombiner {
+    /// Prédit avec stacking : blend entre la prédiction pondérée et la prédiction stackée.
+    /// blend_factor = fraction du stacking (ex: 0.6 stacked + 0.4 weighted).
+    pub fn predict_stacked(
+        &self,
+        draws: &[Draw],
+        pool: Pool,
+        stacking_weights: &stacking::StackingWeights,
+        blend_factor: f64,
+    ) -> EnsemblePrediction {
+        let base = self.predict(draws, pool);
+
+        // Collect model distributions
+        let model_dists: Vec<Vec<f64>> = base.model_distributions.iter()
+            .map(|(_, d)| d.clone())
+            .collect();
+
+        let context = meta::RegimeFeatures::from_draws(draws);
+        let stacked = stacking::predict_stacked(stacking_weights, &model_dists, &context);
+
+        // Blend
+        let bf = blend_factor.clamp(0.0, 1.0);
+        let mut blended = vec![0.0f64; pool.size()];
+        for i in 0..pool.size() {
+            blended[i] = bf * stacked[i] + (1.0 - bf) * base.distribution[i];
+        }
+
+        // Normalize
+        let sum: f64 = blended.iter().sum();
+        if sum > 0.0 {
+            for p in &mut blended {
+                *p /= sum;
+            }
+        }
+
+        EnsemblePrediction {
+            distribution: blended,
+            model_distributions: base.model_distributions,
+            spread: base.spread,
+        }
+    }
+}
+
 pub fn compute_spread(model_dists: &[(String, Vec<f64>)], size: usize) -> Vec<f64> {
     let n = model_dists.len() as f64;
     (0..size)
@@ -171,7 +215,7 @@ pub fn compute_hedge_weights(
         }
 
         for (m, model) in models.iter().enumerate() {
-            let hit_bonus = 1.5;
+            let hit_bonus = 3.0;
 
             // Loss boules (asymétrique: bonus 3× pour les hits)
             let ball_uniform_ll = (1.0_f64 / 50.0).ln();

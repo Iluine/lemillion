@@ -23,6 +23,7 @@ pub mod transfer_entropy;
 pub mod star_pair;
 pub mod star_recency;
 pub mod context_knn;
+pub mod neural_scorer;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};

@@ -1,5 +1,10 @@
+use chrono::{Datelike, NaiveDate};
 use lemillion_db::models::{Draw, Pool};
 use super::FeatureRow;
+
+fn parse_draw_date(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
 
 /// Extrait les features pour chaque numéro du pool, en utilisant les tirages
 /// strictement APRÈS target_draw_idx comme historique d'entraînement.
@@ -89,6 +94,10 @@ fn compute_features_for_number(number: u8, history: &[Draw], pool: Pool, target_
     // mod4_transition : proportion de la classe mod-4 du numéro dans le dernier tirage
     let mod4_transition = compute_mod4_transition(number, history, pool);
 
+    // Features temporelles (basées sur target_draw.date)
+    let (month_sin, month_cos, quarter, day_of_year_sin, day_of_year_cos, draw_position, days_since_last) =
+        compute_temporal_features(target_draw, history);
+
     vec![
         freq_5,             // 0
         freq_10,            // 1
@@ -111,7 +120,63 @@ fn compute_features_for_number(number: u8, history: &[Draw], pool: Pool, target_
         mod4_class,         // 18
         mod4_class_freq,    // 19
         mod4_transition,    // 20
+        month_sin,          // 21
+        month_cos,          // 22
+        quarter,            // 23
+        day_of_year_sin,    // 24
+        day_of_year_cos,    // 25
+        draw_position,      // 26
+        days_since_last,    // 27
     ]
+}
+
+/// Calcule les 7 features temporelles depuis target_draw et history.
+fn compute_temporal_features(target_draw: &Draw, history: &[Draw]) -> (f64, f64, f64, f64, f64, f64, f64) {
+    let date = parse_draw_date(&target_draw.date);
+    let pi2 = 2.0 * std::f64::consts::PI;
+
+    let (month_sin, month_cos, quarter_val, doy_sin, doy_cos) = match date {
+        Some(d) => {
+            let m = d.month0() as f64; // 0..11
+            let ms = (pi2 * m / 12.0).sin();
+            let mc = (pi2 * m / 12.0).cos();
+            let q = (d.month0() / 3) as f64 / 3.0; // 0.0, 0.33, 0.67, 1.0
+            let doy = d.ordinal0() as f64; // 0..364
+            let ds = (pi2 * doy / 365.0).sin();
+            let dc = (pi2 * doy / 365.0).cos();
+            (ms, mc, q, ds, dc)
+        }
+        None => (0.0, 1.0, 0.5, 0.0, 1.0),
+    };
+
+    // draw_position : position normalisée dans l'historique
+    let draw_position = if history.is_empty() {
+        0.5
+    } else {
+        match (date, parse_draw_date(&history[history.len() - 1].date), parse_draw_date(&history[0].date)) {
+            (Some(td), Some(first), Some(last)) => {
+                let total_span = (last - first).num_days().max(1) as f64;
+                let pos = (td - first).num_days() as f64;
+                (pos / total_span).clamp(0.0, 2.0)
+            }
+            _ => 0.5,
+        }
+    };
+
+    // days_since_last : jours entre target_draw et history[0], normalisé /7, clamp 0..2
+    let days_since_last = if history.is_empty() {
+        0.5
+    } else {
+        match (date, parse_draw_date(&history[0].date)) {
+            (Some(td), Some(prev)) => {
+                let days = (td - prev).num_days().max(0) as f64;
+                (days / 7.0).clamp(0.0, 2.0)
+            }
+            _ => 0.5,
+        }
+    };
+
+    (month_sin, month_cos, quarter_val, doy_sin, doy_cos, draw_position, days_since_last)
 }
 
 fn frequency_in_window(number: u8, history: &[Draw], pool: Pool, window: usize) -> f64 {
@@ -317,7 +382,7 @@ mod tests {
         let draws = make_test_draws(30);
         let features = extract_features_for_draw(&draws, Pool::Balls, 0);
         assert_eq!(features.len(), 50);
-        assert_eq!(features[0].features.len(), 21);
+        assert_eq!(features[0].features.len(), 28);
     }
 
     #[test]

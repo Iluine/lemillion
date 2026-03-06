@@ -20,6 +20,13 @@ pub const FEATURE_NAMES: &[&str] = &[
     "mod4_class",
     "mod4_class_freq",
     "mod4_transition",
+    "month_sin",
+    "month_cos",
+    "quarter",
+    "day_of_year_sin",
+    "day_of_year_cos",
+    "draw_position",
+    "days_since_last",
 ];
 
 #[derive(Debug, Clone)]

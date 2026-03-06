@@ -200,7 +200,7 @@ fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
         0
     };
 
-    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, jackpot_mode, no_filter, top_models, false, false, 0.0, "concentrated")
+    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, jackpot_mode, no_filter, top_models, false, false, 0.0, false, false, "concentrated")
 }
 
 fn cmd_history_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
