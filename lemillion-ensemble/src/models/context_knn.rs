@@ -92,7 +92,8 @@ impl ForecastModel for ContextKnnModel {
         // Build historical contexts and their associated "next draw" numbers
         // For t in 1..draws.len()-1: context from draws[t+1] (and draws[t+2]),
         // target = draws[t] (the draw that followed this context)
-        let mut neighbors: Vec<(f64, usize)> = Vec::new(); // (distance, target_index)
+        let n_neighbors = draws.len().saturating_sub(2);
+        let mut neighbors: Vec<(f64, usize)> = Vec::with_capacity(n_neighbors);
 
         for t in 1..draws.len().saturating_sub(1) {
             let ctx = context_features(
@@ -107,9 +108,9 @@ impl ForecastModel for ContextKnnModel {
             return uniform;
         }
 
-        // Sort by distance and take k nearest
-        neighbors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // Partial sort (quickselect) for top-k nearest instead of full sort
         let k = self.k.min(neighbors.len());
+        neighbors.select_nth_unstable_by(k - 1, |a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let nearest = &neighbors[..k];
 
         // Weighted vote: 1/(distance + epsilon)

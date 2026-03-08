@@ -14,7 +14,11 @@ use lemillion_db::models::Draw;
 /// - Profil mod-4 partiel : (n₀,n₁,n₂,n₃)
 /// - Decades couvertes : bitmask des decades touchées
 /// - Parité : count pair/impair
-/// - Distance rack moyenne (optionnel)
+/// - Somme partielle (bins par quintiles)
+/// - Spread partiel (max-min, 3 bins)
+/// - Compteur de consécutives
+///
+/// Cross-pool conditioning : P(star | ball_sum_bin)
 ///
 /// N'est PAS un ForecastModel (il ne retourne pas des marginales).
 /// Il score des GRILLES complètes via `score_grid`.
@@ -27,6 +31,8 @@ pub struct JointConditionalModel {
     /// Table conditionnelle pour les étoiles (2 positions)
     star_tables: Vec<HashMap<u64, Vec<f64>>>,
     star_marginals: Vec<Vec<f64>>,
+    /// Cross-pool: P(star | ball_sum_bin) — 5 bins × 12 étoiles
+    star_given_ball_sum: Vec<Vec<f64>>,
     laplace_alpha: f64,
     trained: bool,
 }
@@ -38,6 +44,7 @@ impl JointConditionalModel {
             marginal_tables: Vec::new(),
             star_tables: Vec::new(),
             star_marginals: Vec::new(),
+            star_given_ball_sum: Vec::new(),
             laplace_alpha,
             trained: false,
         }
@@ -99,11 +106,22 @@ impl JointConditionalModel {
             }
         }
 
+        // ── Cross-pool : P(star | ball_sum_bin) ──
+        self.star_given_ball_sum = vec![vec![alpha; 12]; 5];
+        for draw in draws {
+            let ball_sum: u16 = draw.balls.iter().map(|&b| b as u16).sum();
+            let bin = ball_sum_bin(ball_sum);
+            for &s in &draw.stars {
+                self.star_given_ball_sum[bin][(s - 1) as usize] += 1.0;
+            }
+        }
+
         self.trained = true;
     }
 
     /// Score une grille complète par le modèle joint.
     /// Retourne log P(grille) comme somme des log P(bk | b1,...,bk-1).
+    /// Inclut cross-pool conditioning P(star | ball_sum_bin).
     pub fn score_grid(&self, balls: &[u8; 5], stars: &[u8; 2]) -> f64 {
         if !self.trained {
             return 0.0;
@@ -122,10 +140,16 @@ impl JointConditionalModel {
             let key = encode_prefix_state(prefix);
 
             let probs = if let Some(table) = self.position_tables[pos].get(&key) {
-                // Normaliser la distribution conditionnelle
-                let total: f64 = table.iter().sum();
+                let count: f64 = table.iter().sum::<f64>() - self.laplace_alpha * 50.0;
+                // Smoothing adaptatif : plus de données → moins de lissage
+                let adaptive_alpha = self.laplace_alpha / (1.0 + count.max(0.0) / 10.0);
+                let smoothed: Vec<f64> = table.iter().enumerate().map(|(i, &c)| {
+                    let raw_count = c - self.laplace_alpha;
+                    raw_count.max(0.0) + adaptive_alpha + self.normalized_marginal(pos)[i] * adaptive_alpha
+                }).collect();
+                let total: f64 = smoothed.iter().sum();
                 if total > 0.0 {
-                    table.iter().map(|&c| c / total).collect::<Vec<f64>>()
+                    smoothed.iter().map(|&c| c / total).collect::<Vec<f64>>()
                 } else {
                     self.normalized_marginal(pos)
                 }
@@ -183,6 +207,23 @@ impl JointConditionalModel {
             log_score += p.max(1e-15).ln();
         }
 
+        // Cross-pool conditioning : bonus/malus basé sur P(star | ball_sum_bin)
+        if !self.star_given_ball_sum.is_empty() {
+            let ball_sum: u16 = sorted_balls.iter().map(|&b| b as u16).sum();
+            let bin = ball_sum_bin(ball_sum);
+            let table = &self.star_given_ball_sum[bin];
+            let total: f64 = table.iter().sum();
+            if total > 0.0 {
+                let uniform_star = 1.0 / 12.0;
+                for &s in &sorted_stars {
+                    let p_cond = table[(s - 1) as usize] / total;
+                    // Ratio vs uniform, clamped et en log
+                    let ratio = (p_cond / uniform_star).clamp(0.5, 2.0);
+                    log_score += ratio.ln();
+                }
+            }
+        }
+
         log_score
     }
 
@@ -221,8 +262,20 @@ impl Default for JointConditionalModel {
     }
 }
 
+/// Bin de la somme des boules en 5 quintiles (somme théorique 15..240, pratique ~80..180).
+fn ball_sum_bin(sum: u16) -> usize {
+    match sum {
+        0..=99 => 0,
+        100..=119 => 1,
+        120..=139 => 2,
+        140..=159 => 3,
+        _ => 4,
+    }
+}
+
 /// Encode l'état du préfixe de boules en features discrètes.
-/// Features : profil mod-4 partiel (4 bits) + decades couvertes (5 bits) + odd_count (3 bits).
+/// Features : profil mod-4 (12 bits) + decades (5 bits) + odd_count (3 bits)
+///          + somme partielle bin (3 bits) + spread bin (2 bits) + consecutive count (2 bits).
 fn encode_prefix_state(prefix: &[u8]) -> u64 {
     if prefix.is_empty() {
         return 0;
@@ -244,6 +297,29 @@ fn encode_prefix_state(prefix: &[u8]) -> u64 {
     // Odd count
     let odd_count = prefix.iter().filter(|&&b| b % 2 == 1).count() as u8;
 
+    // Somme partielle bin (quintiles de la somme attendue finale ~127)
+    let partial_sum: u16 = prefix.iter().map(|&b| b as u16).sum();
+    let expected_avg = 25.5; // E[ball] for 1..50
+    let expected_partial = (expected_avg * prefix.len() as f64) as u16;
+    let sum_bin = if partial_sum < expected_partial.saturating_sub(15) {
+        0u8
+    } else if partial_sum > expected_partial + 15 {
+        2
+    } else {
+        1
+    };
+
+    // Spread bin (max - min)
+    let min_b = prefix.iter().copied().min().unwrap_or(1);
+    let max_b = prefix.iter().copied().max().unwrap_or(1);
+    let spread = max_b - min_b;
+    let spread_bin = if spread < 10 { 0u8 } else if spread < 25 { 1 } else { 2 };
+
+    // Consecutive count
+    let mut sorted = prefix.to_vec();
+    sorted.sort();
+    let consec_count = sorted.windows(2).filter(|w| w[1] == w[0] + 1).count().min(3) as u8;
+
     // Packer en u64
     (mod4[0] as u64)
         | ((mod4[1] as u64) << 3)
@@ -251,6 +327,9 @@ fn encode_prefix_state(prefix: &[u8]) -> u64 {
         | ((mod4[3] as u64) << 9)
         | ((decade_mask as u64) << 12)
         | ((odd_count as u64) << 17)
+        | ((sum_bin as u64) << 20)
+        | ((spread_bin as u64) << 22)
+        | ((consec_count as u64) << 24)
 }
 
 /// Encode l'état du préfixe d'étoiles.

@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use lemillion_db::models::{Draw, Pool};
-use crate::models::{ForecastModel, SamplingStrategy};
+use crate::models::{ForecastModel, SamplingStrategy, filter_star_era};
 
 /// Deserialize null as f64::NEG_INFINITY for log_likelihood.
 fn deserialize_ll<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -30,6 +30,9 @@ pub struct ModelCalibration {
     #[serde(default)]
     pub best_sparse: bool,
     pub best_ll: f64,
+    /// Number of test points for the best configuration.
+    #[serde(default)]
+    pub best_n_tests: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +55,14 @@ pub struct EnsembleWeights {
     pub stacking_stars: Option<crate::ensemble::stacking::StackingWeights>,
 }
 
+/// Calcule le nombre réel de test points après stride.
+/// Le stride est calculé pour limiter à ~500 tests max.
+fn actual_test_count(max_t: usize) -> usize {
+    if max_t == 0 { return 0; }
+    let stride = (max_t / 500).max(1);
+    (0..max_t).step_by(stride).count()
+}
+
 /// Walk-forward evaluation: pour chaque tirage test t, on entraîne sur draws[t+1..t+1+window]
 /// et on mesure la log-likelihood sur le tirage t.
 /// CRITIQUE: pas de fuite du futur - on n'utilise que des données passées.
@@ -69,6 +80,8 @@ pub fn walk_forward_evaluate(
 
 /// Walk-forward evaluation avec stratégie d'échantillonnage explicite.
 /// Le stride est calculé automatiquement pour limiter à ~500 test points max.
+/// When pool == Stars, draws are filtered to the current star era (post 2016-09-27)
+/// to avoid training on incompatible star pools (2/9, 2/11).
 pub fn walk_forward_evaluate_with_strategy(
     model: &dyn ForecastModel,
     draws: &[Draw],
@@ -76,6 +89,13 @@ pub fn walk_forward_evaluate_with_strategy(
     pool: Pool,
     strategy: SamplingStrategy,
 ) -> f64 {
+    // For stars, filter to current era only (post 2016-09-27, 2/12 format)
+    let draws = if pool == Pool::Stars {
+        filter_star_era(draws)
+    } else {
+        draws
+    };
+
     let min_history = 10;
 
     let max_t = match strategy {
@@ -139,15 +159,12 @@ pub fn walk_forward_evaluate_with_strategy(
             let n_pool = pool.size() as f64;
             let uniform_ll = (1.0 / n_pool).ln();  // -3.91 balls, -2.49 stars
             let ll_cap = 2.0 * uniform_ll;          // -7.82 balls, -4.97 stars
-            let hit_bonus = 3.0;
             let mut draw_ll = 0.0f64;
             for &n in test_numbers {
                 let idx = (n - 1) as usize;
                 if idx < dist.len() {
                     let ll = dist[idx].max(1e-15).ln().max(ll_cap);
-                    let excess = ll - uniform_ll;
-                    let adjusted = if excess > 0.0 { hit_bonus * excess } else { excess };
-                    draw_ll += uniform_ll + adjusted;
+                    draw_ll += ll;
                 }
             }
             Some(draw_ll)
@@ -171,18 +188,17 @@ pub fn uniform_log_likelihood(pool: Pool) -> f64 {
 /// Fenêtres par défaut pour les boules.
 pub const DEFAULT_BALL_WINDOWS: &[usize] = &[20, 30, 50, 80, 100, 150, 200, 300];
 
-/// Fenêtres par défaut pour les étoiles (plus longues car patterns plus clairsemés).
-pub const DEFAULT_STAR_WINDOWS: &[usize] = &[50, 100, 200, 300, 500];
+/// Fenêtres par défaut pour les étoiles (raccourcies post-filtrage ère: ~1040 draws valides).
+pub const DEFAULT_STAR_WINDOWS: &[usize] = &[30, 50, 80, 100, 150, 200];
 
-/// Température par défaut pour le scaling des poids (boules).
-/// T<1.0 = concentration sur les meilleurs modèles (sharpening).
-/// T=0.5 → exp(skill/0.5) = exp(2×skill), les ratios sont élevés au carré.
-pub const DEFAULT_TEMPERATURE: f64 = 0.5;
+/// Température par défaut pour le scaling des poids.
+/// T=1.0 : pas de sharpening dans les poids. Le seul contrôle de température
+/// est appliqué sur la distribution finale dans cmd_predict.
+pub const DEFAULT_TEMPERATURE: f64 = 1.0;
 
 /// Température séparée pour les étoiles.
-/// Plus basse car le skill range étoiles est ~0.42 vs ~1.17 boules.
-/// Avec T=0.25 : exp(0.42/0.25) = 5.4× entre meilleur et pire → poids non-uniformes.
-pub const STAR_DEFAULT_TEMPERATURE: f64 = 0.25;
+/// T=1.0 : pas de double-sharpening.
+pub const STAR_DEFAULT_TEMPERATURE: f64 = 1.0;
 
 /// Calcule les poids de l'ensemble à partir des calibrations.
 /// Pondération continue avec temperature scaling : poids = exp(skill / T).
@@ -203,15 +219,21 @@ pub fn compute_weights_with_params(
 ) -> Vec<(String, f64)> {
     let uniform_ll = uniform_log_likelihood(pool);
 
-    // Poids = exp(skill / T) pour tous les modèles (pas de dropout).
-    // skill = best_ll - uniform_ll
-    // T < 1 concentre sur les meilleurs (ex: T=0.5 → ratios élevés au carré)
-    // T > 1 aplatit vers l'uniforme
+    // BMA: poids = exp(total_skill / T) où total_skill = skill_per_draw × n_tests.
+    // Cela amplifie exponentiellement les modèles avec un signal cumulé fort.
     let raw_weights: Vec<f64> = calibrations
         .iter()
         .map(|c| {
-            let skill = c.best_ll - uniform_ll;
-            (skill / temperature).exp()
+            let skill_per_draw = c.best_ll - uniform_ll;
+            let n = if c.best_n_tests > 0 { c.best_n_tests } else {
+                // Fallback pour les anciens fichiers de calibration sans best_n_tests
+                c.results.iter()
+                    .find(|r| r.window == c.best_window && r.sparse == c.best_sparse)
+                    .map(|r| r.n_tests)
+                    .unwrap_or(100)
+            };
+            let total_skill = (skill_per_draw * n as f64).min(20.0);
+            (total_skill / temperature).exp()
         })
         .collect();
 
@@ -247,11 +269,18 @@ pub fn compute_weights_with_threshold(
     let raw_weights: Vec<f64> = calibrations
         .iter()
         .map(|c| {
-            let skill = c.best_ll - uniform_ll;
-            if skill <= min_skill {
+            let skill_per_draw = c.best_ll - uniform_ll;
+            if skill_per_draw <= min_skill {
                 0.0
             } else {
-                (skill / temperature).exp()
+                let n = if c.best_n_tests > 0 { c.best_n_tests } else {
+                    c.results.iter()
+                        .find(|r| r.window == c.best_window && r.sparse == c.best_sparse)
+                        .map(|r| r.n_tests)
+                        .unwrap_or(100)
+                };
+                let total_skill = skill_per_draw * n as f64;
+                (total_skill / temperature).exp()
             }
         })
         .collect();
@@ -289,7 +318,7 @@ pub fn calibrate_model(
         );
         let min_history = 10;
         let max_t = draws.len().saturating_sub(min_history + 1);
-        let n_tests = max_t;
+        let n_tests = actual_test_count(max_t);
 
         return ModelCalibration {
             model_name: model.name().to_string(),
@@ -303,6 +332,7 @@ pub fn calibrate_model(
             best_window: 0,
             best_sparse: false,
             best_ll: ll,
+            best_n_tests: n_tests,
         };
     }
 
@@ -310,6 +340,7 @@ pub fn calibrate_model(
     let mut best_ll = f64::NEG_INFINITY;
     let mut best_window = windows[0];
     let mut best_sparse = false;
+    let mut best_n_tests = 0usize;
 
     for &window in windows {
         // Toujours évaluer en mode consécutif
@@ -318,18 +349,20 @@ pub fn calibrate_model(
         );
         let max_t = draws.len().saturating_sub(window + 1);
 
+        let n_actual = actual_test_count(max_t);
         results.push(CalibrationResult {
             model_name: model.name().to_string(),
             window,
             sparse: false,
             log_likelihood: ll,
-            n_tests: max_t,
+            n_tests: n_actual,
         });
 
         if ll > best_ll {
             best_ll = ll;
             best_window = window;
             best_sparse = false;
+            best_n_tests = n_actual;
         }
 
         // Si le modèle supporte le sparse, évaluer aussi en mode sparse
@@ -344,18 +377,20 @@ pub fn calibrate_model(
                     model, draws, window, pool, sparse_strategy,
                 );
 
+                let n_actual_sparse = actual_test_count(max_t_sparse);
                 results.push(CalibrationResult {
                     model_name: model.name().to_string(),
                     window,
                     sparse: true,
                     log_likelihood: ll_sparse,
-                    n_tests: max_t_sparse,
+                    n_tests: n_actual_sparse,
                 });
 
                 if ll_sparse > best_ll {
                     best_ll = ll_sparse;
                     best_window = window;
                     best_sparse = true;
+                    best_n_tests = n_actual_sparse;
                 }
             }
         }
@@ -367,7 +402,50 @@ pub fn calibrate_model(
         best_window,
         best_sparse,
         best_ll,
+        best_n_tests,
     }
+}
+
+/// Test de permutation pour valider le skill d'un modèle.
+/// Permute la séquence des tirages n_perms fois et recalcule le skill.
+/// Retourne la p-value = fraction des permutations avec skill >= skill réel.
+pub fn permutation_test_skill(
+    model: &dyn ForecastModel,
+    draws: &[Draw],
+    window: usize,
+    pool: Pool,
+    n_perms: usize,
+) -> f64 {
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
+    let strategy = model.sampling_strategy();
+    let real_ll = walk_forward_evaluate_with_strategy(model, draws, window, pool, strategy);
+    if !real_ll.is_finite() {
+        return 1.0;
+    }
+
+    let uniform_ll = uniform_log_likelihood(pool);
+    let real_skill = real_ll - uniform_ll;
+    if real_skill <= 0.0 {
+        return 1.0; // pas de skill positif, pas besoin de tester
+    }
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let mut n_better = 0usize;
+
+    for _ in 0..n_perms {
+        let mut shuffled = draws.to_vec();
+        shuffled.shuffle(&mut rng);
+        let perm_ll = walk_forward_evaluate_with_strategy(model, &shuffled, window, pool, strategy);
+        let perm_skill = perm_ll - uniform_ll;
+        if perm_skill >= real_skill {
+            n_better += 1;
+        }
+    }
+
+    (n_better as f64 + 1.0) / (n_perms as f64 + 1.0) // +1 pour inclure l'observation réelle
 }
 
 pub fn save_weights(weights: &EnsembleWeights, path: &std::path::Path) -> anyhow::Result<()> {
@@ -385,6 +463,7 @@ pub fn load_weights(path: &std::path::Path) -> anyhow::Result<EnsembleWeights> {
 /// Collecte les LL par tirage pour chaque modèle.
 /// Utilise la meilleure fenêtre/stratégie de chaque modèle.
 /// Retourne Vec<(model_name, Vec<ll_per_test_draw>)>.
+/// When pool == Stars, draws are filtered to the current star era (post 2016-09-27).
 pub fn collect_detailed_ll(
     model: &dyn ForecastModel,
     draws: &[Draw],
@@ -392,6 +471,13 @@ pub fn collect_detailed_ll(
     pool: Pool,
     strategy: SamplingStrategy,
 ) -> Vec<f64> {
+    // For stars, filter to current era only (post 2016-09-27, 2/12 format)
+    let draws = if pool == Pool::Stars {
+        filter_star_era(draws)
+    } else {
+        draws
+    };
+
     let min_history = 10;
 
     let max_t = match strategy {
@@ -443,15 +529,12 @@ pub fn collect_detailed_ll(
             let n_pool = pool.size() as f64;
             let uniform_ll = (1.0 / n_pool).ln();
             let ll_cap = 2.0 * uniform_ll;
-            let hit_bonus = 3.0;
             let mut draw_ll = 0.0f64;
             for &n in test_numbers {
                 let idx = (n - 1) as usize;
                 if idx < dist.len() {
                     let ll = dist[idx].max(1e-15).ln().max(ll_cap);
-                    let excess = ll - uniform_ll;
-                    let adjusted = if excess > 0.0 { hit_bonus * excess } else { excess };
-                    draw_ll += uniform_ll + adjusted;
+                    draw_ll += ll;
                 }
             }
             Some((t, draw_ll))
@@ -625,6 +708,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: -15.0,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -632,6 +716,7 @@ mod tests {
                 best_window: 30,
                 best_sparse: false,
                 best_ll: -18.0,
+                best_n_tests: 100,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -649,6 +734,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll + 1.0, // Meilleur que l'uniforme
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Bad".to_string(),
@@ -656,6 +742,7 @@ mod tests {
                 best_window: 30,
                 best_sparse: false,
                 best_ll: uniform_ll - 1.0, // Pire que l'uniforme
+                best_n_tests: 100,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -668,27 +755,31 @@ mod tests {
     #[test]
     fn test_compute_weights_exponential_ordering() {
         let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        // Use small n_tests so total_skill = skill_per_draw * n stays within cap
         let calibrations = vec![
             ModelCalibration {
                 model_name: "Best".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll + 2.0,
+                best_ll: uniform_ll + 0.10,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Medium".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll + 0.5,
+                best_ll: uniform_ll + 0.05,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Worst".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll - 3.0,
+                best_ll: uniform_ll - 0.10,
+                best_n_tests: 100,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -737,27 +828,30 @@ mod tests {
     #[test]
     fn test_temperature_sharpening_increases_ratio() {
         let uniform_ll = uniform_log_likelihood(Pool::Balls);
-        // Utiliser deux modèles POSITIFS (au-dessus de l'uniforme) pour tester le sharpening.
+        // Use realistic skill values so total_skill stays under cap of 20
         let calibrations = vec![
             ModelCalibration {
                 model_name: "Good".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll + 2.0,
+                best_ll: uniform_ll + 0.10,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Mediocre".to_string(),
                 results: vec![],
                 best_window: 20,
                 best_sparse: false,
-                best_ll: uniform_ll + 0.5,
+                best_ll: uniform_ll + 0.05,
+                best_n_tests: 100,
             },
         ];
-        // T=1: ratio = exp(1.5) ≈ 4.5
+        // total_skill(Good) = 10, total_skill(Med) = 5
+        // T=1: ratio = exp(10)/exp(5) = exp(5) ≈ 148
         let w_t1 = compute_weights_with_params(&calibrations, Pool::Balls, 1.0);
         let ratio_t1 = w_t1[0].1 / w_t1[1].1;
-        // T=0.5 (default): ratio = exp(3) ≈ 20 → concentration forte
+        // T=0.5: ratio = exp(20)/exp(10) = exp(10) ≈ 22026
         let w_t05 = compute_weights_with_params(&calibrations, Pool::Balls, 0.5);
         let ratio_t05 = w_t05[0].1 / w_t05[1].1;
         assert!(ratio_t05 > ratio_t1, "T=0.5 should increase ratio: {} vs {}", ratio_t05, ratio_t1);
@@ -774,6 +868,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll + 1.0,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Terrible".to_string(),
@@ -781,14 +876,15 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 6.0, // skill = -6
+                best_n_tests: 100,
             },
         ];
-        // Avec T=0.5, exp((-6)/0.5) = exp(-12) ≈ 6e-6 → quasi-nul sans dropout
+        // Avec T=1.0, exp(-6)/exp(1) = exp(-7) ≈ 9e-4, exp(-6)/(exp(1)+exp(-6)) → very small
         let weights = compute_weights(&calibrations, Pool::Balls);
         let terrible_w = weights.iter().find(|(n, _)| n == "Terrible").unwrap().1;
-        assert!(terrible_w < 1e-4, "Terrible model should be negligible with T=0.5, got {}", terrible_w);
+        assert!(terrible_w < 0.01, "Terrible model should be negligible, got {}", terrible_w);
         let good_w = weights.iter().find(|(n, _)| n == "Good").unwrap().1;
-        assert!(good_w > 0.999, "Good should get nearly all weight: {}", good_w);
+        assert!(good_w > 0.99, "Good should get nearly all weight: {}", good_w);
     }
 
     #[test]
@@ -801,6 +897,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 10.0,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -808,6 +905,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 10.0,
+                best_n_tests: 100,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -862,6 +960,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll + 0.5,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Uniform".to_string(),
@@ -869,6 +968,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll, // skill = 0
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "Bad".to_string(),
@@ -876,6 +976,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 0.5, // skill < 0
+                best_n_tests: 100,
             },
         ];
         let weights = compute_weights_with_threshold(&calibrations, Pool::Balls, 1.0, 0.0);
@@ -897,6 +998,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 1.0,
+                best_n_tests: 100,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -904,6 +1006,7 @@ mod tests {
                 best_window: 20,
                 best_sparse: false,
                 best_ll: uniform_ll - 2.0,
+                best_n_tests: 100,
             },
         ];
         // All models below threshold → uniform fallback

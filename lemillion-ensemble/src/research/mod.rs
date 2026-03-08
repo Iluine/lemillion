@@ -1,6 +1,8 @@
 pub mod physical;
 pub mod mathematical;
 pub mod informational;
+pub mod dfa;
+pub mod rqa;
 
 use lemillion_db::models::Draw;
 
@@ -37,6 +39,8 @@ pub struct ResearchReport {
     pub physical: Vec<TestResult>,
     pub mathematical: Vec<TestResult>,
     pub informational: Vec<TestResult>,
+    pub dfa: Vec<TestResult>,
+    pub rqa: Vec<TestResult>,
 }
 
 impl ResearchReport {
@@ -44,6 +48,8 @@ impl ResearchReport {
         self.physical.iter()
             .chain(self.mathematical.iter())
             .chain(self.informational.iter())
+            .chain(self.dfa.iter())
+            .chain(self.rqa.iter())
             .collect()
     }
 }
@@ -53,6 +59,8 @@ pub enum ResearchCategory {
     Physical,
     Mathematical,
     Informational,
+    Dfa,
+    Rqa,
     All,
 }
 
@@ -80,11 +88,30 @@ pub fn run_all_research(draws: &[Draw], category: ResearchCategory, window: Opti
         vec![]
     };
 
-    ResearchReport {
+    let dfa_results = if matches!(category, ResearchCategory::Dfa | ResearchCategory::All) {
+        dfa::run_dfa_tests(effective_draws)
+    } else {
+        vec![]
+    };
+
+    let rqa_results = if matches!(category, ResearchCategory::Rqa | ResearchCategory::All) {
+        rqa::run_rqa_tests(effective_draws)
+    } else {
+        vec![]
+    };
+
+    let mut report = ResearchReport {
         physical,
         mathematical,
         informational,
-    }
+        dfa: dfa_results,
+        rqa: rqa_results,
+    };
+
+    // Appliquer la correction FDR Benjamini-Hochberg à 5%
+    apply_fdr_correction(&mut report, 0.05);
+
+    report
 }
 
 /// Chi-squared statistic: sum of (observed - expected)^2 / expected
@@ -141,6 +168,53 @@ pub(crate) fn verdict_from_p(p: f64) -> ResearchVerdict {
     }
 }
 
+/// Applique la correction Benjamini-Hochberg FDR sur un ResearchReport.
+/// Re-étiquète les verdicts : seuls les tests survivant au FDR à `alpha` sont Significant.
+pub fn apply_fdr_correction(report: &mut ResearchReport, alpha: f64) {
+    // Collecter tous les résultats avec p-value
+    let mut all_results: Vec<&mut TestResult> = report.physical.iter_mut()
+        .chain(report.mathematical.iter_mut())
+        .chain(report.informational.iter_mut())
+        .chain(report.dfa.iter_mut())
+        .chain(report.rqa.iter_mut())
+        .filter(|r| r.p_value.is_some())
+        .collect();
+
+    if all_results.is_empty() {
+        return;
+    }
+
+    // Trier par p-value croissante
+    all_results.sort_by(|a, b| {
+        a.p_value.unwrap().partial_cmp(&b.p_value.unwrap()).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let m = all_results.len();
+
+    // BH: pour le rang k (1-indexed), seuil = alpha * k / m
+    // On trouve le plus grand k tel que p(k) <= alpha * k / m
+    let mut max_significant_rank = 0;
+    for (i, r) in all_results.iter().enumerate() {
+        let rank = i + 1;
+        let threshold = alpha * rank as f64 / m as f64;
+        if r.p_value.unwrap() <= threshold {
+            max_significant_rank = rank;
+        }
+    }
+
+    // Re-étiqueter les verdicts
+    for (i, r) in all_results.iter_mut().enumerate() {
+        let rank = i + 1;
+        if rank <= max_significant_rank {
+            r.verdict = ResearchVerdict::Significant;
+        } else if r.p_value.unwrap() < 0.05 {
+            r.verdict = ResearchVerdict::Marginal;
+        } else {
+            r.verdict = ResearchVerdict::NotSignificant;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +256,8 @@ mod tests {
         assert!(!report.physical.is_empty());
         assert!(!report.mathematical.is_empty());
         assert!(!report.informational.is_empty());
+        assert!(!report.dfa.is_empty());
+        assert!(!report.rqa.is_empty());
     }
 
     #[test]
@@ -191,6 +267,30 @@ mod tests {
         assert!(!report.physical.is_empty());
         assert!(report.mathematical.is_empty());
         assert!(report.informational.is_empty());
+        assert!(report.dfa.is_empty());
+        assert!(report.rqa.is_empty());
+    }
+
+    #[test]
+    fn test_run_research_dfa_filtered() {
+        let draws = make_test_draws(200);
+        let report = run_all_research(&draws, ResearchCategory::Dfa, None);
+        assert!(report.physical.is_empty());
+        assert!(report.mathematical.is_empty());
+        assert!(report.informational.is_empty());
+        assert!(!report.dfa.is_empty());
+        assert!(report.rqa.is_empty());
+    }
+
+    #[test]
+    fn test_run_research_rqa_filtered() {
+        let draws = make_test_draws(100);
+        let report = run_all_research(&draws, ResearchCategory::Rqa, None);
+        assert!(report.physical.is_empty());
+        assert!(report.mathematical.is_empty());
+        assert!(report.informational.is_empty());
+        assert!(report.dfa.is_empty());
+        assert!(!report.rqa.is_empty());
     }
 
     #[test]

@@ -8,8 +8,8 @@ use crate::models::ForecastModel;
 pub struct StackingWeights {
     /// Poids par numéro par modèle: [pool_size][n_models]
     pub model_weights: Vec<Vec<f64>>,
-    /// Poids contextuels par numéro: [pool_size][4]
-    pub context_weights: Vec<[f64; 4]>,
+    /// Poids contextuels par numéro: [pool_size][7]
+    pub context_weights: Vec<[f64; 7]>,
     /// Biais par numéro: [pool_size]
     pub bias: Vec<f64>,
     pub model_names: Vec<String>,
@@ -87,7 +87,7 @@ pub fn train_stacking(
 
     let pool_size = pool.size();
     let n_models = data[0].model_distributions.len();
-    let n_features = n_models + 4; // model probs + 4 context features
+    let n_features = n_models + 7; // model probs + 7 context features
     let n_samples = data.len();
 
     let model_names: Vec<String> = (0..n_models).map(|i| format!("model_{}", i)).collect();
@@ -118,14 +118,14 @@ pub fn train_stacking(
             y.push(label);
         }
 
-        // Ridge regression: beta = (X^T X + lambda*I)^{-1} X^T y
-        let (intercept, beta) = ridge_regression_nd(&x_rows, &y, n_features, lambda);
+        // Elastic net (LASSO + small L2) for automatic model elimination
+        let (intercept, beta) = elastic_net_cd(&x_rows, &y, n_features, lambda, lambda * 0.1, 200);
 
         let mut mw = Vec::with_capacity(n_models);
         for b in &beta[..n_models] {
             mw.push(*b);
         }
-        let mut cw = [0.0f64; 4];
+        let mut cw = [0.0f64; 7];
         for (i, b) in beta[n_models..].iter().enumerate() {
             cw[i] = *b;
         }
@@ -179,8 +179,9 @@ pub fn predict_stacked(
     probs
 }
 
-/// Ridge regression N-dimensionnelle avec centrage.
+/// Ridge regression N-dimensionnelle avec centrage (kept for fallback/tests).
 /// Retourne (intercept, coefficients).
+#[allow(dead_code)]
 fn ridge_regression_nd(
     x_rows: &[Vec<f64>],
     y: &[f64],
@@ -239,7 +240,104 @@ fn ridge_regression_nd(
     (intercept, beta)
 }
 
+/// Soft thresholding operator for LASSO.
+fn soft_threshold(x: f64, lambda: f64) -> f64 {
+    if x > lambda { x - lambda }
+    else if x < -lambda { x + lambda }
+    else { 0.0 }
+}
+
+/// Elastic net coordinate descent: L1 (lambda1) + L2 (lambda2) regularization.
+/// L1 drives irrelevant model weights to exactly zero (automatic elimination).
+/// L2 provides numerical stability for correlated features.
+fn elastic_net_cd(
+    x_rows: &[Vec<f64>],
+    y: &[f64],
+    n_features: usize,
+    lambda1: f64,
+    lambda2: f64,
+    max_iter: usize,
+) -> (f64, Vec<f64>) {
+    let n = x_rows.len();
+    if n == 0 || n_features == 0 {
+        return (0.0, vec![0.0; n_features]);
+    }
+
+    // Center y
+    let mean_y: f64 = y.iter().sum::<f64>() / n as f64;
+    let y_centered: Vec<f64> = y.iter().map(|&yi| yi - mean_y).collect();
+
+    // Center x and compute means
+    let mut mean_x = vec![0.0f64; n_features];
+    for row in x_rows {
+        for (j, &v) in row.iter().enumerate() {
+            mean_x[j] += v;
+        }
+    }
+    for m in &mut mean_x {
+        *m /= n as f64;
+    }
+
+    // Precompute X^T X diagonal (for coordinate descent denominator)
+    let mut xx_diag = vec![0.0f64; n_features];
+    for row in x_rows {
+        for j in 0..n_features {
+            let xc = row[j] - mean_x[j];
+            xx_diag[j] += xc * xc;
+        }
+    }
+
+    let mut beta = vec![0.0f64; n_features];
+    let mut residuals = y_centered.clone();
+
+    let l1 = lambda1 * n as f64;
+    let l2 = lambda2 * n as f64;
+
+    for _iter in 0..max_iter {
+        let mut max_change = 0.0f64;
+
+        for j in 0..n_features {
+            let denom = xx_diag[j] + l2;
+            if denom < 1e-15 { continue; }
+
+            let old_beta = beta[j];
+
+            // Compute rho = X_j^T × (residuals + old_beta × X_j)
+            let mut rho = 0.0f64;
+            for (i, row) in x_rows.iter().enumerate() {
+                let xc = row[j] - mean_x[j];
+                rho += xc * (residuals[i] + old_beta * xc);
+            }
+
+            // Soft thresholding with elastic net
+            let new_beta = soft_threshold(rho, l1) / denom;
+
+            // Update residuals
+            let delta = new_beta - old_beta;
+            if delta.abs() > 1e-15 {
+                for (i, row) in x_rows.iter().enumerate() {
+                    residuals[i] -= delta * (row[j] - mean_x[j]);
+                }
+            }
+
+            beta[j] = new_beta;
+            max_change = max_change.max(delta.abs());
+        }
+
+        if max_change < 1e-7 { break; }
+    }
+
+    // Intercept = mean_y - beta · mean_x
+    let mut intercept = mean_y;
+    for j in 0..n_features {
+        intercept -= beta[j] * mean_x[j];
+    }
+
+    (intercept, beta)
+}
+
 /// Gauss-Jordan elimination with partial pivoting for NxN system.
+#[allow(dead_code)]
 fn solve_nxn(a: &mut [Vec<f64>], b: &mut [f64], n: usize) -> Vec<f64> {
     // Forward elimination
     for col in 0..n {
@@ -293,7 +391,7 @@ mod tests {
     fn test_predict_stacked_normalizes() {
         let weights = StackingWeights {
             model_weights: vec![vec![0.5, 0.5]; 50],
-            context_weights: vec![[0.1, 0.1, 0.1, 0.1]; 50],
+            context_weights: vec![[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]; 50],
             bias: vec![0.02; 50],
             model_names: vec!["A".into(), "B".into()],
             pool_size: 50,
@@ -302,7 +400,7 @@ mod tests {
             vec![1.0 / 50.0; 50],
             vec![1.0 / 50.0; 50],
         ];
-        let ctx = RegimeFeatures { sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5, recent_entropy: 0.5 };
+        let ctx = RegimeFeatures { sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5, recent_entropy: 0.5, day_of_week: 0.5, gap_compression: 1.0, hurst_exponent: 0.5 };
         let result = predict_stacked(&weights, &dists, &ctx);
         let sum: f64 = result.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "Stacked prediction should sum to 1, got {}", sum);

@@ -24,9 +24,36 @@ pub mod star_pair;
 pub mod star_recency;
 pub mod context_knn;
 pub mod neural_scorer;
+pub mod jackpot_context;
+pub mod max_entropy;
+pub mod hmm;
+pub mod boltzmann;
+pub mod hawkes;
+pub mod bocpd;
+pub mod decade_persist;
+pub mod modular_balls;
+pub mod compression;
+pub mod star_momentum;
+pub mod spread;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
+
+/// Date after which the current star format (2/12) applies.
+/// Before 2016-09-27, EuroMillions used different star pools (2/9 or 2/11),
+/// making pre-era star data incompatible with current models.
+pub const STAR_ERA_DATE: &str = "2016-09-27";
+
+/// Filter draws to only include those from the current star era (post Sep 2016).
+/// Returns a slice of the draws that are in the current era.
+/// Since draws[0] = most recent, we just need to find where the old era starts.
+pub fn filter_star_era(draws: &[Draw]) -> &[Draw] {
+    let cutoff = draws.iter().position(|d| d.date.as_str() < STAR_ERA_DATE);
+    match cutoff {
+        Some(pos) => &draws[..pos],
+        None => draws, // all draws are in current era
+    }
+}
 
 /// Stratégie d'échantillonnage pour la calibration.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -70,11 +97,64 @@ pub const PROB_FLOOR_BALLS: f64 = 1e-15;
 pub const PROB_FLOOR_STARS: f64 = 1e-15;
 
 /// Numerical safety only: floor at epsilon to prevent log(0), then renormalize.
+/// NOTE: includes James-Stein shrinkage — use floor_only() for models where
+/// the ensemble already provides sufficient shrinkage.
 pub fn floor_and_normalize(probs: &mut Vec<f64>, floor: f64) {
+    // Apply James-Stein shrinkage before flooring (provably optimal for p >= 3)
+    james_stein_shrink(probs);
+
     for p in probs.iter_mut() {
         if *p < floor {
             *p = floor;
         }
+    }
+    let sum: f64 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in probs.iter_mut() {
+            *p /= sum;
+        }
+    }
+}
+
+/// Floor-only normalization: prevents log(0) without James-Stein shrinkage.
+/// Use this for models whose output feeds into the log-linear ensemble pool,
+/// which already acts as a shrinkage mechanism.
+pub fn floor_only(probs: &mut Vec<f64>, floor: f64) {
+    for p in probs.iter_mut() {
+        if *p < floor {
+            *p = floor;
+        }
+    }
+    let sum: f64 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in probs.iter_mut() {
+            *p /= sum;
+        }
+    }
+}
+
+/// James-Stein shrinkage towards uniform: provably dominates MLE for simultaneous
+/// estimation of p >= 3 parameters. Shrinks extreme probability estimates toward the mean.
+pub fn james_stein_shrink(probs: &mut Vec<f64>) {
+    let n = probs.len();
+    if n < 3 { return; }
+
+    let p_bar = 1.0 / n as f64;
+    let ss: f64 = probs.iter().map(|&p| (p - p_bar).powi(2)).sum();
+    if ss < 1e-15 { return; } // already uniform
+
+    // B = max(0, 1 - (n-2) × sigma² / (n × ss))
+    // sigma² = p_bar × (1 - p_bar) is the variance under the uniform null
+    let sigma_sq = p_bar * (1.0 - p_bar);
+    let b = (1.0 - (n as f64 - 2.0) * sigma_sq / (n as f64 * ss)).max(0.0);
+
+    for p in probs.iter_mut() {
+        *p = p_bar + b * (*p - p_bar);
+    }
+
+    // Ensure no negatives and renormalize
+    for p in probs.iter_mut() {
+        if *p < 0.0 { *p = 1e-15; }
     }
     let sum: f64 = probs.iter().sum();
     if sum > 0.0 {
@@ -95,29 +175,38 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Les 14 modèles de base (Dirichlet, Markov, ESN, CondSummary supprimés — skill négatif).
+/// Modèles de base de l'ensemble (22 modèles actifs).
+/// Ajoutés v6: TripletBoost (réactivé, z>2, temporal weighting), StarMomentum (DFA Hurst),
+///   Spread (clustering gaussien).
+/// Retirés v5: RandomForest (skill 0 balls+stars), ModProfile (skill 0 balls+stars),
+///   StresaSMC (corr 0.913 StresaChaos, skill 0 balls), GapDynamics (skill 0 balls+stars),
+///   ModTrans (corr 0.975 ModularBalls, poids 3.54% < 6.81%).
+/// Retirés v4: CTW, Spectral, StarRecency, BME/Mixture.
+/// Retirés avant: Dirichlet, Markov, ESN, CondSummary, JackpotContext.
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
         Box::new(logistic::LogisticModel::new(0.01, 0.0001, 200, 100)),
-        Box::new(random_forest::RandomForestModel::new(100, 3, 200)),
-        Box::new(spectral::SpectralModel::default()),
-        Box::new(ctw::CtwModel::default()),
-        Box::new(mixture::MixtureModel::default()),
         Box::new(transformer::TransformerModel::default()),
         Box::new(tda::TdaModel::default()),
         Box::new(physics::PhysicsModel::default()),
-        Box::new(mod4::Mod4TransitionModel::default()),
-        Box::new(mod4_profile::Mod4ProfileModel::default()),
         Box::new(stresa::StresaSgdModel::default()),
-        Box::new(stresa::StresaSmcModel::default()),
         Box::new(stresa::StresaChaosModel::default()),
         Box::new(conditional_v2::CondSummaryV2Model::default()),
-        Box::new(gap_dynamics::GapDynamicsModel::default()),
         Box::new(star_specialist::StarSpecialistModel::default()),
         Box::new(transfer_entropy::TransferEntropyModel::default()),
         Box::new(star_pair::StarPairModel::default()),
-        Box::new(star_recency::StarRecencyModel::default()),
         Box::new(context_knn::ContextKnnModel::default()),
+        Box::new(max_entropy::MaxEntropyModel::default()),
+        Box::new(hmm::HmmModel::default()),
+        Box::new(boltzmann::BoltzmannModel::default()),
+        Box::new(hawkes::HawkesModel::default()),
+        Box::new(bocpd::BocpdModel::default()),
+        Box::new(decade_persist::DecadePersistModel::default()),
+        Box::new(modular_balls::ModularBallsModel::default()),
+        Box::new(compression::CompressionModel::default()),
+        Box::new(triplet::TripletBoostModel::default()),
+        Box::new(star_momentum::StarMomentumModel::default()),
+        Box::new(spread::SpreadModel::default()),
     ]
 }
 
@@ -174,5 +263,92 @@ mod tests {
         let mut dist = vec![1.0 / 50.0; 50];
         dist[0] = -0.1;
         assert!(!validate_distribution(&dist, Pool::Balls));
+    }
+
+    #[test]
+    fn test_filter_star_era_all_current() {
+        // All draws are post-2016-09-27
+        let draws: Vec<Draw> = (0..5)
+            .map(|i| Draw {
+                draw_id: format!("{}", i),
+                day: "MARDI".to_string(),
+                date: format!("2024-01-{:02}", i + 1),
+                balls: [1, 2, 3, 4, 5],
+                stars: [1, 2],
+                winner_count: 0,
+                winner_prize: 0.0,
+                my_million: String::new(),
+            })
+            .collect();
+        let filtered = filter_star_era(&draws);
+        assert_eq!(filtered.len(), 5, "All current-era draws should be kept");
+    }
+
+    #[test]
+    fn test_filter_star_era_mixed() {
+        // draws[0..3] are current era (newest first), draws[3..5] are old era
+        let draws = vec![
+            Draw {
+                draw_id: "4".to_string(), day: "MARDI".to_string(),
+                date: "2024-01-04".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+            Draw {
+                draw_id: "3".to_string(), day: "MARDI".to_string(),
+                date: "2020-06-15".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+            Draw {
+                draw_id: "2".to_string(), day: "MARDI".to_string(),
+                date: "2016-09-27".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+            Draw {
+                draw_id: "1".to_string(), day: "MARDI".to_string(),
+                date: "2016-09-26".to_string(),  // one day before cutoff
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+            Draw {
+                draw_id: "0".to_string(), day: "MARDI".to_string(),
+                date: "2010-01-01".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+        ];
+        let filtered = filter_star_era(&draws);
+        assert_eq!(filtered.len(), 3, "Should keep 3 current-era draws");
+        assert_eq!(filtered[0].date, "2024-01-04");
+        assert_eq!(filtered[2].date, "2016-09-27");
+    }
+
+    #[test]
+    fn test_filter_star_era_all_old() {
+        let draws = vec![
+            Draw {
+                draw_id: "1".to_string(), day: "MARDI".to_string(),
+                date: "2015-01-01".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+            Draw {
+                draw_id: "0".to_string(), day: "MARDI".to_string(),
+                date: "2010-01-01".to_string(),
+                balls: [1,2,3,4,5], stars: [1,2],
+                winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+            },
+        ];
+        let filtered = filter_star_era(&draws);
+        assert_eq!(filtered.len(), 0, "All old-era draws should be filtered out");
+    }
+
+    #[test]
+    fn test_filter_star_era_empty() {
+        let draws: Vec<Draw> = vec![];
+        let filtered = filter_star_era(&draws);
+        assert_eq!(filtered.len(), 0);
     }
 }

@@ -35,8 +35,12 @@ cargo run -p lemillion-ensemble -- compare 3 15 27 38 44 2 9  # analyze a grid
 cargo run -p lemillion-ensemble -- add-draw 26016 MARDI 2026-02-24 10 27 40 43 47 6 10  # add a draw manually
 cargo run -p lemillion-ensemble -- backtest --last 10 --suggestions 5000  # backtest ensemble
 cargo run -p lemillion-ensemble -- predict --jackpot-mode --suggestions 100  # jackpot mode (top-100 by P(5+2))
+cargo run -p lemillion-ensemble -- predict --jackpot-mode --suggestions 5000 --jackpot 209000000  # jackpot mode with EV calc
 cargo run -p lemillion-ensemble -- predict --jackpot-mode --suggestions 5000 --no-filter  # jackpot without structural filter
+cargo run -p lemillion-ensemble -- predict --n-grids 6 --suggestions 5000             # few-grid mode (6 grilles, T forcée)
+cargo run -p lemillion-ensemble -- predict --n-grids 3 --suggestions 10000            # few-grid mode agressif (3 grilles)
 cargo run -p lemillion-ensemble -- backtest --last 10 --suggestions 50000 --jackpot-mode  # backtest jackpot mode
+cargo run -p lemillion-ensemble -- backtest --last 20 --suggestions 5000 --n-grids 6   # backtest few-grid mode
 cargo run -p lemillion-ensemble -- analyze              # non-randomness statistical tests
 cargo run -p lemillion-ensemble -- rebuild              # rebuild DB in chronological order
 cargo run -p lemillion-ensemble -- coverage --tickets 10 --jackpot 17000000  # coverage optimization
@@ -69,10 +73,10 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd}.rs
     src/features/{mod,compute}.rs
-    src/ensemble/{mod,calibration,consensus,meta}.rs
-    src/research/{mod,physical,mathematical,informational}.rs
+    src/ensemble/{mod,calibration,consensus,meta,stacking}.rs
+    src/research/{mod,physical,mathematical,informational,dfa,rqa}.rs
 ```
 
 **Dependency graph:** `lemillion-db` ← `lemillion-cli`, `lemillion-esn` ← `lemillion-ensemble`
@@ -120,36 +124,40 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-20 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+19 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+
+**IMPORTANT (v4)**: The Stresa machine uses 3 central bars + 8 external bars (mod-8 symmetry for balls), and the Pâquerette uses 4 blades (mod-4 for stars). All modular models are pool-aware via `mod4::modulus(pool)`. Star data before 2016-09-27 uses incompatible pool sizes and is filtered via `filter_star_era()`.
 
 **Active ensemble** (`base_models()` in `models/mod.rs`):
 1. **Logistic** — SGD with L2 regularization via ndarray, 14 features
-2. **RandomForest** — 100 trees, depth 3, bootstrap, sqrt(n) features, Gini impurity
-3. **Spectral** — FFT via `rustfft` on binary presence/absence series per number, identifies dominant harmonics, autocorrelation extrapolation (n_harmonics=5, smoothing=0.7, min 30 draws)
-4. **CTW** **(S×3)** — Context Tree Weighting: Bayesian universal predictor with Krichevsky-Trofimov estimator, depth-6 context tree over binary presence/absence series per number. Theoretically optimal for finite-memory sources (depth=6, smoothing=0.5, min 10 draws)
-5. **BME** — Bayesian Mixture of Experts: 6 lightweight experts reweighted online via Hedge algorithm (multiplicative weights update). Proven regret bound: loss ≤ best_expert + sqrt(T×ln(K)). (learning_rate=0.1, smoothing=0.15)
-6. **Transformer** — Reservoir Transformer: self-attention à poids fixes (random frozen) + ridge regression readout. 2 couches, 4 têtes, d_model=32, masque causal, positional encoding sinusoïdal. (context_len=50, ridge_lambda=1e-3, smoothing=0.5, seed=42)
-7. **TDA** **(S×3)** — Topological Data Analysis: homologie persistante H0 via Union-Find sur nuages de points 5D. (window_size=30, correlation_window=50, smoothing=0.6)
-8. **Physics** **(S×4)** — Simulation de biais mécaniques: fréquences EWMA lentes (α=0.05), biais log-ratio avec shrinkage bayésien, drift temporel, lissage spatial gaussien, CUSUM. (prior_strength=50, drift_window=20, smoothing=0.4)
-9. **Mod4Trans** **(S×3)** — Matrice de transition sur résidus mod 4, exploitant la corrélation inter-tirages (cosine 0.68 vs 0.38) liée aux 4 pales de la machine Stresa. (smoothing=0.25, min_draws=10)
-10. **Mod4Profile** **(S×3)** — Matrice de transition sur profils mod-4 complets (n₀,n₁,n₂,n₃). 56 profils boules, 10 profils étoiles, transition Laplace-smoothed. Capture les patterns de profils complets plutôt que blade→blade.
-11. **TripletBoost** — Scoring par triplets co-occurrents à z-score élevé. Pour chaque candidat k, somme des z-scores des triplets formés avec les paires du dernier tirage. (z_threshold=2.0, smoothing=0.5, min_draws=30)
-12. **StresaSGD** **(S×4)** — Simulateur physique Bayésien de la machine Stresa. Modèle génératif inverse avec row_bias (5 rangées rack), persistence inter-tirages et température. SGD par différences finies. (lr=0.02, reg=0.01, n_epochs=10, smoothing=0.30, star_smoothing=0.18)
-13. **StresaSMC** **(S×4)** — Filtre particulaire (Sequential Monte Carlo) pour le simulateur Stresa. 1000 particules avec systematic resampling quand ESS < N/2. (n_particles=1000, jitter=0.02, warmup=30, smoothing=0.20, star_smoothing=0.12, seed=42)
-14. **StresaChaos** **(S×4)** — Simulateur dynamique chaotique de la machine Stresa. Reconstruction espace des phases (Takens), analyse attracteur (Lyapunov local, RQA, UPO), prédiction multi-méthode fusionnée. Smoothing adaptatif basé sur la prédictibilité locale Lyapunov. (k_pilot=20, mod4_weight=0.90, smoothing=0.25)
-15. **CondSummaryV2** — Naive Bayes factorisé: P(num|sum_bin) × P(num|spread_bin) × P(num|odd_count) / P(num)². Corrige l'explosion d'état de V1 (~4800 états pour 634 tirages) en 3 tables indépendantes ~100+ observations chacune. Lissage de Laplace. (smoothing=0.4, n_bins=5)
-16. **GapDynamics** **(S×3)** — Fonction de hasard empirique + correction par autocorrélation. Exploite la compression des gaps (0.64 vs 0.78 théorique). Pour chaque numéro: hazard P(gap=g|gap≥g), prior géométrique, ajustement lag-1 autocorrélation. (prior_weight=0.20, autocorr_strength=0.40)
-17. **StarSpecialist** **(S×3)** — Modèle dédié étoiles: 4 micro-experts combinés via Hedge (gap-hazard, conditionnel ball→star, balance haut/bas EWMA, mod-4 transition étoiles). Retourne uniforme pour Pool::Balls. (smoothing=0.35, learning_rate=0.15, min_draws=30)
-18. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée. Score multiplicatif basé sur présence des sources dans le dernier tirage. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2 (coûteux). (alpha=2.0, te_threshold_factor=3.0, smoothing=0.40, n_top_sources=15)
-19. **StarPair** **(S×3)** — Prédit les 66 paires d'étoiles via 3 experts Hedge (fréquence paire, transition paire→paire par catégorie de somme, ball-conditionné). Marginalise vers 12 étoiles individuelles. Expose `predict_pair_distribution()` pour scoring direct par paires dans l'énumération jackpot. (smoothing=0.25, learning_rate=0.15, min_draws=50)
-20. **StarRecency** **(S×3)** — EWMA multi-échelle sur fréquence par étoile (3 alphas: 0.20, 0.10, 0.05). Retourne uniforme pour Pool::Balls. (smoothing=0.30, min_draws=20)
-21. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D (sum_norm, spread_norm, odd_count, mod4_cosine). Trouve les k=15 plus proches voisins historiques, pondère par 1/distance. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.40, min_draws=30)
+2. **Transformer** — Reservoir Transformer: self-attention à poids fixes (random frozen) + ridge regression readout. 2 couches, 4 têtes, d_model=32, masque causal, positional encoding sinusoïdal. (context_len=50, ridge_lambda=1e-3, smoothing=0.25, seed=42)
+3. **TDA** **(S×3)** — Topological Data Analysis: homologie persistante H0 via Union-Find sur nuages de points 5D. (window_size=30, correlation_window=50, smoothing=0.25)
+4. **Physics** **(S×4)** — Simulation de biais mécaniques: fréquences EWMA lentes (α=0.05), biais log-ratio avec shrinkage bayésien, drift temporel, lissage spatial gaussien, CUSUM. (prior_strength=10, drift_window=20, smoothing=0.25)
+5. **StresaSGD** **(S×4)** — Simulateur physique Bayésien de la machine Stresa. Modèle génératif inverse avec row_bias (5 rangées rack), persistence inter-tirages et température. SGD par différences finies. (lr=0.02, reg=0.01, n_epochs=10, smoothing=0.30, star_smoothing=0.18)
+6. **StresaChaos** **(S×4)** — Simulateur dynamique chaotique de la machine Stresa. Reconstruction espace des phases (Takens), analyse attracteur (Lyapunov local, RQA, UPO), prédiction multi-méthode fusionnée. Smoothing adaptatif basé sur la prédictibilité locale Lyapunov. (k_pilot=20, mod4_weight=0.90, smoothing=0.25)
+7. **CondSummaryV2** — Naive Bayes factorisé: P(num|sum_bin) × P(num|spread_bin) × P(num|odd_count) / P(num)². (smoothing=0.4, n_bins=5)
+8. **StarSpecialist** **(S×3)** — Modèle dédié étoiles: 4 micro-experts combinés via Hedge. Retourne uniforme pour Pool::Balls. (smoothing=0.35, learning_rate=0.15, min_draws=30)
+9. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2. (alpha=2.0, te_threshold_factor=3.0, smoothing=0.40, n_top_sources=15)
+10. **StarPair** **(S×3)** — Prédit les 66 paires d'étoiles via 3 experts Hedge. Expose `predict_pair_distribution()` pour scoring direct par paires. (smoothing=0.25, learning_rate=0.15, min_draws=50)
+11. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.40, min_draws=30)
+12. **MaxEntropy** — Maximum entropy distribution with bias tilts from detected non-random signals. (smoothing=0.35)
+13. **HMM** **(S×3)** — Hidden Markov Model with K=4/8 hidden states (pool-aware). Baum-Welch + forward algorithm. (n_states=4/8, max_iter=20, smoothing=0.35)
+14. **Boltzmann** **(S×3)** — Markov Random Field for ball interactions. Mean-field approximation. (coupling_strength=0.3, smoothing=0.20)
+15. **Hawkes** **(S×3)** — Self-exciting point process for pair co-occurrence temporal clustering. (decay=0.1, excitation=0.5, smoothing=0.20)
+16. **BOCPD** **(S×4)** — Bayesian Online Changepoint Detection (Adams-MacKay). (expected_run_length=200, smoothing=0.35)
+17. **DecadePersist** **(S×3)** — Matrice de transition entre profils de décades (5 rangées rack Stresa). 126 profils.
+18. **ModularBalls** **(S×3)** — Teste 3 symétries (mod-3, mod-8, mod-24) et sélectionne la plus informative par KL-divergence.
+19. **Compression** **(S×3)** — Mesure la compressibilité (deflate) de la séquence avec chaque candidat ajouté.
 
-**Retired models** (modules still exist but excluded from `base_models()` — negative calibration skill): Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion.
+**Retired models** (modules still exist but excluded from `base_models()` — see `RETIRED_MODELS.md` for full details):
+- v5: RandomForest, ModProfile, StresaSMC (corr 0.913 StresaChaos), GapDynamics, ModTrans (corr 0.975 ModularBalls)
+- v4: CTW, Spectral, StarRecency, BME/Mixture
+- v1-v3: Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion, JackpotContext
 
 **Utility types** (not `ForecastModel`, used internally):
 - **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`.
 - **SummaryPredictor** (`summary_predictor.rs`) — Markov order-1 on summary states (sum_bin, spread_bin, odd_count). Used by sampler for adaptive filtering.
+- **NeuralScorer** (`neural_scorer.rs`) — 3-layer MLP (62→32→16→1) ensemble of 5 networks. Scores complete grids for reranking. Saved/loaded as `neural_scorer.json`. Optional in jackpot mode (`--neural-rerank`).
 
 **Feature engineering** (`features/compute.rs`): 21 features per number — freq_3, freq_5, freq_10, freq_20, retard, retard_norm, trend, mean_gap, std_gap, is_odd, decade, decade_density, day_of_week, recent_sum_norm, recent_even_count, pair_freq, gap_acceleration, low_half, mod4_class, mod4_class_freq, mod4_transition.
 
@@ -165,8 +173,12 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `CoherenceScorer` — computes historical sum/spread stats, pair and triplet co-occurrence frequencies. Weights: 0.35*sum + 0.25*spread + 0.25*pair + 0.15*triplet
 - `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
-- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset), 5 nested loops, min-heap for large enumerations. Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
+- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls, conditioner, neural_scorer)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset, K_balls minimum 25), 5 nested loops, min-heap for large enumerations. Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion (disabled for jackpots >100M). Optional `conditioner` for ball→star conditional scoring. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
+- `BallStarConditioner` — models conditional star pair probabilities given ball context (sum_bin × spread_bin). Built from history, produces 12×12 probability tables per context bin. Blended with marginal star scores via `COND_BLEND=0.60`.
 - `conviction_temperature(verdict)` — adaptive temperature: HighConviction→0.10, MediumConviction→0.20, LowConviction→0.25
+- `conviction_temperature_split(conviction)` — separate ball/star temperatures. For jackpots >100M: T_balls forced to 1.0 (no sharpening) to avoid over-concentration on favorite balls; T_stars remains aggressive (0.20-0.40).
+- `few_grid_temperature(n_grids)` — forced temperatures for few-grid mode (3-10 grilles). N≤3: (0.55, 0.25), 4-6: (0.60, 0.30), 7-10: (0.65, 0.30). Overrides skill/conviction.
+- `select_optimal_n_grids(candidates, n_grids, max_common_balls, max_common_stars)` — greedy selection of N grids maximizing P(5+2) with diversity constraints (max common balls/stars per pair).
 
 **Expected Value** (`expected_value.rs`):
 - `PopularityModel` — models player number selection biases (birthday bias, lucky numbers, recency)
@@ -193,16 +205,26 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `consensus_score(balls, stars, ball_consensus, star_consensus)` — scores a grid against the consensus map: StrongPick=+2, DivisivePick=+1, Uncertain=0, StrongAvoid=-1. Range: -7 to +14
 - `compute_exclusion_set(consensus, threshold, max_excluded)` — returns StrongAvoid numbers with consensus_value < threshold, sorted most negative first, capped at max_excluded. Used for K-reduction in jackpot enumeration
 
+**Log-linear pool** (`ensemble/mod.rs`):
+- Geometric combination: `P(x) ∝ Π P_i(x)^w_i` (log-space computation with max-subtraction)
+- Replaces linear pool. Optimal when models have partially independent information sources.
+
 **Agreement boost** (`ensemble/mod.rs`):
-- `predict_with_agreement_boost(draws, pool, strength)` — boosts numbers where models agree (low spread), attenuates divisive ones
+- `predict_with_agreement_boost(draws, pool, strength)` — boosts numbers that are both FAVORED (above uniform) AND UNANIMOUS (low spread). `agreement = deviation × spread_agreement`
 
 **Online Hedge** (`ensemble/mod.rs`):
 - `compute_hedge_weights(models, draws, ball_w, star_w, n_recent, eta)` — multiplicative weight update over N recent draws: `w[m] *= exp(-η * loss_m)`
 
 **Meta-predictor** (`ensemble/meta.rs`):
-- `RegimeFeatures` — 4D context features: sum_norm, spread_norm, mod4_cosine, recent_entropy
+- `RegimeFeatures` — 6D context features: sum_norm, spread_norm, mod4_cosine, recent_entropy, day_of_week (MARDI=0/VENDREDI=1), gap_compression
 - `MetaPredictor::train(draws, detailed_ll, lambda)` — ridge regression from context features to per-model LL adjustments
 - `MetaPredictor::weight_adjustments(features)` — returns per-model multiplicative weight adjustments for current context
+
+**Stacking** (`ensemble/stacking.rs`):
+- `StackingWeights` — per-number elastic net regression: model weights `[pool_size][n_models]`, context weights `[pool_size][6]`, bias `[pool_size]`
+- Walk-forward data collection (~200 points), trains separate balls/stars stacking layers
+- LASSO (L1) + L2 regularization via coordinate descent — automatically eliminates irrelevant models
+- Context features = `RegimeFeatures` (6D)
 
 **Redundancy detection** (`ensemble/calibration.rs`):
 - `collect_detailed_ll(model, draws, window, pool, strategy)` — per-draw LL collection
@@ -213,9 +235,9 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 2. Predict ball/star distributions via `EnsembleCombiner`
 3. Display top-N distributions + consensus maps
 4. Compute conviction score on RAW distributions (before temperature)
-5. Apply temperature: explicit `--temperature`, or adaptive via `conviction_temperature()` in jackpot mode (High→0.15, Medium→0.25, Low→0.40), or 1.0 (no-op) in EV mode
+5. Apply temperature: `--n-grids` overrides with `few_grid_temperature()`, else explicit `--temperature`, else adaptive split via `conviction_temperature_split()`. For jackpot >100M: T_balls=1.0, T_stars from conviction.
 6. Display optimal grid (deterministic, max probability)
-7. If `--jackpot-mode`: exhaustive enumeration via `generate_suggestions_jackpot()`, no diversity, no anti-popularity. `--no-filter` disables structural filter.
+7. If `--jackpot-mode` or `--n-grids`: multi-perspective enumeration (3 weight profiles: Principal, Star-variant, Exploratoire). All candidates pooled and selected via `select_optimal_n_grids()` with diversity constraints. `--n-grids N` activates few-grid mode with forced temperature. K-reduction disabled for jackpots >100M. `--no-filter` disables structural filter. `--jackpot <amount>` sets jackpot for EV calculation.
 8. Else (default EV mode): generate sampled suggestions via `generate_suggestions_ev`, sort by EV descending, display with consensus column
 
 **Research** (`research/`):
@@ -238,6 +260,16 @@ Bias detection module organized in 3 axes. Each test returns `TestResult { test_
   2. **Transfer entropy** — TE(i→j) for top-15 ball pairs + ball→star cross-pool, with FDR threshold
   3. **Compression** — deflate ratio for 4 encodings (raw, mod4, decades, gaps) vs random baseline
   4. **Delayed MI** — MI at lags 1,2,3,5,7,10,20,50 with shuffled surrogate baseline
+
+- **DFA** (`research/dfa.rs`): Detrended Fluctuation Analysis
+  1. **Hurst Exponent (Balls)** — average H across 50 ball frequency series with z-test vs 0.5
+  2. **Hurst Exponent (Stars)** — average H across 12 star frequency series with z-test vs 0.5
+  3. **Persistence Classification** — determines momentum vs mean-reversion strategy
+
+- **RQA** (`research/rqa.rs`): Recurrence Quantification Analysis
+  1. **RR** (Recurrence Rate), **DET** (Determinism), **L_max**, **ENTR** (Entropy), **LAM** (Laminarity)
+  2. Monte Carlo baseline (100 surrogates) for p-values and effect sizes
+  3. Takens embedding (dim=3, delay=1) on ball frequency series
 
 **CLI subcommands:** `calibrate`, `weights`, `predict`, `history`, `compare`, `add-draw`, `fix-draw`, `rebuild`, `backtest`, `analyze`, `coverage`, `research`, `benchmark`, `interactive`
 

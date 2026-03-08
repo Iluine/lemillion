@@ -30,10 +30,10 @@ impl GapDynamicsModel {
 impl Default for GapDynamicsModel {
     fn default() -> Self {
         Self {
-            smoothing: 0.50,
-            prior_weight: 0.30,
-            min_gaps: 5,
-            autocorr_strength: 0.30,
+            smoothing: 0.25,
+            prior_weight: 0.20,
+            min_gaps: 3,
+            autocorr_strength: 0.60,
         }
     }
 }

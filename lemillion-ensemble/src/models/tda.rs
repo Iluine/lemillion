@@ -43,7 +43,7 @@ impl Default for TdaModel {
             n_epsilon: 20,
             max_epsilon: 2.0,
             correlation_window: 50,
-            smoothing: 0.6,
+            smoothing: 0.25,
         }
     }
 }
@@ -105,13 +105,21 @@ fn encode_draw(numbers: &[u8], pool_size: usize) -> [f64; 5] {
 
     let odd_ratio = numbers.iter().filter(|&&x| x % 2 == 1).count() as f64 / n;
 
-    let centroid = sum / n / max_val;
+    // Max gap between sorted consecutive numbers (replaces centroid = sum_norm duplicate)
+    let mut sorted: Vec<u8> = numbers.to_vec();
+    sorted.sort_unstable();
+    let max_consecutive_gap = if sorted.len() >= 2 {
+        sorted.windows(2).map(|w| (w[1] - w[0]) as f64).fold(0.0f64, f64::max)
+    } else {
+        0.0
+    };
+    let max_gap_norm = max_consecutive_gap / max_val;
 
     let mean = sum / n;
     let variance = numbers.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
     let var_norm = variance / (max_val * max_val);
 
-    [sum_norm, spread_norm, odd_ratio, centroid, var_norm]
+    [sum_norm, spread_norm, odd_ratio, max_gap_norm, var_norm]
 }
 
 /// Distance euclidienne entre deux points 5D.

@@ -3,6 +3,7 @@ pub mod consensus;
 pub mod meta;
 pub mod stacking;
 
+use rayon::prelude::*;
 use lemillion_db::models::{Draw, Pool};
 use crate::models::ForecastModel;
 
@@ -59,20 +60,32 @@ impl EnsembleCombiner {
             base_weights.to_vec()
         };
 
-        let mut model_distributions = Vec::new();
         let size = pool.size();
-        let mut combined = vec![0.0f64; size];
 
-        for (i, model) in self.models.iter().enumerate() {
-            let dist = model.predict(draws, pool);
+        // Paralléliser les prédictions des modèles (indépendantes)
+        let all_dists: Vec<(String, Vec<f64>)> = self.models
+            .par_iter()
+            .map(|model| (model.name().to_string(), model.predict(draws, pool)))
+            .collect();
+
+        // Log-linear pool: P(x) ∝ Π P_i(x)^w_i (geometric combination)
+        // In log-space: log P(x) = Σ w_i × log P_i(x)
+        let mut log_combined = vec![0.0f64; size];
+        let mut model_distributions = Vec::with_capacity(all_dists.len());
+
+        for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
             for j in 0..size {
-                combined[j] += w * dist[j];
+                log_combined[j] += w * dist[j].max(1e-15).ln();
             }
-            model_distributions.push((model.name().to_string(), dist));
+            model_distributions.push((name, dist));
         }
 
-        // Normaliser au cas où les poids ne somment pas exactement à 1
+        // Exponentiate with max-subtraction for numerical stability
+        let max_lc = log_combined.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut combined: Vec<f64> = log_combined.iter().map(|&lc| (lc - max_lc).exp()).collect();
+
+        // Normaliser
         let total: f64 = combined.iter().sum();
         if total > 0.0 {
             for p in &mut combined {
@@ -162,10 +175,16 @@ impl EnsembleCombiner {
             return base; // pas de spread → pas de boost
         }
 
+        let uniform_val = 1.0 / pool.size() as f64;
         let mut boosted = base.distribution.clone();
         for (i, p) in boosted.iter_mut().enumerate() {
-            let agreement = 1.0 - base.spread[i] / max_spread;
+            // Only boost numbers that are both FAVORED and UNANIMOUS
+            // deviation > 0 = above uniform, < 0 = below uniform
+            let deviation = (base.distribution[i] / uniform_val) - 1.0;
+            let spread_agreement = 1.0 - base.spread[i] / max_spread;
+            let agreement = deviation * spread_agreement;
             *p *= 1.0 + strength * agreement;
+            if *p < 0.0 { *p = 1e-15; }
         }
 
         // Renormaliser
@@ -215,35 +234,35 @@ pub fn compute_hedge_weights(
         }
 
         for (m, model) in models.iter().enumerate() {
-            let hit_bonus = 3.0;
+            // Skip predict() pour les modèles à poids zéro — résultat identique après floor
+            let need_ball = ball_weights[m] > 1e-30;
+            let need_star = star_weights[m] > 1e-30;
 
-            // Loss boules (asymétrique: bonus 3× pour les hits)
-            let ball_uniform_ll = (1.0_f64 / 50.0).ln();
-            let ball_ll_cap = 2.0 * ball_uniform_ll;
-            let ball_dist = model.predict(training_draws, Pool::Balls);
-            let ball_loss: f64 = test_draw.balls.iter()
-                .map(|&b| {
-                    let ll = ball_dist[(b - 1) as usize].max(1e-15).ln().max(ball_ll_cap);
-                    let excess = ll - ball_uniform_ll;
-                    let adj = if excess > 0.0 { hit_bonus * excess } else { excess };
-                    -(ball_uniform_ll + adj)
-                })
-                .sum();
-            ball_weights[m] *= (-eta * ball_loss).exp();
+            if need_ball {
+                // Loss boules (pure log-likelihood)
+                let ball_ll_cap = 2.0 * (1.0_f64 / 50.0).ln();
+                let ball_dist = model.predict(training_draws, Pool::Balls);
+                let ball_loss: f64 = test_draw.balls.iter()
+                    .map(|&b| {
+                        let ll = ball_dist[(b - 1) as usize].max(1e-15).ln().max(ball_ll_cap);
+                        -ll
+                    })
+                    .sum();
+                ball_weights[m] *= (-eta * ball_loss).exp();
+            }
 
-            // Loss étoiles (asymétrique: bonus 3× pour les hits)
-            let star_uniform_ll = (1.0_f64 / 12.0).ln();
-            let star_ll_cap = 2.0 * star_uniform_ll;
-            let star_dist = model.predict(training_draws, Pool::Stars);
-            let star_loss: f64 = test_draw.stars.iter()
-                .map(|&s| {
-                    let ll = star_dist[(s - 1) as usize].max(1e-15).ln().max(star_ll_cap);
-                    let excess = ll - star_uniform_ll;
-                    let adj = if excess > 0.0 { hit_bonus * excess } else { excess };
-                    -(star_uniform_ll + adj)
-                })
-                .sum();
-            star_weights[m] *= (-eta * star_loss).exp();
+            if need_star {
+                // Loss étoiles (pure log-likelihood)
+                let star_ll_cap = 2.0 * (1.0_f64 / 12.0).ln();
+                let star_dist = model.predict(training_draws, Pool::Stars);
+                let star_loss: f64 = test_draw.stars.iter()
+                    .map(|&s| {
+                        let ll = star_dist[(s - 1) as usize].max(1e-15).ln().max(star_ll_cap);
+                        -ll
+                    })
+                    .sum();
+                star_weights[m] *= (-eta * star_loss).exp();
+            }
         }
 
         // Normaliser après chaque tirage
@@ -258,6 +277,33 @@ pub fn compute_hedge_weights(
             for w in &mut star_weights {
                 *w /= ss;
             }
+        }
+    }
+
+    // Floor différencié: les modèles avec poids base > 0 gardent un floor minimum,
+    // les modèles à poids base ~0 (skill négatif) restent à 0 après Hedge.
+    let min_weight = 0.005;
+    for (i, w) in ball_weights.iter_mut().enumerate() {
+        if base_ball_weights[i] > 1e-10 {
+            *w = w.max(min_weight);
+        }
+        // else: laisser à 0 — pas de floor pour les modèles inutiles
+    }
+    let bs: f64 = ball_weights.iter().sum();
+    if bs > 0.0 {
+        for w in &mut ball_weights {
+            *w /= bs;
+        }
+    }
+    for (i, w) in star_weights.iter_mut().enumerate() {
+        if base_star_weights[i] > 1e-10 {
+            *w = w.max(min_weight);
+        }
+    }
+    let ss: f64 = star_weights.iter().sum();
+    if ss > 0.0 {
+        for w in &mut star_weights {
+            *w /= ss;
         }
     }
 

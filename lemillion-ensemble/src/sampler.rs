@@ -383,13 +383,17 @@ pub struct BallStarConditioner {
 }
 
 impl BallStarConditioner {
-    const N_CONTEXTS: usize = 15; // 5 sum_bins × 3 spread_bins
+    /// 9 contextes (3 sum × 3 spread) pour ~70 draws/bin.
+    /// Approche hiérarchique: déviations multiplicatives par rapport à la distribution globale.
+    const N_CONTEXTS: usize = 9; // 3 sum_bins × 3 spread_bins
     const LAPLACE_ALPHA: f64 = 0.3;
 
     pub fn from_history(draws: &[Draw]) -> Self {
         let mut counts = vec![[0.0f64; 66]; Self::N_CONTEXTS];
+        let mut global_counts = [0.0f64; 66];
 
-        for draw in draws {
+        for (t, draw) in draws.iter().enumerate() {
+            let weight = (-0.02 * t as f64).exp();
             let mut balls = draw.balls;
             balls.sort();
             let ctx = Self::ball_context(&balls);
@@ -399,15 +403,41 @@ impl BallStarConditioner {
                 (draw.stars[1], draw.stars[0])
             };
             let pidx = crate::models::star_pair::pair_index(s1, s2);
-            counts[ctx][pidx] += 1.0;
+            counts[ctx][pidx] += weight;
+            global_counts[pidx] += weight;
         }
 
-        // Normaliser chaque contexte avec Laplace smoothing
+        // Normaliser la distribution globale
+        let global_total: f64 = global_counts.iter().sum::<f64>() + Self::LAPLACE_ALPHA * 66.0;
+        let mut global_probs = [0.0f64; 66];
+        for p in 0..66 {
+            global_probs[p] = (global_counts[p] + Self::LAPLACE_ALPHA) / global_total;
+        }
+
+        // Approche hiérarchique: table[ctx][p] = global × ratio_ctx
+        // Cela permet de profiter de la force statistique globale
         let mut table = vec![[0.0f64; 66]; Self::N_CONTEXTS];
         for ctx in 0..Self::N_CONTEXTS {
-            let total: f64 = counts[ctx].iter().sum::<f64>() + Self::LAPLACE_ALPHA * 66.0;
-            for p in 0..66 {
-                table[ctx][p] = (counts[ctx][p] + Self::LAPLACE_ALPHA) / total;
+            let ctx_total: f64 = counts[ctx].iter().sum::<f64>();
+            if ctx_total < 10.0 {
+                // Pas assez de données: utiliser la distribution globale
+                // Pour 10-30 obs, blend 50/50 avec global dans le else branch
+                table[ctx] = global_probs;
+            } else {
+                // Ratio multiplicatif: P(pair|ctx) ∝ global × (obs/expected)
+                let expected_per_pair = ctx_total / 66.0;
+                for p in 0..66 {
+                    let ratio = (counts[ctx][p] + Self::LAPLACE_ALPHA)
+                        / (expected_per_pair + Self::LAPLACE_ALPHA);
+                    table[ctx][p] = global_probs[p] * ratio;
+                }
+                // Renormaliser
+                let total: f64 = table[ctx].iter().sum();
+                if total > 0.0 {
+                    for p in &mut table[ctx] {
+                        *p /= total;
+                    }
+                }
             }
         }
 
@@ -418,13 +448,8 @@ impl BallStarConditioner {
     pub fn ball_context(balls: &[u8; 5]) -> usize {
         let sum: u32 = balls.iter().map(|&b| b as u32).sum();
         let spread = balls[4] - balls[0];
-        let sum_bin = match sum {
-            0..=89 => 0,
-            90..=114 => 1,
-            115..=139 => 2,
-            140..=164 => 3,
-            _ => 4,
-        };
+        // 3 sum bins: low (<115) / medium (115-140) / high (>140)
+        let sum_bin = if sum < 115 { 0 } else if sum <= 140 { 1 } else { 2 };
         let spread_bin = match spread {
             0..=19 => 0,
             20..=34 => 1,
@@ -682,8 +707,8 @@ pub fn generate_suggestions_joint(
         } else {
             0.0
         };
-        // Score en log-espace pour le tri : log(bayesian) + coherence + joint
-        let sort_score = log_bayesian + coherence_score + joint_bonus;
+        // Score en log-espace pour le tri : tout en log
+        let sort_score = log_bayesian + coherence_score.max(1e-6).ln() + joint_bonus;
 
         candidates.push(Suggestion {
             balls: balls_arr,
@@ -1015,12 +1040,12 @@ fn compute_adaptive_k(count: usize) -> (usize, usize) {
     let target = 3 * count as u64;
 
     // Commencer avec K_stars=6, K_balls=10 et augmenter
-    for k_stars in 10..=12usize {
+    for k_stars in 2..=12usize {
         let star_combs = comb(k_stars, 2);
         for k_balls in 10..=50usize {
             let ball_combs = comb(k_balls, 5);
             if ball_combs.saturating_mul(star_combs) >= target {
-                return (k_balls.max(30), k_stars.max(10));
+                return (k_balls, k_stars);
             }
         }
     }
@@ -1060,12 +1085,12 @@ pub fn generate_suggestions_jackpot(
     star_probs: &[f64],
     count: usize,
     filter: Option<&StructuralFilter>,
-    coherence: Option<&CoherenceScorer>,
-    joint_model: Option<&crate::models::joint::JointConditionalModel>,
+    _coherence: Option<&CoherenceScorer>,
+    _joint_model: Option<&crate::models::joint::JointConditionalModel>,
     star_pair_probs: Option<&[f64; 66]>,
     excluded_balls: Option<&[u8]>,
     conditioner: Option<&BallStarConditioner>,
-    neural_scorer: Option<&crate::models::neural_scorer::NeuralScorer>,
+    _neural_scorer: Option<&crate::models::neural_scorer::NeuralScorer>,
 ) -> Result<JackpotResult> {
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
@@ -1081,47 +1106,56 @@ pub fn generate_suggestions_jackpot(
         ball_indices.retain(|&idx| !excluded.contains(&((idx + 1) as u8)));
     }
 
-    // Trier les étoiles par probabilité décroissante
-    let mut star_indices: Vec<usize> = (0..star_probs.len()).collect();
-    star_indices.sort_by(|&a, &b| {
-        star_probs[b].partial_cmp(&star_probs[a]).unwrap_or(CmpOrdering::Equal)
-    });
-
-    // K adaptatif
-    let (k_balls, k_stars) = compute_adaptive_k(count);
+    // K adaptatif (boules uniquement — étoiles : énumération exhaustive des 66 paires)
+    let (k_balls, _k_stars) = compute_adaptive_k(count);
+    // Minimum 25 boules pour éviter la sur-concentration sur le top-10/15
+    let k_balls = k_balls.max(25);
     let top_balls = &ball_indices[..k_balls.min(ball_indices.len())];
-    let top_stars = &star_indices[..k_stars.min(star_indices.len())];
 
-    // Pré-calculer les paires d'étoiles avec leur score
+    // Énumérer exhaustivement les 66 paires d'étoiles avec score direct
     let uniform_pair = 1.0 / 66.0;
-    let mut star_pairs: Vec<([u8; 2], f64)> = Vec::with_capacity(comb(top_stars.len(), 2) as usize);
-    for i in 0..top_stars.len() {
-        for j in (i + 1)..top_stars.len() {
-            let s1 = (top_stars[i] + 1) as u8;
-            let s2 = (top_stars[j] + 1) as u8;
-            let mut stars = [s1, s2];
-            stars.sort();
+    let mut star_pairs: Vec<([u8; 2], f64)> = Vec::with_capacity(66);
+    for s1 in 1u8..=11 {
+        for s2 in (s1 + 1)..=12u8 {
+            let stars = [s1, s2];
             let star_score = if let Some(pp) = star_pair_probs {
-                let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+                let pidx = crate::models::star_pair::pair_index(s1, s2);
                 pp[pidx] / uniform_pair
             } else {
-                (star_probs[top_stars[i]] / uniform_star)
-                    * (star_probs[top_stars[j]] / uniform_star)
+                (star_probs[(s1 - 1) as usize] / uniform_star)
+                    * (star_probs[(s2 - 1) as usize] / uniform_star)
             };
             star_pairs.push((stars, star_score));
         }
     }
+    // Trier par score décroissant et garder les top paires (toutes 66 si star_pair_probs disponible)
+    star_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(CmpOrdering::Equal));
+    let top_star_pairs = if star_pair_probs.is_some() { 66 } else { 30 };
+    star_pairs.truncate(top_star_pairs);
 
-    let total_enum = comb(top_balls.len(), 5) * comb(top_stars.len(), 2);
+    // Blend ratio conditionné vs marginal pour les étoiles
+    const COND_BLEND: f64 = 0.65;
+
+    // Pré-calcul en log-espace pour stabilité numérique
+    let log_ball_probs: Vec<f64> = (0..ball_probs.len())
+        .map(|i| (ball_probs[i] / uniform_ball).max(1e-30).ln())
+        .collect();
+
+    // Pré-calcul des log star scores (évite ln() redondant dans les boucles internes)
+    let log_base_star_scores: Vec<f64> = star_pairs.iter()
+        .map(|&(_, score)| score.max(1e-30).ln())
+        .collect();
+
+    let total_enum = comb(top_balls.len(), 5) * star_pairs.len() as u64;
     let use_heap = total_enum > 10 * count as u64;
 
     let mut enumeration_size: u64 = 0;
     let mut filtered_size: u64 = 0;
 
     if use_heap {
-        // Mode heap : garder seulement les top-N
+        // Mode heap : garder seulement les top-N (scores en log-espace)
         let mut heap: BinaryHeap<MinHeapEntry> = BinaryHeap::with_capacity(count + 1);
-        let mut min_score = f64::NEG_INFINITY;
+        let mut min_log_score = f64::NEG_INFINITY;
 
         for i0 in 0..top_balls.len() {
             for i1 in (i0 + 1)..top_balls.len() {
@@ -1144,48 +1178,36 @@ pub fn generate_suggestions_jackpot(
                                 continue;
                             }
 
-                            let ball_score = (ball_probs[top_balls[i0]] / uniform_ball)
-                                * (ball_probs[top_balls[i1]] / uniform_ball)
-                                * (ball_probs[top_balls[i2]] / uniform_ball)
-                                * (ball_probs[top_balls[i3]] / uniform_ball)
-                                * (ball_probs[top_balls[i4]] / uniform_ball);
-
-                            let coh_bonus = if let Some(coh) = coherence {
-                                0.5 + coh.score_balls(&balls)
-                            } else {
-                                1.0
-                            };
+                            let log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
+                                .map(|&i| log_ball_probs[top_balls[i]])
+                                .sum();
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
 
-                            for &(stars, base_star_score) in &star_pairs {
+                            for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
-                                let star_score = if let Some(cp) = cond_probs {
+                                let log_star_score = if let Some(cp) = cond_probs {
                                     let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                     let conditioned = cp[pidx] / uniform_pair;
-                                    0.70 * conditioned + 0.30 * base_star_score
+                                    let blended = COND_BLEND * conditioned + (1.0 - COND_BLEND) * base_star_score;
+                                    blended.max(1e-30).ln()
                                 } else {
-                                    base_star_score
+                                    log_base_star_scores[star_idx]
                                 };
-                                let mut score = ball_score * star_score * coh_bonus;
-
-                                if let Some(jm) = joint_model {
-                                    let joint_norm = jm.score_grid_normalized(&balls, &stars).clamp(0.5, 2.0);
-                                    score *= 0.7 + 0.3 * joint_norm;
-                                }
+                                let log_score = log_ball_score + log_star_score;
 
                                 // Élagage rapide : si le score est inférieur au min du heap plein, skip
-                                if heap.len() >= count && score <= min_score {
+                                if heap.len() >= count && log_score <= min_log_score {
                                     continue;
                                 }
 
                                 filtered_size += 1;
-                                heap.push(MinHeapEntry { score, balls, stars });
+                                heap.push(MinHeapEntry { score: log_score, balls, stars });
 
                                 if heap.len() > count {
                                     heap.pop(); // éjecter le plus petit
                                     if let Some(top) = heap.peek() {
-                                        min_score = top.score;
+                                        min_log_score = top.score;
                                     }
                                 }
                             }
@@ -1195,33 +1217,25 @@ pub fn generate_suggestions_jackpot(
             }
         }
 
-        // Extraire du heap et trier par score décroissant
+        // Extraire du heap, convertir log-scores en linéaires, trier par score décroissant
         let mut suggestions: Vec<Suggestion> = heap
             .into_iter()
             .map(|e| Suggestion {
                 balls: e.balls,
                 stars: e.stars,
-                score: e.score,
+                score: e.score.exp(), // log → linéaire
             })
             .collect();
         suggestions.sort_by(|a, b| {
             b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
         });
 
-        // Neural reranking
-        if let Some(ns) = neural_scorer {
-            for s in &mut suggestions {
-                let neural = ns.score(&s.balls, &s.stars);
-                s.score = 0.7 * s.score + 0.3 * neural * s.score;
-            }
-            suggestions.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal));
-        }
-
-        // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
-        let total_prob: f64 = suggestions.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
-        let n = suggestions.len() as f64;
-        let uniform_prob = n / 139_838_160.0;
-        let improvement = if uniform_prob > 0.0 { total_prob / uniform_prob } else { 0.0 };
+        // score = prod(prob/uniform) = facteur d'amélioration vs uniforme par grille
+        // P(5+2) par grille sous le modèle = score / 139_838_160
+        let n_sugg = suggestions.len() as f64;
+        let mean_score = suggestions.iter().map(|s| s.score).sum::<f64>() / n_sugg;
+        let total_prob = mean_score * n_sugg / 139_838_160.0;
+        let improvement = mean_score;
 
         Ok(JackpotResult {
             suggestions,
@@ -1250,36 +1264,25 @@ pub fn generate_suggestions_jackpot(
 
                             let passes_filter = filter.is_none_or(|f| f.accept_balls(&balls));
 
-                            let ball_score = (ball_probs[top_balls[i0]] / uniform_ball)
-                                * (ball_probs[top_balls[i1]] / uniform_ball)
-                                * (ball_probs[top_balls[i2]] / uniform_ball)
-                                * (ball_probs[top_balls[i3]] / uniform_ball)
-                                * (ball_probs[top_balls[i4]] / uniform_ball);
-
-                            let coh_bonus = if let Some(coh) = coherence {
-                                0.5 + coh.score_balls(&balls)
-                            } else {
-                                1.0
-                            };
+                            let log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
+                                .map(|&i| log_ball_probs[top_balls[i]])
+                                .sum();
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
 
-                            for &(stars, base_star_score) in &star_pairs {
+                            for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
                                 if passes_filter {
                                     filtered_size += 1;
-                                    let star_score = if let Some(cp) = cond_probs {
+                                    let log_star_score = if let Some(cp) = cond_probs {
                                         let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                         let conditioned = cp[pidx] / uniform_pair;
-                                        0.70 * conditioned + 0.30 * base_star_score
+                                        let blended = COND_BLEND * conditioned + (1.0 - COND_BLEND) * base_star_score;
+                                        blended.max(1e-30).ln()
                                     } else {
-                                        base_star_score
+                                        log_base_star_scores[star_idx]
                                     };
-                                    let mut score = ball_score * star_score * coh_bonus;
-                                    if let Some(jm) = joint_model {
-                                        let joint_norm = jm.score_grid_normalized(&balls, &stars).clamp(0.5, 2.0);
-                                        score *= 0.7 + 0.3 * joint_norm;
-                                    }
+                                    let score = (log_ball_score + log_star_score).exp();
                                     all.push(Suggestion { balls, stars, score });
                                 }
                             }
@@ -1294,20 +1297,12 @@ pub fn generate_suggestions_jackpot(
         });
         all.truncate(count);
 
-        // Neural reranking
-        if let Some(ns) = neural_scorer {
-            for s in &mut all {
-                let neural = ns.score(&s.balls, &s.stars);
-                s.score = 0.7 * s.score + 0.3 * neural * s.score;
-            }
-            all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal));
-        }
-
-        // P(jackpot) = score / 139_838_160 car score = prod(prob/uniform)
-        let total_prob: f64 = all.iter().map(|s| s.score).sum::<f64>() / 139_838_160.0;
-        let n = all.len() as f64;
-        let uniform_prob = n / 139_838_160.0;
-        let improvement = if uniform_prob > 0.0 { total_prob / uniform_prob } else { 0.0 };
+        // score = prod(prob/uniform) = facteur d'amélioration vs uniforme par grille
+        // P(5+2) par grille sous le modèle = score / 139_838_160
+        let n_sugg = all.len() as f64;
+        let mean_score = all.iter().map(|s| s.score).sum::<f64>() / n_sugg;
+        let total_prob = mean_score * n_sugg / 139_838_160.0;
+        let improvement = mean_score;
 
         Ok(JackpotResult {
             suggestions: all,
@@ -1468,8 +1463,8 @@ pub fn generate_diverse_grids_with_strategy(
         }
     }
 
-    // Sélection exhaustive : maximiser un score composite 100% jackpot
-    // Score = 0.15 * pair_coverage + 0.85 * log_probabilité
+    // Sélection exhaustive : 95% log-probabilité + 5% couverture
+    // La diversité structurelle est déjà assurée par les profils modulaires
     // Grouper les candidats par profil
     let n_profiles = selected_profiles.len();
     let mut candidates_by_profile: Vec<Vec<&Suggestion>> = vec![Vec::new(); n_profiles];
@@ -1517,7 +1512,7 @@ pub fn generate_diverse_grids_with_strategy(
                     let distinct_balls: std::collections::HashSet<u8> = combo.iter()
                         .flat_map(|s| s.balls.iter().copied()).collect();
                     let coverage = distinct_balls.len() as f64 / (5.0 * combo.len() as f64);
-                    0.85 * log_score + 0.15 * coverage
+                    0.95 * log_score + 0.05 * coverage
                 };
 
                 if composite > best_composite {
@@ -1964,6 +1959,87 @@ pub fn compute_conviction(
 /// Relevée pour éviter le sharpening excessif quand le skill boules est faible.
 /// - HighConviction → T=0.60
 /// - MediumConviction → T=0.85
+/// Température forcée pour le mode few-grid (3-10 grilles).
+/// Avec peu de grilles, on concentre agressivement sur nos meilleurs paris.
+/// Retourne (T_balls, T_stars).
+pub fn few_grid_temperature(n_grids: usize) -> (f64, f64) {
+    match n_grids {
+        0..=3 => (0.55, 0.25),
+        4..=6 => (0.60, 0.30),
+        7..=10 => (0.65, 0.30),
+        _ => (0.70, 0.35), // >10 grilles : plus conservateur
+    }
+}
+
+/// Sélection optimale de N grilles maximisant P(au moins un 5+2).
+/// Greedy: choisit la meilleure P(5+2), puis la meilleure parmi celles
+/// ayant ≤ max_common_balls boules et ≤ max_common_stars étoiles communes
+/// avec chaque grille déjà sélectionnée.
+pub fn select_optimal_n_grids(
+    candidates: &[Suggestion],
+    n_grids: usize,
+    max_common_balls: usize,
+    max_common_stars: usize,
+) -> Vec<Suggestion> {
+    if candidates.is_empty() || n_grids == 0 {
+        return vec![];
+    }
+
+    // Candidates should already be sorted by score descending
+    let mut selected: Vec<Suggestion> = Vec::with_capacity(n_grids);
+
+    // Grille 1 = plus haute P(5+2)
+    selected.push(candidates[0].clone());
+
+    // Grilles suivantes avec contrainte de diversité
+    for candidate in candidates.iter().skip(1) {
+        if selected.len() >= n_grids {
+            break;
+        }
+        let is_diverse = selected.iter().all(|s| {
+            let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
+            let common_s = candidate.stars.iter().filter(|st| s.stars.contains(st)).count();
+            common_b <= max_common_balls && common_s <= max_common_stars
+        });
+        if is_diverse {
+            selected.push(candidate.clone());
+        }
+    }
+
+    // Fallback: si pas assez diversifiés, relâcher la contrainte étoiles
+    if selected.len() < n_grids {
+        for candidate in candidates {
+            if selected.len() >= n_grids {
+                break;
+            }
+            if selected.iter().any(|s| s.balls == candidate.balls && s.stars == candidate.stars) {
+                continue;
+            }
+            let is_diverse_balls = selected.iter().all(|s| {
+                let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
+                common_b <= max_common_balls
+            });
+            if is_diverse_balls {
+                selected.push(candidate.clone());
+            }
+        }
+    }
+
+    // Final fallback: remplir avec les meilleurs restants
+    if selected.len() < n_grids {
+        for candidate in candidates {
+            if selected.len() >= n_grids {
+                break;
+            }
+            if !selected.iter().any(|s| s.balls == candidate.balls && s.stars == candidate.stars) {
+                selected.push(candidate.clone());
+            }
+        }
+    }
+
+    selected
+}
+
 /// - LowConviction → T=1.0 (pas de sharpening)
 pub fn conviction_temperature(verdict: &ConvictionVerdict) -> f64 {
     match verdict {
@@ -1973,26 +2049,67 @@ pub fn conviction_temperature(verdict: &ConvictionVerdict) -> f64 {
     }
 }
 
-/// Températures séparées balls/stars basées sur la conviction.
-/// Les étoiles ont plus de signal → température plus basse.
+/// Skill-based temperature: T = 1 / (1 + C × total_skill)
+/// With typical skill ~0.01 bits/draw: T≈0.91 (très léger)
+/// With skill ~0.05: T≈0.67 (modéré)
+/// With skill ~0.10: T≈0.50 (agressif)
+/// C is the sensitivity constant.
+const SKILL_TEMP_C: f64 = 10.0;
+
+/// Compute temperature from calibrated skill level.
+/// skill = average bits above uniform for this pool.
+pub fn skill_temperature(skill: f64) -> f64 {
+    if skill <= 0.0 {
+        1.0 // no skill → no sharpening
+    } else {
+        1.0 / (1.0 + SKILL_TEMP_C * skill)
+    }
+}
+
+/// Températures séparées balls/stars basées sur:
+/// 1. La conviction de l'ensemble (concentration + agreement)
+/// 2. Le skill calibré optionnel (si fourni, override la conviction)
+///
+/// ball_skill / star_skill = total weighted skill from calibration.
 pub fn conviction_temperature_split(conviction: &ConvictionScore) -> (f64, f64) {
-    let ball_score = 0.7 * conviction.ball_concentration + 0.3 * conviction.ball_agreement;
-    let star_score = 0.7 * conviction.star_concentration + 0.3 * conviction.star_agreement;
-    let ball_temp = if ball_score >= 0.5 {
-        0.50
-    } else if ball_score >= 0.2 {
-        0.75
-    } else {
-        1.0
+    conviction_temperature_split_with_skill(conviction, None, None)
+}
+
+/// Version avec skill calibré pour un sharpening informé par la calibration.
+pub fn conviction_temperature_split_with_skill(
+    conviction: &ConvictionScore,
+    ball_skill: Option<f64>,
+    star_skill: Option<f64>,
+) -> (f64, f64) {
+    let ball_temp = match ball_skill {
+        Some(s) if s > 0.0 => skill_temperature(s),
+        _ => {
+            // Fallback: conviction-based (relative, not absolute thresholds)
+            let ball_score = 0.7 * conviction.ball_concentration + 0.3 * conviction.ball_agreement;
+            if ball_score >= 0.5 {
+                0.35
+            } else if ball_score >= 0.2 {
+                0.55
+            } else {
+                0.80
+            }
+        }
     };
-    // Étoiles : plancher T=0.60 (toujours au moins un peu de sharpening)
-    let star_temp = if star_score >= 0.5 {
-        0.30
-    } else if star_score >= 0.2 {
-        0.50
-    } else {
-        0.60
+
+    let star_temp = match star_skill {
+        Some(s) if s > 0.0 => skill_temperature(s).min(0.40), // stars always get some sharpening
+        _ => {
+            let star_score = 0.7 * conviction.star_concentration + 0.3 * conviction.star_agreement;
+            if star_score >= 0.5 {
+                0.20
+            } else if star_score >= 0.2 {
+                0.35
+            } else {
+                0.40
+            }
+        }
     };
+
     (ball_temp, star_temp)
 }
 
@@ -2418,12 +2535,12 @@ mod tests {
 
     #[test]
     fn test_ball_context_bins() {
-        // Low sum, low spread
+        // Low sum (15 < 115), low spread (4 < 20): bin = 0*3 + 0 = 0
         assert_eq!(BallStarConditioner::ball_context(&[1, 2, 3, 4, 5]), 0 * 3 + 0);
-        // High sum (145 → bin 3), high spread (45 → bin 2)
-        assert_eq!(BallStarConditioner::ball_context(&[5, 20, 30, 40, 50]), 3 * 3 + 2);
-        // Mid sum (115-139), mid spread (20-34)
-        assert_eq!(BallStarConditioner::ball_context(&[10, 20, 25, 30, 40]), 2 * 3 + 1);
+        // High sum (145 > 140), high spread (45 >= 35): bin = 2*3 + 2 = 8
+        assert_eq!(BallStarConditioner::ball_context(&[5, 20, 30, 40, 50]), 2 * 3 + 2);
+        // Mid sum (125, 115<=125<=140), mid spread (30 in 20-34): bin = 1*3 + 1 = 4
+        assert_eq!(BallStarConditioner::ball_context(&[10, 20, 25, 30, 40]), 1 * 3 + 1);
     }
 
     #[test]
@@ -2462,9 +2579,48 @@ mod tests {
             verdict: ConvictionVerdict::MediumConviction,
         };
         let (bt, st) = conviction_temperature_split(&conv);
-        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.2 → T=1.0
-        assert!((bt - 1.0).abs() < 1e-10);
-        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.30
-        assert!((st - 0.30).abs() < 1e-10);
+        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.2 → T=0.80
+        assert!((bt - 0.80).abs() < 1e-10);
+        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.20
+        assert!((st - 0.20).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_skill_temperature() {
+        // No skill → T=1.0
+        assert!((skill_temperature(0.0) - 1.0).abs() < 1e-10);
+        assert!((skill_temperature(-0.5) - 1.0).abs() < 1e-10);
+
+        // Small skill (0.01) → T ≈ 0.91
+        let t = skill_temperature(0.01);
+        assert!(t > 0.85 && t < 0.95, "skill=0.01 → T={t}");
+
+        // Medium skill (0.05) → T ≈ 0.67
+        let t = skill_temperature(0.05);
+        assert!(t > 0.60 && t < 0.75, "skill=0.05 → T={t}");
+
+        // High skill (0.10) → T ≈ 0.50
+        let t = skill_temperature(0.10);
+        assert!(t > 0.45 && t < 0.55, "skill=0.10 → T={t}");
+    }
+
+    #[test]
+    fn test_skill_based_temperature_overrides_conviction() {
+        let conv = ConvictionScore {
+            ball_entropy: 3.0,
+            star_entropy: 2.0,
+            ball_concentration: 0.1,
+            star_concentration: 0.1,
+            ball_agreement: 0.1,
+            star_agreement: 0.1,
+            overall: 0.15,
+            verdict: ConvictionVerdict::LowConviction,
+        };
+        // With skill, should use skill-based temp (not conviction fallback)
+        let (bt, st) = conviction_temperature_split_with_skill(&conv, Some(0.05), Some(0.03));
+        let expected_bt = skill_temperature(0.05);
+        let expected_st = skill_temperature(0.03).min(0.40);
+        assert!((bt - expected_bt).abs() < 1e-10, "bt={bt} expected {expected_bt}");
+        assert!((st - expected_st).abs() < 1e-10, "st={st} expected {expected_st}");
     }
 }

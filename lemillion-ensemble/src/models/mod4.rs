@@ -4,11 +4,24 @@ use lemillion_db::models::{Draw, Pool};
 
 use super::{ForecastModel, SamplingStrategy};
 
-/// Mod4Trans — matrice de transition sur les classes de résidus mod 4.
+/// Modulus physique par pool:
+/// - Boules (Stresa): 3 barres centrales + 8 barres extérieures → mod-8
+/// - Étoiles (Pâquerette): 4 pales → mod-4
+pub fn modulus(pool: Pool) -> usize {
+    match pool {
+        Pool::Balls => 8,
+        Pool::Stars => 4,
+    }
+}
+
+/// ModTrans — matrice de transition sur les classes de résidus modulaires.
 ///
-/// Exploite la corrélation inter-tirages des résidus mod 4 (cosine 0.68 vs 0.38 attendu),
-/// liée aux 4 pales de la machine Stresa. Le tirage t prédit la distribution mod 4 du
-/// tirage t+1 via une matrice de transition avec lissage de Laplace.
+/// Exploite la symétrie physique de la machine:
+/// - Boules: mod-8 (8 barres extérieures de la Stresa)
+/// - Étoiles: mod-4 (4 pales de la Pâquerette)
+///
+/// Le tirage t prédit la distribution modulaire du tirage t+1 via une
+/// matrice de transition avec lissage de Laplace.
 pub struct Mod4TransitionModel {
     smoothing: f64,
     min_draws: usize,
@@ -29,11 +42,11 @@ impl Default for Mod4TransitionModel {
     }
 }
 
-/// Encode un tirage en vecteur de comptages mod 4.
-fn mod4_counts(numbers: &[u8]) -> [f64; 4] {
-    let mut counts = [0.0f64; 4];
+/// Encode un tirage en vecteur de comptages par classe modulaire.
+fn mod_counts(numbers: &[u8], m: usize) -> Vec<f64> {
+    let mut counts = vec![0.0f64; m];
     for &n in numbers {
-        let r = ((n - 1) % 4) as usize;
+        let r = ((n - 1) as usize) % m;
         counts[r] += 1.0;
     }
     counts
@@ -41,7 +54,7 @@ fn mod4_counts(numbers: &[u8]) -> [f64; 4] {
 
 impl ForecastModel for Mod4TransitionModel {
     fn name(&self) -> &str {
-        "Mod4Trans"
+        "ModTrans"
     }
 
     fn predict(&self, draws: &[Draw], pool: Pool) -> Vec<f64> {
@@ -52,18 +65,20 @@ impl ForecastModel for Mod4TransitionModel {
             return uniform;
         }
 
+        let m = modulus(pool);
+
         let numbers_list: Vec<Vec<u8>> = draws.iter()
             .map(|d| pool.numbers_from(d).to_vec())
             .collect();
 
         // Matrice de transition T[i][j] : probabilité de passer du résidu i au résidu j
         // Avec lissage de Laplace (+1 partout)
-        let mut transition = [[1.0f64; 4]; 4];
+        let mut transition = vec![vec![1.0f64; m]; m];
 
         // Parcourir les paires consécutives (draws[0] = plus récent)
         for t in 0..draws.len() - 1 {
-            let current = mod4_counts(&numbers_list[t]);
-            let next = mod4_counts(&numbers_list[t + 1]);
+            let current = mod_counts(&numbers_list[t], m);
+            let next = mod_counts(&numbers_list[t + 1], m);
 
             for (i, &c_i) in current.iter().enumerate() {
                 if c_i > 0.0 {
@@ -85,10 +100,10 @@ impl ForecastModel for Mod4TransitionModel {
         }
 
         // Prédiction : utiliser le dernier tirage (draws[0])
-        let current = mod4_counts(&numbers_list[0]);
+        let current = mod_counts(&numbers_list[0], m);
         let total_current: f64 = current.iter().sum();
 
-        let mut p_next = [0.0f64; 4];
+        let mut p_next = vec![0.0f64; m];
         if total_current > 0.0 {
             for (i, &c) in current.iter().enumerate() {
                 let w = c / total_current;
@@ -97,7 +112,9 @@ impl ForecastModel for Mod4TransitionModel {
                 }
             }
         } else {
-            p_next = [0.25; 4];
+            for p in &mut p_next {
+                *p = 1.0 / m as f64;
+            }
         }
 
         // Fréquences historiques par numéro (pour redistribution intra-classe)
@@ -111,16 +128,16 @@ impl ForecastModel for Mod4TransitionModel {
             }
         }
 
-        // Fréquences normalisées au sein de chaque classe mod 4
-        let mut class_freq_sum = [0.0f64; 4];
+        // Fréquences normalisées au sein de chaque classe modulaire
+        let mut class_freq_sum = vec![0.0f64; m];
         for (k, &f) in freq.iter().enumerate() {
-            class_freq_sum[k % 4] += f;
+            class_freq_sum[k % m] += f;
         }
 
         // Redistribuer selon les fréquences historiques au sein de chaque classe
         let mut prob = vec![0.0f64; size];
         for (k, p) in prob.iter_mut().enumerate() {
-            let r = k % 4;
+            let r = k % m;
             if class_freq_sum[r] > 0.0 {
                 *p = p_next[r] * freq[k] / class_freq_sum[r];
             }
@@ -163,7 +180,30 @@ mod tests {
     use crate::models::{make_test_draws, validate_distribution};
 
     #[test]
-    fn test_mod4_balls_sums_to_one() {
+    fn test_modulus_values() {
+        assert_eq!(modulus(Pool::Balls), 8);
+        assert_eq!(modulus(Pool::Stars), 4);
+    }
+
+    #[test]
+    fn test_mod_counts_mod8() {
+        // Balls 1..=8: (1-1)%8=0, (2-1)%8=1, ..., (8-1)%8=7
+        let counts = mod_counts(&[1, 2, 3, 4, 5], 8);
+        assert_eq!(counts.len(), 8);
+        // 1→0, 2→1, 3→2, 4→3, 5→4
+        assert_eq!(counts, vec![1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_mod_counts_mod4() {
+        let counts = mod_counts(&[1, 2, 3, 4, 5], 4);
+        assert_eq!(counts.len(), 4);
+        // 1→0, 2→1, 3→2, 4→3, 5→0
+        assert_eq!(counts, vec![2.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_mod_trans_balls_sums_to_one() {
         let model = Mod4TransitionModel::default();
         let draws = make_test_draws(50);
         let dist = model.predict(&draws, Pool::Balls);
@@ -176,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_stars_sums_to_one() {
+    fn test_mod_trans_stars_sums_to_one() {
         let model = Mod4TransitionModel::default();
         let draws = make_test_draws(50);
         let dist = model.predict(&draws, Pool::Stars);
@@ -189,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_no_negative() {
+    fn test_mod_trans_no_negative() {
         let model = Mod4TransitionModel::default();
         let draws = make_test_draws(50);
         let dist = model.predict(&draws, Pool::Balls);
@@ -199,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_empty_draws() {
+    fn test_mod_trans_empty_draws() {
         let model = Mod4TransitionModel::default();
         let draws: Vec<Draw> = vec![];
         let dist = model.predict(&draws, Pool::Balls);
@@ -210,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_few_draws() {
+    fn test_mod_trans_few_draws() {
         let model = Mod4TransitionModel::default();
         let draws = make_test_draws(5);
         let dist = model.predict(&draws, Pool::Balls);
@@ -221,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_deterministic() {
+    fn test_mod_trans_deterministic() {
         let model = Mod4TransitionModel::default();
         let draws = make_test_draws(50);
         let dist1 = model.predict(&draws, Pool::Balls);
@@ -229,12 +269,5 @@ mod tests {
         for (a, b) in dist1.iter().zip(dist2.iter()) {
             assert!((a - b).abs() < 1e-15);
         }
-    }
-
-    #[test]
-    fn test_mod4_counts() {
-        let counts = mod4_counts(&[1, 2, 3, 4, 5]);
-        // 1 -> (1-1)%4=0, 2 -> 1, 3 -> 2, 4 -> 3, 5 -> 0
-        assert_eq!(counts, [2.0, 1.0, 1.0, 1.0]);
     }
 }

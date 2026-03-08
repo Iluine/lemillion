@@ -2,36 +2,32 @@ use std::collections::HashMap;
 
 use lemillion_db::models::{Draw, Pool};
 
-use super::ForecastModel;
+use super::{floor_only, ForecastModel, SamplingStrategy, PROB_FLOOR_BALLS};
 
 /// TripletBoost — scoring par triplets co-occurrents à z-score élevé.
 ///
 /// Exploite les 83 triplets excédentaires (|z|>3 vs ~15 attendus) identifiés par
 /// l'analyse de co-occurrence. Pour chaque candidat k, on calcule combien de
-/// triplets à z-score élevé il forme avec les paires des 2 derniers tirages.
-/// Les anti-triplets (z très négatif) pénalisent les candidats.
+/// triplets à z-score élevé il forme avec les paires des 5 derniers tirages.
+/// Comptage temporellement pondéré + top-K triplets par |z|.
 pub struct TripletBoostModel {
     z_threshold: f64,
-    anti_z_threshold: f64,
     smoothing: f64,
     min_draws: usize,
     n_context_draws: usize,
-}
-
-impl TripletBoostModel {
-    pub fn new(z_threshold: f64, smoothing: f64, min_draws: usize) -> Self {
-        Self { z_threshold, anti_z_threshold: -2.0, smoothing, min_draws, n_context_draws: 2 }
-    }
+    temporal_alpha: f64,
+    max_triplets: usize,
 }
 
 impl Default for TripletBoostModel {
     fn default() -> Self {
         Self {
-            z_threshold: 1.5,
-            anti_z_threshold: -2.0,
-            smoothing: 0.35,
-            min_draws: 30,
-            n_context_draws: 2,
+            z_threshold: 2.0,
+            smoothing: 0.30,
+            min_draws: 50,
+            n_context_draws: 5,
+            temporal_alpha: 0.03,
+            max_triplets: 300,
         }
     }
 }
@@ -55,52 +51,59 @@ impl ForecastModel for TripletBoostModel {
         }
 
         let pick = pool.pick_count();
-        let n = draws.len() as f64;
-
-        let p_triplet = if size >= 3 && pick >= 3 {
-            (pick as f64 * (pick as f64 - 1.0) * (pick as f64 - 2.0))
-                / (size as f64 * (size as f64 - 1.0) * (size as f64 - 2.0))
-        } else {
+        if size < 3 || pick < 3 {
             return uniform;
-        };
+        }
 
-        let expected = n * p_triplet;
-        let std_dev = (n * p_triplet * (1.0 - p_triplet)).sqrt().max(1e-10);
+        // Probabilité théorique d'un triplet
+        let p_triplet = (pick as f64 * (pick as f64 - 1.0) * (pick as f64 - 2.0))
+            / (size as f64 * (size as f64 - 1.0) * (size as f64 - 2.0));
 
-        // Compter les co-occurrences de tous triplets
-        let mut triplet_counts: HashMap<(u8, u8, u8), u32> = HashMap::new();
-        for draw in draws {
+        // Comptage temporellement pondéré des triplets
+        let mut triplet_weighted: HashMap<(u8, u8, u8), f64> = HashMap::new();
+        let mut total_weight = 0.0f64;
+        for (t, draw) in draws.iter().enumerate() {
+            let w = (-self.temporal_alpha * t as f64).exp();
+            total_weight += w;
             let nums = pool.numbers_from(draw);
             for i in 0..nums.len() {
                 for j in (i + 1)..nums.len() {
                     for k in (j + 1)..nums.len() {
                         let mut triple = [nums[i], nums[j], nums[k]];
                         triple.sort();
-                        *triplet_counts.entry((triple[0], triple[1], triple[2])).or_insert(0) += 1;
+                        *triplet_weighted.entry((triple[0], triple[1], triple[2])).or_insert(0.0) += w;
                     }
                 }
             }
         }
 
-        // Collecter les paires des N derniers tirages (contexte élargi)
+        let expected = total_weight * p_triplet;
+        let std_dev = (total_weight * p_triplet * (1.0 - p_triplet)).sqrt().max(1e-10);
+
+        // Calculer z-scores et garder top-K par |z|
+        let mut triplet_z: Vec<((u8, u8, u8), f64)> = triplet_weighted.iter()
+            .map(|(&trip, &count)| (trip, (count - expected) / std_dev))
+            .filter(|&(_, z)| z.abs() > self.z_threshold)
+            .collect();
+        triplet_z.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
+        triplet_z.truncate(self.max_triplets);
+
+        let top_triplets: HashMap<(u8, u8, u8), f64> = triplet_z.into_iter().collect();
+
+        if top_triplets.is_empty() {
+            return uniform;
+        }
+
+        // Collecter les paires des N derniers tirages avec poids par distance
         let n_ctx = self.n_context_draws.min(draws.len());
-        let mut context_pairs: Vec<(u8, u8)> = Vec::new();
-        let mut context_nums_set: std::collections::HashSet<u8> = std::collections::HashSet::new();
+        let context_weights = [1.0, 0.8, 0.6, 0.4, 0.2];
+        let mut context_pairs: Vec<((u8, u8), f64)> = Vec::new();
         for d in 0..n_ctx {
+            let pair_weight = if d < context_weights.len() { context_weights[d] } else { 0.1 };
             let nums = pool.numbers_from(&draws[d]);
-            for &num in nums {
-                context_nums_set.insert(num);
-            }
-            // Decay: recent draws weight more
-            let weight_factor = if d == 0 { 1.0 } else { 0.5 };
             for i in 0..nums.len() {
                 for j in (i + 1)..nums.len() {
-                    // Store pairs with weight encoded by repetition
-                    if weight_factor >= 1.0 {
-                        context_pairs.push((nums[i], nums[j]));
-                    } else {
-                        context_pairs.push((nums[i], nums[j]));
-                    }
+                    context_pairs.push(((nums[i], nums[j]), pair_weight));
                 }
             }
         }
@@ -111,30 +114,15 @@ impl ForecastModel for TripletBoostModel {
             let k = (k_idx + 1) as u8;
 
             let mut score = 0.0f64;
-            for &(a, b) in &context_pairs {
+            for &((a, b), pair_weight) in &context_pairs {
                 if k == a || k == b {
                     continue;
                 }
                 let mut triple = [a, b, k];
                 triple.sort();
-                let count = triplet_counts.get(&(triple[0], triple[1], triple[2]))
-                    .copied()
-                    .unwrap_or(0) as f64;
-                let z = (count - expected) / std_dev;
-                // Positive triplets: boost
-                if z > self.z_threshold {
-                    score += z;
+                if let Some(&z) = top_triplets.get(&(triple[0], triple[1], triple[2])) {
+                    score += pair_weight * z;
                 }
-                // Anti-triplets: penalize (triplets that appear much less than expected)
-                if z < self.anti_z_threshold {
-                    score += z * 0.3; // weaker penalty than boost
-                }
-            }
-
-            // Decay for numbers from draw[1..] context
-            if n_ctx > 1 && context_nums_set.contains(&k) {
-                // Numbers seen in recent draws get a slight persistence bonus
-                // (exploits the spread compression signal: draws are "tighter" than random)
             }
 
             *score_val = score;
@@ -158,16 +146,7 @@ impl ForecastModel for TripletBoostModel {
             *p = (1.0 - self.smoothing) * *p + self.smoothing * uniform_val;
         }
 
-        // Normaliser
-        let total: f64 = probs.iter().sum();
-        if total > 0.0 {
-            for p in &mut probs {
-                *p /= total;
-            }
-        } else {
-            return uniform;
-        }
-
+        floor_only(&mut probs, PROB_FLOOR_BALLS);
         probs
     }
 
@@ -176,7 +155,14 @@ impl ForecastModel for TripletBoostModel {
             ("z_threshold".into(), self.z_threshold),
             ("smoothing".into(), self.smoothing),
             ("min_draws".into(), self.min_draws as f64),
+            ("n_context_draws".into(), self.n_context_draws as f64),
+            ("temporal_alpha".into(), self.temporal_alpha),
+            ("max_triplets".into(), self.max_triplets as f64),
         ])
+    }
+
+    fn sampling_strategy(&self) -> SamplingStrategy {
+        SamplingStrategy::Sparse { span_multiplier: 3 }
     }
 }
 
@@ -188,7 +174,7 @@ mod tests {
     #[test]
     fn test_triplet_balls_sums_to_one() {
         let model = TripletBoostModel::default();
-        let draws = make_test_draws(50);
+        let draws = make_test_draws(80);
         let dist = model.predict(&draws, Pool::Balls);
         assert!(
             validate_distribution(&dist, Pool::Balls),
@@ -201,7 +187,7 @@ mod tests {
     #[test]
     fn test_triplet_stars_uniform() {
         let model = TripletBoostModel::default();
-        let draws = make_test_draws(50);
+        let draws = make_test_draws(80);
         let dist = model.predict(&draws, Pool::Stars);
         assert!(
             validate_distribution(&dist, Pool::Stars),
@@ -219,7 +205,7 @@ mod tests {
     #[test]
     fn test_triplet_no_negative() {
         let model = TripletBoostModel::default();
-        let draws = make_test_draws(50);
+        let draws = make_test_draws(80);
         let dist = model.predict(&draws, Pool::Balls);
         for &p in &dist {
             assert!(p >= 0.0, "Negative probability: {}", p);
@@ -251,11 +237,17 @@ mod tests {
     #[test]
     fn test_triplet_deterministic() {
         let model = TripletBoostModel::default();
-        let draws = make_test_draws(50);
+        let draws = make_test_draws(80);
         let dist1 = model.predict(&draws, Pool::Balls);
         let dist2 = model.predict(&draws, Pool::Balls);
         for (a, b) in dist1.iter().zip(dist2.iter()) {
             assert!((a - b).abs() < 1e-15);
         }
+    }
+
+    #[test]
+    fn test_triplet_sparse_strategy() {
+        let model = TripletBoostModel::default();
+        assert!(matches!(model.sampling_strategy(), SamplingStrategy::Sparse { span_multiplier: 3 }));
     }
 }

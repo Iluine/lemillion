@@ -211,6 +211,115 @@ fn generate_candidate_pool(
     candidates
 }
 
+/// Sélectionne K grilles parmi des candidats en maximisant la couverture de paires.
+/// Chaque grille couvre C(5,2)=10 paires de boules + 1 paire d'étoiles.
+/// Score greedy : somme des poids (P(i)*P(j)) des NOUVELLES paires couvertes.
+pub fn select_diverse_by_pair_coverage(
+    candidates: &[lemillion_db::models::Suggestion],
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    k: usize,
+) -> Vec<lemillion_db::models::Suggestion> {
+    if candidates.is_empty() || k == 0 {
+        return Vec::new();
+    }
+
+    // Pré-calculer les poids des paires de boules (C(50,2)=1225)
+    let mut ball_pair_weight = vec![0.0f64; 1225];
+    let mut idx = 0;
+    for i in 0..50usize {
+        for j in (i + 1)..50 {
+            ball_pair_weight[idx] = ball_probs[i] * ball_probs[j];
+            idx += 1;
+        }
+    }
+
+    // Poids des paires d'étoiles (C(12,2)=66)
+    let mut star_pair_weight = vec![0.0f64; 66];
+    idx = 0;
+    for i in 0..12usize {
+        for j in (i + 1)..12 {
+            star_pair_weight[idx] = star_probs[i] * star_probs[j];
+            idx += 1;
+        }
+    }
+
+    let mut ball_pair_covered = vec![false; 1225];
+    let mut star_pair_covered = vec![false; 66];
+    let mut selected: Vec<lemillion_db::models::Suggestion> = Vec::with_capacity(k);
+    let mut used = vec![false; candidates.len()];
+
+    for _ in 0..k {
+        let mut best_idx = None;
+        let mut best_marginal = f64::NEG_INFINITY;
+
+        for (ci, cand) in candidates.iter().enumerate() {
+            if used[ci] {
+                continue;
+            }
+
+            let mut marginal = 0.0f64;
+
+            // Ball pairs (10 pairs per grid)
+            for bi in 0..5 {
+                for bj in (bi + 1)..5 {
+                    let a = (cand.balls[bi] - 1) as usize;
+                    let b = (cand.balls[bj] - 1) as usize;
+                    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                    let pidx = lo * (99 - lo) / 2 + hi - lo - 1;
+                    if !ball_pair_covered[pidx] {
+                        marginal += ball_pair_weight[pidx];
+                    }
+                }
+            }
+
+            // Star pair (1 pair per grid)
+            let sa = (cand.stars[0] - 1) as usize;
+            let sb = (cand.stars[1] - 1) as usize;
+            let (slo, shi) = if sa < sb { (sa, sb) } else { (sb, sa) };
+            let spidx = slo * (23 - slo) / 2 + shi - slo - 1;
+            if !star_pair_covered[spidx] {
+                marginal += star_pair_weight[spidx] * 5.0; // Étoiles plus rares → plus de poids
+            }
+
+            // Aussi intégrer le score bayésien comme tie-breaker
+            let combined = marginal + cand.score * 1e-6;
+
+            if combined > best_marginal {
+                best_marginal = combined;
+                best_idx = Some(ci);
+            }
+        }
+
+        if let Some(ci) = best_idx {
+            used[ci] = true;
+            let cand = &candidates[ci];
+
+            // Mettre à jour la couverture
+            for bi in 0..5 {
+                for bj in (bi + 1)..5 {
+                    let a = (cand.balls[bi] - 1) as usize;
+                    let b = (cand.balls[bj] - 1) as usize;
+                    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+                    let pidx = lo * (99 - lo) / 2 + hi - lo - 1;
+                    ball_pair_covered[pidx] = true;
+                }
+            }
+            let sa = (cand.stars[0] - 1) as usize;
+            let sb = (cand.stars[1] - 1) as usize;
+            let (slo, shi) = if sa < sb { (sa, sb) } else { (sb, sa) };
+            let spidx = slo * (23 - slo) / 2 + shi - slo - 1;
+            star_pair_covered[spidx] = true;
+
+            selected.push(cand.clone());
+        } else {
+            break;
+        }
+    }
+
+    selected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

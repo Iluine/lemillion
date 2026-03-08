@@ -159,20 +159,33 @@ impl ForecastModel for TransferEntropyModel {
             .map(|&s| (s, presence_series(draws, Pool::Balls, s)))
             .collect();
 
-        // 3. Calculer TE pour chaque paire source→target
+        // 3. Précalculer toutes les séries cibles en un seul passage
+        let (target_pool, target_size) = match pool {
+            Pool::Balls => (Pool::Balls, 50usize),
+            Pool::Stars => (Pool::Stars, 12usize),
+        };
+        let mut all_target_series: Vec<Vec<bool>> = vec![Vec::with_capacity(draws.len()); target_size];
+        for d in draws.iter().rev() {
+            let present = target_pool.numbers_from(d);
+            for num in 0..target_size {
+                all_target_series[num].push(present.contains(&((num + 1) as u8)));
+            }
+        }
+
+        // 4. Calculer TE pour chaque paire source→target
         let mut significant_pairs: Vec<CausalPair> = Vec::new();
 
         match pool {
             Pool::Balls => {
                 // Ball → Ball
                 for target_num in 1..=50u8 {
-                    let target_series = presence_series(draws, Pool::Balls, target_num);
+                    let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_num, ref src_series) in &source_series {
                         if source_num == target_num {
                             continue;
                         }
-                        let te = transfer_entropy(src_series, &target_series);
-                        let baseline = baseline_te(src_series, &target_series, source_num as u64 * 100 + target_num as u64);
+                        let te = transfer_entropy(src_series, target_series);
+                        let baseline = baseline_te(src_series, target_series, source_num as u64 * 100 + target_num as u64);
                         if te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
                                 source: source_num,
@@ -187,10 +200,10 @@ impl ForecastModel for TransferEntropyModel {
             Pool::Stars => {
                 // Ball → Star (cross-pool)
                 for target_num in 1..=12u8 {
-                    let target_series = presence_series(draws, Pool::Stars, target_num);
+                    let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_num, ref src_series) in &source_series {
-                        let te = transfer_entropy(src_series, &target_series);
-                        let baseline = baseline_te(src_series, &target_series, source_num as u64 * 100 + target_num as u64);
+                        let te = transfer_entropy(src_series, target_series);
+                        let baseline = baseline_te(src_series, target_series, source_num as u64 * 100 + target_num as u64);
                         if te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
                                 source: source_num,

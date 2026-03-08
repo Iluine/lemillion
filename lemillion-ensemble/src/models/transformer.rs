@@ -58,7 +58,7 @@ impl Default for TransformerModel {
             n_heads: 4,
             context_len: 50,
             ridge_lambda: 1e-3,
-            smoothing: 0.5,
+            smoothing: 0.25,
             seed: 42,
         }
     }
@@ -116,13 +116,20 @@ fn encode_draw(numbers: &[u8], pool_size: usize) -> [f64; 5] {
 
     let odd_ratio = numbers.iter().filter(|&&x| x % 2 == 1).count() as f64 / n;
 
-    let centroid = sum / n / max_val;
-
     let mean = sum / n;
     let variance = numbers.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / n;
+
+    // Kurtosis (replaces centroid which was identical to sum_norm)
+    let kurtosis = if variance > 1e-10 {
+        let m4 = numbers.iter().map(|&x| (x as f64 - mean).powi(4)).sum::<f64>() / n;
+        (m4 / (variance * variance)).min(10.0) / 10.0 // normalized to [0, 1]
+    } else {
+        0.0
+    };
+
     let var_norm = variance / (max_val * max_val);
 
-    [sum_norm, spread_norm, odd_ratio, centroid, var_norm]
+    [sum_norm, spread_norm, odd_ratio, kurtosis, var_norm]
 }
 
 const INPUT_DIM: usize = 5;
@@ -184,6 +191,9 @@ impl AttentionLayer {
 
         let mut output = Array2::<f64>::zeros((seq_len, d_model));
 
+        // Pre-allocate row buffer for softmax (avoid per-row allocation)
+        let mut row_buf = vec![0.0f64; seq_len];
+
         // Multi-head attention
         for h in 0..n_heads {
             let start = h * d_k;
@@ -205,13 +215,11 @@ impl AttentionLayer {
                 }
             }
 
-            // Softmax par ligne
+            // Softmax par ligne (using pre-allocated buffer)
             for i in 0..seq_len {
-                let mut row: Vec<f64> = (0..seq_len).map(|j| attn[[i, j]]).collect();
-                softmax_row(&mut row);
-                for j in 0..seq_len {
-                    attn[[i, j]] = row[j];
-                }
+                for j in 0..seq_len { row_buf[j] = attn[[i, j]]; }
+                softmax_row(&mut row_buf);
+                for j in 0..seq_len { attn[[i, j]] = row_buf[j]; }
             }
 
             // Weighted sum: attn @ V_h
@@ -309,16 +317,17 @@ impl ForecastModel for TransformerModel {
             }
 
             // Forward pass à travers les couches d'attention
+            let mut ln_buf = vec![0.0f64; self.d_model];
             for layer in &layers {
                 let attn_out = layer.forward(&x, self.n_heads);
                 // Résidu + layer norm
                 for t in 0..self.context_len {
-                    let mut row: Vec<f64> = (0..self.d_model)
-                        .map(|d| x[[t, d]] + attn_out[[t, d]])
-                        .collect();
-                    layer_norm(&mut row);
                     for d in 0..self.d_model {
-                        x[[t, d]] = row[d];
+                        ln_buf[d] = x[[t, d]] + attn_out[[t, d]];
+                    }
+                    layer_norm(&mut ln_buf);
+                    for d in 0..self.d_model {
+                        x[[t, d]] = ln_buf[d];
                     }
                 }
             }
@@ -372,15 +381,16 @@ impl ForecastModel for TransformerModel {
         }
 
         // Forward pass
+        let mut ln_buf = vec![0.0f64; self.d_model];
         for layer in &layers {
             let attn_out = layer.forward(&x, self.n_heads);
             for t in 0..ctx_len {
-                let mut row: Vec<f64> = (0..self.d_model)
-                    .map(|d| x[[t, d]] + attn_out[[t, d]])
-                    .collect();
-                layer_norm(&mut row);
                 for d in 0..self.d_model {
-                    x[[t, d]] = row[d];
+                    ln_buf[d] = x[[t, d]] + attn_out[[t, d]];
+                }
+                layer_norm(&mut ln_buf);
+                for d in 0..self.d_model {
+                    x[[t, d]] = ln_buf[d];
                 }
             }
         }

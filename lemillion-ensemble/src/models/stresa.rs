@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use lemillion_db::models::{Draw, Pool};
 
+use super::mod4::modulus;
 use super::{ForecastModel, SamplingStrategy};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11,8 +12,8 @@ use super::{ForecastModel, SamplingStrategy};
 /// Paramètres structurels pour les boules (7 params).
 ///
 /// Score(k) = row_bias[(k-1)/10] * persistence_factor(decade)
-/// blade_bias supprimé (redondant avec mod4_transition_predict_v2).
-/// persistence basée sur decade-overlap (orthogonal à mod4).
+/// blade_bias supprimé (redondant avec modular_transition_predict).
+/// persistence basée sur decade-overlap (orthogonal au modèle modulaire).
 #[derive(Debug, Clone)]
 struct StresaStructuralParams {
     /// Biais de rangée dans le rack (5 rangées = décades 1-10, ..., 41-50).
@@ -42,7 +43,7 @@ impl StresaStructuralParams {
 
         let mut score = self.row_bias[row];
 
-        // Persistence basée sur decade (row-overlap), orthogonal à mod4
+        // Persistence basée sur decade (row-overlap), orthogonal au modèle modulaire
         if let Some(prev) = prev_draw {
             let row_overlap = prev.iter()
                 .filter(|&&b| ((b - 1) as usize / 10) == row)
@@ -258,7 +259,7 @@ fn pseudo_normal(state: &mut u64) -> f64 {
 /// StresaSGD — simulateur physique Bayésien avec optimisation SGD.
 ///
 /// v3 : 7 paramètres structurels (row_bias[5], persistence, temperature).
-/// blade_bias supprimé (redondant avec mod4_transition_v2).
+/// blade_bias supprimé (redondant avec modular_transition_predict).
 /// Gradients analytiques. Multi-epoch training.
 pub struct StresaSgdModel {
     learning_rate: f64,
@@ -266,16 +267,16 @@ pub struct StresaSgdModel {
     smoothing: f64,
     star_smoothing: f64,
     n_epochs: usize,
-    mod4_weight: f64,
+    modular_weight: f64,
     ewma_weight: f64,
     spatial_sigma: f64,
 }
 
 impl StresaSgdModel {
-    pub fn new(learning_rate: f64, regularization: f64, smoothing: f64, mod4_weight: f64,
+    pub fn new(learning_rate: f64, regularization: f64, smoothing: f64, modular_weight: f64,
                ewma_weight: f64, spatial_sigma: f64) -> Self {
         Self { learning_rate, regularization, smoothing, star_smoothing: 0.18,
-               n_epochs: 5, mod4_weight, ewma_weight, spatial_sigma }
+               n_epochs: 5, modular_weight, ewma_weight, spatial_sigma }
     }
 }
 
@@ -287,7 +288,7 @@ impl Default for StresaSgdModel {
             smoothing: 0.30,
             star_smoothing: 0.18,
             n_epochs: 10,
-            mod4_weight: 0.85,
+            modular_weight: 0.50,
             ewma_weight: 0.0,
             spatial_sigma: 0.0,
         }
@@ -449,16 +450,16 @@ impl ForecastModel for StresaSgdModel {
 
                 let structural = params.ball_distribution(Some(&draws[0].balls));
 
-                // 2. Mod4 transition (second-order)
-                let mod4 = mod4_transition_predict_v2(draws, pool);
+                // 2. Modular transition (mod-8 for balls, second-order)
+                let modular = modular_transition_predict(draws, pool);
 
                 // 3. EWMA frequency
                 let ewma = ewma_ball_predict(draws, 0.3);
 
                 // 4. Blend 3 channels
-                let w_struct = (1.0 - self.mod4_weight - self.ewma_weight).max(0.0);
+                let w_struct = (1.0 - self.modular_weight - self.ewma_weight).max(0.0);
                 let mut dist: Vec<f64> = (0..size)
-                    .map(|i| w_struct * structural[i] + self.mod4_weight * mod4[i] + self.ewma_weight * ewma[i])
+                    .map(|i| w_struct * structural[i] + self.modular_weight * modular[i] + self.ewma_weight * ewma[i])
                     .collect();
 
                 // 5. Spatial smoothing
@@ -496,7 +497,7 @@ impl ForecastModel for StresaSgdModel {
             ("smoothing".into(), self.smoothing),
             ("star_smoothing".into(), self.star_smoothing),
             ("n_epochs".into(), self.n_epochs as f64),
-            ("mod4_weight".into(), self.mod4_weight),
+            ("modular_weight".into(), self.modular_weight),
             ("ewma_weight".into(), self.ewma_weight),
             ("spatial_sigma".into(), self.spatial_sigma),
         ])
@@ -514,7 +515,7 @@ impl ForecastModel for StresaSgdModel {
 /// StresaSMC — simulateur physique Bayésien avec filtre particulaire.
 ///
 /// v3 : particules sur StresaStructuralParams (7D) au lieu de 9D.
-/// blade_bias supprimé (redondant avec mod4_transition_v2).
+/// blade_bias supprimé (redondant avec modular_transition_predict).
 /// 500 particules en 7D = couverture correcte.
 /// Jitter adaptatif décroissant avec sqrt(n_observations).
 pub struct StresaSmcModel {
@@ -523,7 +524,7 @@ pub struct StresaSmcModel {
     smoothing: f64,
     star_smoothing: f64,
     seed: u64,
-    mod4_weight: f64,
+    modular_weight: f64,
     ewma_weight: f64,
     spatial_sigma: f64,
     warmup: usize,
@@ -532,7 +533,7 @@ pub struct StresaSmcModel {
 impl StresaSmcModel {
     pub fn new(n_particles: usize, jitter_noise: f64, smoothing: f64, seed: u64) -> Self {
         Self { n_particles, jitter_noise, smoothing, star_smoothing: 0.18,
-               seed, mod4_weight: 0.70, ewma_weight: 0.0, spatial_sigma: 0.0, warmup: 0 }
+               seed, modular_weight: 0.70, ewma_weight: 0.0, spatial_sigma: 0.0, warmup: 0 }
     }
 }
 
@@ -544,7 +545,7 @@ impl Default for StresaSmcModel {
             smoothing: 0.20,
             star_smoothing: 0.18,
             seed: 42,
-            mod4_weight: 0.85,
+            modular_weight: 0.50,
             ewma_weight: 0.0,
             spatial_sigma: 0.0,
             warmup: 30,
@@ -768,7 +769,7 @@ impl ForecastModel for StresaSmcModel {
             return star_dist;
         }
 
-        // Balls path: particle filter + Mod4 + EWMA blend
+        // Balls path: particle filter + modular transition + EWMA blend
         let mut pf = ParticleFilter::new(self.n_particles, self.seed, self.jitter_noise, self.warmup);
 
         let n = draws.len();
@@ -778,12 +779,12 @@ impl ForecastModel for StresaSmcModel {
         }
 
         let structural = pf.predict_balls(&draws[0]);
-        let mod4 = mod4_transition_predict_v2(draws, Pool::Balls);
+        let modular = modular_transition_predict_v1(draws, Pool::Balls);
         let ewma = ewma_ball_predict(draws, 0.3);
 
-        let w_struct = (1.0 - self.mod4_weight - self.ewma_weight).max(0.0);
+        let w_struct = (1.0 - self.modular_weight - self.ewma_weight).max(0.0);
         let mut dist: Vec<f64> = (0..size)
-            .map(|i| w_struct * structural[i] + self.mod4_weight * mod4[i] + self.ewma_weight * ewma[i])
+            .map(|i| w_struct * structural[i] + self.modular_weight * modular[i] + self.ewma_weight * ewma[i])
             .collect();
 
         // Spatial smoothing
@@ -805,7 +806,7 @@ impl ForecastModel for StresaSmcModel {
             ("jitter_noise".into(), self.jitter_noise),
             ("smoothing".into(), self.smoothing),
             ("seed".into(), self.seed as f64),
-            ("mod4_weight".into(), self.mod4_weight),
+            ("modular_weight".into(), self.modular_weight),
             ("star_smoothing".into(), self.star_smoothing),
             ("ewma_weight".into(), self.ewma_weight),
             ("spatial_sigma".into(), self.spatial_sigma),
@@ -838,13 +839,13 @@ struct RqaMetrics {
 ///
 /// Deux canaux de prédiction avec poids fixes :
 /// 1. Nadaraya-Watson en espace des phases (bandwidth adaptatif via k_pilot)
-/// 2. Transition mod-4 (balls uniquement — signal prouvé par Mod4Trans)
+/// 2. Transition modulaire (mod-8 pour boules, mod-4 pour étoiles)
 ///
 /// Stars: EWMA fréquentiel (même approche que Physics, alpha=0.05).
 /// Embedding fixe tau=1, dim=2 pour éviter la malédiction de la dimensionnalité.
 pub struct StresaChaosModel {
     k_pilot: usize,
-    mod4_weight: f64,
+    modular_weight: f64,
     smoothing: f64,
     star_smoothing: f64,
     ewma_weight: f64,
@@ -855,13 +856,13 @@ pub struct StresaChaosModel {
 impl StresaChaosModel {
     pub fn new(
         k_pilot: usize,
-        mod4_weight: f64,
+        modular_weight: f64,
         smoothing: f64,
         ewma_weight: f64,
         spatial_sigma: f64,
         temporal_decay: f64,
     ) -> Self {
-        Self { k_pilot, mod4_weight, smoothing, star_smoothing: 0.18, ewma_weight, spatial_sigma, temporal_decay }
+        Self { k_pilot, modular_weight, smoothing, star_smoothing: 0.18, ewma_weight, spatial_sigma, temporal_decay }
     }
 }
 
@@ -869,7 +870,7 @@ impl Default for StresaChaosModel {
     fn default() -> Self {
         Self {
             k_pilot: 20,
-            mod4_weight: 0.90,
+            modular_weight: 0.50,
             smoothing: 0.25,
             star_smoothing: 0.18,
             ewma_weight: 0.0,
@@ -911,24 +912,25 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
 /// Encode a balls draw as a 3D state vector.
 ///
 /// 3 features physiquement pertinentes :
-/// - mod4_momentum : cosine inter-tirages du vecteur mod-4 (LE signal prouvé)
+/// - mod8_momentum : cosine inter-tirages du vecteur mod-8 (8 barres extérieures Stresa)
 /// - sum_norm : somme normalisée (corrèle avec la physique machine)
 /// - row_entropy : entropie des décades (diversité spatiale)
 fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
     let balls = &draw.balls;
     let sum: f64 = balls.iter().map(|&b| b as f64).sum();
 
-    // Mod-4 momentum (cosine change from previous)
-    let mut mod4 = [0.0f64; 4];
+    // Mod-8 momentum (cosine change from previous — 8 external bars on Stresa)
+    let modulus_balls = modulus(Pool::Balls); // 8
+    let mut mod_counts = vec![0.0f64; modulus_balls];
     for &b in balls {
-        mod4[((b - 1) % 4) as usize] += 1.0;
+        mod_counts[((b - 1) as usize) % modulus_balls] += 1.0;
     }
-    let mod4_momentum = if let Some(prev) = prev {
-        let mut prev_mod4 = [0.0f64; 4];
+    let mod_momentum = if let Some(prev) = prev {
+        let mut prev_mod_counts = vec![0.0f64; modulus_balls];
         for &b in &prev.balls {
-            prev_mod4[((b - 1) % 4) as usize] += 1.0;
+            prev_mod_counts[((b - 1) as usize) % modulus_balls] += 1.0;
         }
-        cosine_similarity(&mod4, &prev_mod4)
+        cosine_similarity(&mod_counts, &prev_mod_counts)
     } else {
         0.5
     };
@@ -941,7 +943,7 @@ fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
     let row_entropy = shannon_entropy(&rows);
 
     vec![
-        mod4_momentum,            // [0] blade correlation with prev
+        mod_momentum,             // [0] bar correlation with prev (mod-8)
         sum / 250.0,              // [1] sum normalized
         row_entropy / 1.609,      // [2] row spread (normalized by ln(5))
     ]
@@ -1355,9 +1357,11 @@ fn detect_upo(embedded: &[Vec<f64>], max_period: usize) -> Vec<(usize, f64)> {
     scores
 }
 
-/// Mod-4 transition prediction (reused from Mod4Trans logic).
-fn mod4_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
+/// First-order modular transition prediction.
+/// Uses mod-8 for balls (8 external bars on Stresa) and mod-4 for stars (4 blades on Paquerette).
+fn modular_transition_predict_v1(draws: &[Draw], pool: Pool) -> Vec<f64> {
     let size = pool.size();
+    let m = modulus(pool);
     let uniform = vec![1.0 / size as f64; size];
 
     if draws.len() < 10 {
@@ -1369,19 +1373,19 @@ fn mod4_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
         .collect();
 
     // Transition matrix T[i][j] with Laplace smoothing
-    let mut transition = [[1.0f64; 4]; 4];
+    let mut transition = vec![vec![1.0f64; m]; m];
     for t in 0..draws.len() - 1 {
-        let mut current_mod4 = [0.0f64; 4];
-        let mut next_mod4 = [0.0f64; 4];
+        let mut current_mod = vec![0.0f64; m];
+        let mut next_mod = vec![0.0f64; m];
         for &n in &numbers_list[t] {
-            current_mod4[((n - 1) % 4) as usize] += 1.0;
+            current_mod[((n - 1) as usize) % m] += 1.0;
         }
         for &n in &numbers_list[t + 1] {
-            next_mod4[((n - 1) % 4) as usize] += 1.0;
+            next_mod[((n - 1) as usize) % m] += 1.0;
         }
-        for (i, &c_i) in current_mod4.iter().enumerate() {
+        for (i, &c_i) in current_mod.iter().enumerate() {
             if c_i > 0.0 {
-                for (j, &n_j) in next_mod4.iter().enumerate() {
+                for (j, &n_j) in next_mod.iter().enumerate() {
                     transition[i][j] += c_i * n_j;
                 }
             }
@@ -1397,22 +1401,23 @@ fn mod4_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
     }
 
     // Predict from last draw
-    let mut current_mod4 = [0.0f64; 4];
+    let mut current_mod = vec![0.0f64; m];
     for &n in &numbers_list[0] {
-        current_mod4[((n - 1) % 4) as usize] += 1.0;
+        current_mod[((n - 1) as usize) % m] += 1.0;
     }
-    let total_current: f64 = current_mod4.iter().sum();
+    let total_current: f64 = current_mod.iter().sum();
 
-    let mut p_next = [0.0f64; 4];
+    let mut p_next = vec![0.0f64; m];
     if total_current > 0.0 {
-        for (i, &c) in current_mod4.iter().enumerate() {
+        for (i, &c) in current_mod.iter().enumerate() {
             let w = c / total_current;
             for (j, p) in p_next.iter_mut().enumerate() {
                 *p += w * transition[i][j];
             }
         }
     } else {
-        p_next = [0.25; 4];
+        let uniform_m = 1.0 / m as f64;
+        for p in &mut p_next { *p = uniform_m; }
     }
 
     // Intra-class redistribution by historical frequency
@@ -1426,14 +1431,14 @@ fn mod4_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
         }
     }
 
-    let mut class_freq_sum = [0.0f64; 4];
+    let mut class_freq_sum = vec![0.0f64; m];
     for (k, &f) in freq.iter().enumerate() {
-        class_freq_sum[k % 4] += f;
+        class_freq_sum[k % m] += f;
     }
 
     let mut prob = vec![0.0f64; size];
     for (k, p) in prob.iter_mut().enumerate() {
-        let r = k % 4;
+        let r = k % m;
         if class_freq_sum[r] > 0.0 {
             *p = p_next[r] * freq[k] / class_freq_sum[r];
         }
@@ -1450,48 +1455,50 @@ fn mod4_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
     prob
 }
 
-/// Second-order mod-4 transition prediction.
+/// Second-order modular transition prediction.
+/// Uses mod-8 for balls (8 external bars on Stresa) and mod-4 for stars (4 blades on Paquerette).
 /// Conditions on the 2 last draws instead of 1 for higher-order Markov dependency.
 /// Falls back to first-order if fewer than 30 draws available.
-fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
+fn modular_transition_predict(draws: &[Draw], pool: Pool) -> Vec<f64> {
     let size = pool.size();
+    let m = modulus(pool);
     let uniform = vec![1.0 / size as f64; size];
 
     // Fallback to first-order if insufficient data
     if draws.len() < 30 {
-        return mod4_transition_predict(draws, pool);
+        return modular_transition_predict_v1(draws, pool);
     }
 
     let numbers_list: Vec<Vec<u8>> = draws.iter()
         .map(|d| pool.numbers_from(d).to_vec())
         .collect();
 
-    // 3D transition table: T[prev_blade][curr_blade][next_blade]
+    // 3D transition table: T[prev_class][curr_class][next_class]
     // With Laplace smoothing (+1)
-    let mut transition = [[[1.0f64; 4]; 4]; 4];
+    let mut transition = vec![vec![vec![1.0f64; m]; m]; m];
 
     for t in 0..draws.len() - 2 {
         // t = current (most recent), t+1 = previous, t+2 = before that
-        let mut curr_mod4 = [0.0f64; 4];
-        let mut prev_mod4 = [0.0f64; 4];
-        let mut next_mod4 = [0.0f64; 4];
+        let mut curr_mod = vec![0.0f64; m];
+        let mut prev_mod = vec![0.0f64; m];
+        let mut next_mod = vec![0.0f64; m];
 
         for &n in &numbers_list[t] {
-            next_mod4[((n - 1) % 4) as usize] += 1.0;
+            next_mod[((n - 1) as usize) % m] += 1.0;
         }
         for &n in &numbers_list[t + 1] {
-            curr_mod4[((n - 1) % 4) as usize] += 1.0;
+            curr_mod[((n - 1) as usize) % m] += 1.0;
         }
         for &n in &numbers_list[t + 2] {
-            prev_mod4[((n - 1) % 4) as usize] += 1.0;
+            prev_mod[((n - 1) as usize) % m] += 1.0;
         }
 
         // Weight by counts in each class
-        for (i, &p_i) in prev_mod4.iter().enumerate() {
+        for (i, &p_i) in prev_mod.iter().enumerate() {
             if p_i > 0.0 {
-                for (j, &c_j) in curr_mod4.iter().enumerate() {
+                for (j, &c_j) in curr_mod.iter().enumerate() {
                     if c_j > 0.0 {
-                        for (k, &n_k) in next_mod4.iter().enumerate() {
+                        for (k, &n_k) in next_mod.iter().enumerate() {
                             transition[i][j][k] += p_i * c_j * n_k;
                         }
                     }
@@ -1501,11 +1508,11 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
     }
 
     // Normalize: for each (i,j), normalize over k
-    for i in 0..4 {
-        for j in 0..4 {
+    for i in 0..m {
+        for j in 0..m {
             let total: f64 = transition[i][j].iter().sum();
             if total > 0.0 {
-                for k in 0..4 {
+                for k in 0..m {
                     transition[i][j][k] /= total;
                 }
             }
@@ -1513,22 +1520,22 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
     }
 
     // Predict: condition on draws[1] (prev) and draws[0] (current)
-    let mut prev_mod4 = [0.0f64; 4];
-    let mut curr_mod4 = [0.0f64; 4];
+    let mut prev_mod = vec![0.0f64; m];
+    let mut curr_mod = vec![0.0f64; m];
     for &n in &numbers_list[1] {
-        prev_mod4[((n - 1) % 4) as usize] += 1.0;
+        prev_mod[((n - 1) as usize) % m] += 1.0;
     }
     for &n in &numbers_list[0] {
-        curr_mod4[((n - 1) % 4) as usize] += 1.0;
+        curr_mod[((n - 1) as usize) % m] += 1.0;
     }
 
-    let total_prev: f64 = prev_mod4.iter().sum();
-    let total_curr: f64 = curr_mod4.iter().sum();
+    let total_prev: f64 = prev_mod.iter().sum();
+    let total_curr: f64 = curr_mod.iter().sum();
 
-    let mut p_next = [0.0f64; 4];
+    let mut p_next = vec![0.0f64; m];
     if total_prev > 0.0 && total_curr > 0.0 {
-        for (i, &p_i) in prev_mod4.iter().enumerate() {
-            for (j, &c_j) in curr_mod4.iter().enumerate() {
+        for (i, &p_i) in prev_mod.iter().enumerate() {
+            for (j, &c_j) in curr_mod.iter().enumerate() {
                 let w = (p_i / total_prev) * (c_j / total_curr);
                 for (k, &t_k) in transition[i][j].iter().enumerate() {
                     p_next[k] += w * t_k;
@@ -1536,7 +1543,8 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
             }
         }
     } else {
-        p_next = [0.25; 4];
+        let uniform_m = 1.0 / m as f64;
+        for p in &mut p_next { *p = uniform_m; }
     }
 
     // Intra-class redistribution by historical frequency (same as v1)
@@ -1548,14 +1556,14 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
         }
     }
 
-    let mut class_freq_sum = [0.0f64; 4];
+    let mut class_freq_sum = vec![0.0f64; m];
     for (k, &f) in freq.iter().enumerate() {
-        class_freq_sum[k % 4] += f;
+        class_freq_sum[k % m] += f;
     }
 
     let mut prob = vec![0.0f64; size];
     for (k, p) in prob.iter_mut().enumerate() {
-        let r = k % 4;
+        let r = k % m;
         if class_freq_sum[r] > 0.0 {
             *p = p_next[r] * freq[k] / class_freq_sum[r];
         }
@@ -1570,7 +1578,9 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
     prob
 }
 
-/// Mod4 transition prediction v3 — temporal weighting improvements over v2.
+/// Modular transition prediction v3 — temporal weighting improvements over v2.
+///
+/// Uses mod-8 for balls (8 external bars on Stresa) and mod-4 for stars (4 blades on Paquerette).
 ///
 /// Two improvements:
 /// 1. EWMA intra-class redistribution: frequency weights decay exponentially
@@ -1583,45 +1593,46 @@ fn mod4_transition_predict_v2(draws: &[Draw], pool: Pool) -> Vec<f64> {
 /// NOTE: Benchmarked in Phase 4 — both C (EWMA freq) and D (transition decay)
 /// regress significantly vs v2 flat frequency. Kept for reference/testing only.
 #[allow(dead_code)]
-fn mod4_transition_predict_v3(
+fn modular_transition_predict_v3(
     draws: &[Draw],
     pool: Pool,
     alpha_freq: f64,
     transition_decay: f64,
 ) -> Vec<f64> {
     let size = pool.size();
+    let m = modulus(pool);
     let uniform = vec![1.0 / size as f64; size];
 
     // Fallback to v2 (which itself falls back to v1) if insufficient data
     if draws.len() < 30 {
-        return mod4_transition_predict_v2(draws, pool);
+        return modular_transition_predict(draws, pool);
     }
 
     let numbers_list: Vec<Vec<u8>> = draws.iter()
         .map(|d| pool.numbers_from(d).to_vec())
         .collect();
 
-    // 3D transition table: T[prev_blade][curr_blade][next_blade]
+    // 3D transition table: T[prev_class][curr_class][next_class]
     // With Laplace smoothing (+1)
-    let mut transition = [[[1.0f64; 4]; 4]; 4];
+    let mut transition = vec![vec![vec![1.0f64; m]; m]; m];
 
     for t in 0..draws.len() - 2 {
         // t = current (most recent), t+1 = previous, t+2 = before that
-        let mut curr_mod4 = [0.0f64; 4];
-        let mut prev_mod4 = [0.0f64; 4];
-        let mut next_mod4 = [0.0f64; 4];
+        let mut curr_mod = vec![0.0f64; m];
+        let mut prev_mod = vec![0.0f64; m];
+        let mut next_mod = vec![0.0f64; m];
 
         for &n in &numbers_list[t] {
-            next_mod4[((n - 1) % 4) as usize] += 1.0;
+            next_mod[((n - 1) as usize) % m] += 1.0;
         }
         for &n in &numbers_list[t + 1] {
-            curr_mod4[((n - 1) % 4) as usize] += 1.0;
+            curr_mod[((n - 1) as usize) % m] += 1.0;
         }
         for &n in &numbers_list[t + 2] {
-            prev_mod4[((n - 1) % 4) as usize] += 1.0;
+            prev_mod[((n - 1) as usize) % m] += 1.0;
         }
 
-        // Temporal weighting: t=0 is most recent → weight=1
+        // Temporal weighting: t=0 is most recent -> weight=1
         let weight = if transition_decay > 0.0 {
             (-transition_decay * t as f64).exp()
         } else {
@@ -1629,11 +1640,11 @@ fn mod4_transition_predict_v3(
         };
 
         // Weight by counts in each class
-        for (i, &p_i) in prev_mod4.iter().enumerate() {
+        for (i, &p_i) in prev_mod.iter().enumerate() {
             if p_i > 0.0 {
-                for (j, &c_j) in curr_mod4.iter().enumerate() {
+                for (j, &c_j) in curr_mod.iter().enumerate() {
                     if c_j > 0.0 {
-                        for (k, &n_k) in next_mod4.iter().enumerate() {
+                        for (k, &n_k) in next_mod.iter().enumerate() {
                             transition[i][j][k] += weight * p_i * c_j * n_k;
                         }
                     }
@@ -1643,11 +1654,11 @@ fn mod4_transition_predict_v3(
     }
 
     // Normalize: for each (i,j), normalize over k
-    for i in 0..4 {
-        for j in 0..4 {
+    for i in 0..m {
+        for j in 0..m {
             let total: f64 = transition[i][j].iter().sum();
             if total > 0.0 {
-                for k in 0..4 {
+                for k in 0..m {
                     transition[i][j][k] /= total;
                 }
             }
@@ -1655,22 +1666,22 @@ fn mod4_transition_predict_v3(
     }
 
     // Predict: condition on draws[1] (prev) and draws[0] (current)
-    let mut prev_mod4 = [0.0f64; 4];
-    let mut curr_mod4 = [0.0f64; 4];
+    let mut prev_mod = vec![0.0f64; m];
+    let mut curr_mod = vec![0.0f64; m];
     for &n in &numbers_list[1] {
-        prev_mod4[((n - 1) % 4) as usize] += 1.0;
+        prev_mod[((n - 1) as usize) % m] += 1.0;
     }
     for &n in &numbers_list[0] {
-        curr_mod4[((n - 1) % 4) as usize] += 1.0;
+        curr_mod[((n - 1) as usize) % m] += 1.0;
     }
 
-    let total_prev: f64 = prev_mod4.iter().sum();
-    let total_curr: f64 = curr_mod4.iter().sum();
+    let total_prev: f64 = prev_mod.iter().sum();
+    let total_curr: f64 = curr_mod.iter().sum();
 
-    let mut p_next = [0.0f64; 4];
+    let mut p_next = vec![0.0f64; m];
     if total_prev > 0.0 && total_curr > 0.0 {
-        for (i, &p_i) in prev_mod4.iter().enumerate() {
-            for (j, &c_j) in curr_mod4.iter().enumerate() {
+        for (i, &p_i) in prev_mod.iter().enumerate() {
+            for (j, &c_j) in curr_mod.iter().enumerate() {
                 let w = (p_i / total_prev) * (c_j / total_curr);
                 for (k, &t_k) in transition[i][j].iter().enumerate() {
                     p_next[k] += w * t_k;
@@ -1678,7 +1689,8 @@ fn mod4_transition_predict_v3(
             }
         }
     } else {
-        p_next = [0.25; 4];
+        let uniform_m = 1.0 / m as f64;
+        for p in &mut p_next { *p = uniform_m; }
     }
 
     // Intra-class redistribution with EWMA frequency (improvement C)
@@ -1696,14 +1708,14 @@ fn mod4_transition_predict_v3(
     // Normalize freq
     normalize(&mut freq);
 
-    let mut class_freq_sum = [0.0f64; 4];
+    let mut class_freq_sum = vec![0.0f64; m];
     for (k, &f) in freq.iter().enumerate() {
-        class_freq_sum[k % 4] += f;
+        class_freq_sum[k % m] += f;
     }
 
     let mut prob = vec![0.0f64; size];
     for (k, p) in prob.iter_mut().enumerate() {
-        let r = k % 4;
+        let r = k % m;
         if class_freq_sum[r] > 0.0 {
             *p = p_next[r] * freq[k] / class_freq_sum[r];
         }
@@ -1980,7 +1992,7 @@ impl ForecastModel for StresaChaosModel {
             return ewma_star_predict(draws, self.star_smoothing);
         }
 
-        // Balls path: NW + Mod4 + EWMA fusion
+        // Balls path: NW + modular transition + EWMA fusion
         // 1. Encode all draws as state vectors (chronological, oldest first)
         let states = encode_all_states(draws, pool);
 
@@ -2001,13 +2013,13 @@ impl ForecastModel for StresaChaosModel {
             self.k_pilot, offset, self.temporal_decay,
         );
 
-        // 5. Mod4 + EWMA
-        let pred_mod4 = mod4_transition_predict_v2(draws, pool);
+        // 5. Modular transition (mod-8 for balls) + EWMA
+        let pred_modular = modular_transition_predict(draws, pool);
         let pred_ewma = ewma_ball_predict(draws, 0.3);
 
-        let w_nw = (1.0 - self.mod4_weight - self.ewma_weight).max(0.0);
+        let w_nw = (1.0 - self.modular_weight - self.ewma_weight).max(0.0);
         let mut dist: Vec<f64> = (0..size)
-            .map(|i| w_nw * pred_nw[i] + self.mod4_weight * pred_mod4[i] + self.ewma_weight * pred_ewma[i])
+            .map(|i| w_nw * pred_nw[i] + self.modular_weight * pred_modular[i] + self.ewma_weight * pred_ewma[i])
             .collect();
 
         // 6. Spatial smoothing
@@ -2034,7 +2046,7 @@ impl ForecastModel for StresaChaosModel {
     fn params(&self) -> HashMap<String, f64> {
         HashMap::from([
             ("k_pilot".into(), self.k_pilot as f64),
-            ("mod4_weight".into(), self.mod4_weight),
+            ("modular_weight".into(), self.modular_weight),
             ("smoothing".into(), self.smoothing),
             ("star_smoothing".into(), self.star_smoothing),
             ("ewma_weight".into(), self.ewma_weight),
@@ -2907,38 +2919,38 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Tests Phase 3 : mod4_transition_v2
+    // Tests : modular_transition_predict (mod-8 balls, mod-4 stars)
     // ─────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_mod4_transition_v2_basic() {
+    fn test_modular_transition_predict_basic() {
         let draws = make_test_draws(50);
 
         // Balls: sum=1, no negative, len=50
-        let dist_balls = mod4_transition_predict_v2(&draws, Pool::Balls);
+        let dist_balls = modular_transition_predict(&draws, Pool::Balls);
         assert_eq!(dist_balls.len(), 50);
         let sum: f64 = dist_balls.iter().sum();
-        assert!((sum - 1.0).abs() < 1e-9, "v2 balls sum = {}", sum);
+        assert!((sum - 1.0).abs() < 1e-9, "modular balls sum = {}", sum);
         for &p in &dist_balls {
-            assert!(p >= 0.0, "Negative probability in v2 balls: {}", p);
+            assert!(p >= 0.0, "Negative probability in modular balls: {}", p);
         }
 
         // Stars: sum=1, no negative, len=12
-        let dist_stars = mod4_transition_predict_v2(&draws, Pool::Stars);
+        let dist_stars = modular_transition_predict(&draws, Pool::Stars);
         assert_eq!(dist_stars.len(), 12);
         let sum_s: f64 = dist_stars.iter().sum();
-        assert!((sum_s - 1.0).abs() < 1e-9, "v2 stars sum = {}", sum_s);
+        assert!((sum_s - 1.0).abs() < 1e-9, "modular stars sum = {}", sum_s);
         for &p in &dist_stars {
-            assert!(p >= 0.0, "Negative probability in v2 stars: {}", p);
+            assert!(p >= 0.0, "Negative probability in modular stars: {}", p);
         }
     }
 
     #[test]
-    fn test_mod4_transition_v2_fallback_small() {
+    fn test_modular_transition_predict_fallback_small() {
         // < 30 draws: should fallback to v1
         let draws = make_test_draws(20);
-        let dist_v1 = mod4_transition_predict(&draws, Pool::Balls);
-        let dist_v2 = mod4_transition_predict_v2(&draws, Pool::Balls);
+        let dist_v1 = modular_transition_predict_v1(&draws, Pool::Balls);
+        let dist_v2 = modular_transition_predict(&draws, Pool::Balls);
         // v2 should be identical to v1 for small datasets
         for (i, (&a, &b)) in dist_v1.iter().zip(dist_v2.iter()).enumerate() {
             assert!((a - b).abs() < 1e-15, "v1/v2 differ at {}: {} vs {}", i, a, b);
@@ -2946,15 +2958,15 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Tests Phase 4 : mod4_transition_v3
+    // Tests : modular_transition_predict_v3
     // ─────────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_mod4_transition_v3_basic() {
+    fn test_modular_transition_predict_v3_basic() {
         let draws = make_test_draws(50);
 
         // Balls: sum=1, no negative, len=50
-        let dist_balls = mod4_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.003);
+        let dist_balls = modular_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.003);
         assert_eq!(dist_balls.len(), 50);
         let sum: f64 = dist_balls.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "v3 balls sum = {}", sum);
@@ -2963,7 +2975,7 @@ mod tests {
         }
 
         // Stars: sum=1, no negative, len=12
-        let dist_stars = mod4_transition_predict_v3(&draws, Pool::Stars, 0.05, 0.003);
+        let dist_stars = modular_transition_predict_v3(&draws, Pool::Stars, 0.05, 0.003);
         assert_eq!(dist_stars.len(), 12);
         let sum_s: f64 = dist_stars.iter().sum();
         assert!((sum_s - 1.0).abs() < 1e-9, "v3 stars sum = {}", sum_s);
@@ -2973,11 +2985,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_transition_v3_ewma_vs_flat() {
+    fn test_modular_transition_predict_v3_ewma_vs_flat() {
         // v3 with EWMA freq should differ from v2 for sufficient data
         let draws = make_test_draws(80);
-        let dist_v2 = mod4_transition_predict_v2(&draws, Pool::Balls);
-        let dist_v3 = mod4_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.0);
+        let dist_v2 = modular_transition_predict(&draws, Pool::Balls);
+        let dist_v3 = modular_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.0);
 
         // Should be different (EWMA freq vs flat freq)
         let max_diff: f64 = dist_v2.iter().zip(dist_v3.iter())
@@ -2987,11 +2999,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_transition_v3_decay() {
+    fn test_modular_transition_predict_v3_decay() {
         // v3 with transition_decay should differ from v2
         let draws = make_test_draws(80);
-        let dist_v2 = mod4_transition_predict_v2(&draws, Pool::Balls);
-        let dist_v3 = mod4_transition_predict_v3(&draws, Pool::Balls, 1.0, 0.003);
+        let dist_v2 = modular_transition_predict(&draws, Pool::Balls);
+        let dist_v3 = modular_transition_predict_v3(&draws, Pool::Balls, 1.0, 0.003);
 
         // alpha_freq=1.0 makes EWMA == last draw only, so freq effect is large
         // But transition_decay also differs
@@ -3002,11 +3014,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mod4_transition_v3_fallback_small() {
+    fn test_modular_transition_predict_v3_fallback_small() {
         // < 30 draws: v3 should fallback to v2 which falls back to v1
         let draws = make_test_draws(20);
-        let dist_v2 = mod4_transition_predict_v2(&draws, Pool::Balls);
-        let dist_v3 = mod4_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.003);
+        let dist_v2 = modular_transition_predict(&draws, Pool::Balls);
+        let dist_v3 = modular_transition_predict_v3(&draws, Pool::Balls, 0.05, 0.003);
         for (i, (&a, &b)) in dist_v2.iter().zip(dist_v3.iter()).enumerate() {
             assert!((a - b).abs() < 1e-15, "v2/v3 differ at {} for small data: {} vs {}", i, a, b);
         }

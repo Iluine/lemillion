@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
 
 use super::{ForecastModel, SamplingStrategy};
+use super::mod4::modulus;
 
-/// Mod4Profile — matrice de transition sur les profils mod-4.
+/// ModProfile — matrice de transition sur les profils modulaires.
 ///
-/// Au lieu de transitions blade→blade (4×4), modélise les PROFILS mod-4 complets.
-/// Un profil = (n₀,n₁,n₂,n₃) avec Σnᵢ = pick_count.
-/// - 56 profils pour les boules (C(8,3) compositions de 5 en 4 parts)
-/// - 10 profils pour les étoiles (C(5,3) compositions de 2 en 4 parts)
+/// Au lieu de transitions blade→blade (M×M), modélise les PROFILS modulaires complets.
+/// Un profil = (n₀,n₁,...,n_{M-1}) avec Σnᵢ = pick_count.
+/// - Boules mod-8: compositions de 5 dans 8 parts = C(12,7) = 792 profils
+/// - Étoiles mod-4: compositions de 2 dans 4 parts = C(5,3) = 10 profils
 ///
 /// Matrice de transition profil→profil avec lissage Laplace.
 pub struct Mod4ProfileModel {
@@ -34,8 +35,34 @@ impl Default for Mod4ProfileModel {
     }
 }
 
-/// Énumère tous les profils (n₀,n₁,n₂,n₃) avec Σnᵢ = total.
-/// Ce sont les compositions faibles de `total` en 4 parts.
+/// Énumère tous les profils (n₀,n₁,...,n_{M-1}) avec Σnᵢ = total.
+/// Ce sont les compositions faibles de `total` en `m` parts.
+pub fn enumerate_profiles_m(total: u8, m: usize) -> Vec<Vec<u8>> {
+    let mut profiles = Vec::new();
+    let mut current = vec![0u8; m];
+    enumerate_recursive(&mut profiles, &mut current, 0, total, m);
+    profiles
+}
+
+fn enumerate_recursive(
+    profiles: &mut Vec<Vec<u8>>,
+    current: &mut Vec<u8>,
+    depth: usize,
+    remaining: u8,
+    m: usize,
+) {
+    if depth == m - 1 {
+        current[depth] = remaining;
+        profiles.push(current.clone());
+        return;
+    }
+    for v in 0..=remaining {
+        current[depth] = v;
+        enumerate_recursive(profiles, current, depth + 1, remaining - v, m);
+    }
+}
+
+/// Legacy 4-part enumeration (for backward compatibility with tests).
 pub fn enumerate_profiles(total: u8) -> Vec<[u8; 4]> {
     let mut profiles = Vec::new();
     for n0 in 0..=total {
@@ -49,8 +76,18 @@ pub fn enumerate_profiles(total: u8) -> Vec<[u8; 4]> {
     profiles
 }
 
-/// Extrait le profil mod-4 d'un ensemble de numéros.
-/// Chaque numéro k → classe (k-1) % 4.
+/// Extrait le profil modulaire d'un ensemble de numéros.
+/// Chaque numéro k → classe (k-1) % m.
+pub fn extract_profile_m(numbers: &[u8], m: usize) -> Vec<u8> {
+    let mut profile = vec![0u8; m];
+    for &n in numbers {
+        let r = ((n - 1) as usize) % m;
+        profile[r] += 1;
+    }
+    profile
+}
+
+/// Legacy 4-class extraction.
 pub fn extract_profile(numbers: &[u8]) -> [u8; 4] {
     let mut profile = [0u8; 4];
     for &n in numbers {
@@ -61,13 +98,13 @@ pub fn extract_profile(numbers: &[u8]) -> [u8; 4] {
 }
 
 /// Index d'un profil dans la liste énumérée.
-fn profile_index(profile: &[u8; 4], profiles: &[[u8; 4]]) -> Option<usize> {
-    profiles.iter().position(|p| p == profile)
+fn profile_index_m(profile: &[u8], profiles: &[Vec<u8>]) -> Option<usize> {
+    profiles.iter().position(|p| p.as_slice() == profile)
 }
 
 impl ForecastModel for Mod4ProfileModel {
     fn name(&self) -> &str {
-        "Mod4Profile"
+        "ModProfile"
     }
 
     fn predict(&self, draws: &[Draw], pool: Pool) -> Vec<f64> {
@@ -78,14 +115,15 @@ impl ForecastModel for Mod4ProfileModel {
             return uniform;
         }
 
+        let m = modulus(pool);
         let pick_count = pool.pick_count() as u8;
-        let profiles = enumerate_profiles(pick_count);
+        let profiles = enumerate_profiles_m(pick_count, m);
         let n_profiles = profiles.len();
 
         // Extraire le profil de chaque tirage
-        let draw_profiles: Vec<[u8; 4]> = draws
+        let draw_profiles: Vec<Vec<u8>> = draws
             .iter()
-            .map(|d| extract_profile(pool.numbers_from(d)))
+            .map(|d| extract_profile_m(pool.numbers_from(d), m))
             .collect();
 
         // Construire matrice de transition T[from][to] + Laplace
@@ -97,8 +135,8 @@ impl ForecastModel for Mod4ProfileModel {
             let from_profile = &draw_profiles[t + 1];
             let to_profile = &draw_profiles[t];
             if let (Some(from_idx), Some(to_idx)) = (
-                profile_index(from_profile, &profiles),
-                profile_index(to_profile, &profiles),
+                profile_index_m(from_profile, &profiles),
+                profile_index_m(to_profile, &profiles),
             ) {
                 transition[from_idx][to_idx] += 1.0;
             }
@@ -116,7 +154,7 @@ impl ForecastModel for Mod4ProfileModel {
 
         // Prédire : profil actuel = draws[0]
         let current_profile = &draw_profiles[0];
-        let current_idx = match profile_index(current_profile, &profiles) {
+        let current_idx = match profile_index_m(current_profile, &profiles) {
             Some(idx) => idx,
             None => return uniform,
         };
@@ -135,15 +173,15 @@ impl ForecastModel for Mod4ProfileModel {
             }
         }
 
-        // Fréquences par classe mod-4
-        let mut class_freq_sum = [0.0f64; 4];
+        // Fréquences par classe modulaire
+        let mut class_freq_sum = vec![0.0f64; m];
         for (k, &f) in freq.iter().enumerate() {
-            class_freq_sum[k % 4] += f;
+            class_freq_sum[k % m] += f;
         }
 
         // Convertir en marginales :
         // P(boule_k) = Σ_j P(profil_j) × n_r(profil_j) × freq[k] / class_sum[r]
-        // où r = (k-1) % 4, n_r = count de la classe r dans le profil j
+        // où r = (k-1) % m, n_r = count de la classe r dans le profil j
         let mut prob = vec![0.0f64; size];
         for (j, profile) in profiles.iter().enumerate() {
             let p_j = p_profile[j];
@@ -151,7 +189,7 @@ impl ForecastModel for Mod4ProfileModel {
                 continue;
             }
             for (k, p_k) in prob.iter_mut().enumerate() {
-                let r = k % 4;
+                let r = k % m;
                 let n_r = profile[r] as f64;
                 if n_r > 0.0 && class_freq_sum[r] > 0.0 {
                     *p_k += p_j * n_r * freq[k] / class_freq_sum[r];
@@ -207,37 +245,52 @@ mod tests {
     use crate::models::{make_test_draws, validate_distribution};
 
     #[test]
-    fn test_enumerate_profiles_balls() {
+    fn test_enumerate_profiles_balls_mod8() {
+        // Compositions of 5 in 8 parts = C(12,7) = 792
+        let profiles = enumerate_profiles_m(5, 8);
+        assert_eq!(profiles.len(), 792, "C(12,7) = 792 profils pour 5 boules mod-8");
+        for p in &profiles {
+            assert_eq!(p.iter().map(|&x| x as u16).sum::<u16>(), 5);
+            assert_eq!(p.len(), 8);
+        }
+    }
+
+    #[test]
+    fn test_enumerate_profiles_stars_mod4() {
+        let profiles = enumerate_profiles_m(2, 4);
+        assert_eq!(profiles.len(), 10, "C(5,3) = 10 profils pour 2 étoiles mod-4");
+        for p in &profiles {
+            assert_eq!(p.iter().map(|&x| x as u16).sum::<u16>(), 2);
+        }
+    }
+
+    #[test]
+    fn test_enumerate_profiles_legacy() {
         let profiles = enumerate_profiles(5);
-        assert_eq!(profiles.len(), 56, "C(8,3) = 56 profils pour 5 boules");
-        // Vérifier que chaque profil somme à 5
+        assert_eq!(profiles.len(), 56, "C(8,3) = 56 profils legacy");
         for p in &profiles {
             assert_eq!(p.iter().sum::<u8>(), 5);
         }
     }
 
     #[test]
-    fn test_enumerate_profiles_stars() {
-        let profiles = enumerate_profiles(2);
-        assert_eq!(profiles.len(), 10, "C(5,3) = 10 profils pour 2 étoiles");
-        for p in &profiles {
-            assert_eq!(p.iter().sum::<u8>(), 2);
-        }
+    fn test_extract_profile_mod8() {
+        // 1→(1-1)%8=0, 2→1, 3→2, 4→3, 5→4
+        let profile = extract_profile_m(&[1, 2, 3, 4, 5], 8);
+        assert_eq!(profile, vec![1, 1, 1, 1, 1, 0, 0, 0]);
     }
 
     #[test]
-    fn test_extract_profile() {
-        // 1→(1-1)%4=0, 2→1, 3→2, 4→3, 5→0  → [2, 1, 1, 1]
+    fn test_extract_profile_mod4() {
+        // 1→0, 2→1, 3→2, 4→3, 5→0
+        let profile = extract_profile_m(&[1, 2, 3, 4, 5], 4);
+        assert_eq!(profile, vec![2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn test_extract_profile_legacy() {
         let profile = extract_profile(&[1, 2, 3, 4, 5]);
         assert_eq!(profile, [2, 1, 1, 1]);
-    }
-
-    #[test]
-    fn test_extract_profile_roundtrip() {
-        let profile = extract_profile(&[1, 5, 9, 13, 17]);
-        // Tous (k-1)%4 = 0 → [5, 0, 0, 0]
-        assert_eq!(profile, [5, 0, 0, 0]);
-        assert_eq!(profile.iter().sum::<u8>(), 5);
     }
 
     #[test]

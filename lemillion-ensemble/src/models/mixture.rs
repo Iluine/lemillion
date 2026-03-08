@@ -58,23 +58,52 @@ fn expert_frequency(draws: &[Draw], pool: Pool) -> Vec<f64> {
     counts
 }
 
-/// Expert 1 : Retard (gap actuel / gap moyen attendu)
+/// Expert 1 : Hazard empirique (remplace le gambler's fallacy par la forme de la distribution des gaps)
 fn expert_gap(draws: &[Draw], pool: Pool) -> Vec<f64> {
     let size = pool.size();
-    let mut gaps = vec![draws.len(); size];
-    for (t, draw) in draws.iter().enumerate() {
-        for &n in pool.numbers_from(draw) {
-            let idx = (n - 1) as usize;
-            if idx < size && gaps[idx] == draws.len() {
-                gaps[idx] = t;
+    let geo_hazard = pool.pick_count() as f64 / size as f64;
+
+    let mut scores = vec![geo_hazard; size];
+
+    for num_idx in 0..size {
+        let num = (num_idx + 1) as u8;
+        // Collect historical gaps and current gap
+        let mut completed_gaps = Vec::new();
+        let mut current_gap = 0usize;
+        let mut seen_first = false;
+
+        for draw in draws.iter() {
+            if pool.numbers_from(draw).contains(&num) {
+                if seen_first && current_gap > 0 {
+                    completed_gaps.push(current_gap);
+                }
+                seen_first = true;
+                current_gap = 0;
+            } else {
+                current_gap += 1;
+            }
+        }
+
+        // Current gap from draws[0]
+        let mut cur = 0usize;
+        for draw in draws.iter() {
+            if pool.numbers_from(draw).contains(&num) { break; }
+            cur += 1;
+        }
+
+        if completed_gaps.len() >= 3 {
+            // Empirical hazard at current gap
+            let n_survived = completed_gaps.iter().filter(|&&g| g >= cur).count();
+            if n_survived > 0 {
+                let n_event = completed_gaps.iter().filter(|&&g| g == cur).count();
+                let emp_h = n_event as f64 / n_survived as f64;
+                // Blend with geometric prior
+                scores[num_idx] = 0.7 * emp_h + 0.3 * geo_hazard;
             }
         }
     }
-    let expected_gap = size as f64 / pool.pick_count() as f64;
-    let mut scores: Vec<f64> = gaps
-        .iter()
-        .map(|&g| ((g as f64 + 1.0) / expected_gap).max(0.1))
-        .collect();
+
+    // Normalize
     let total: f64 = scores.iter().sum();
     if total > 0.0 {
         for s in &mut scores {

@@ -159,7 +159,7 @@ fn cmd_calibrate_interactive(conn: &lemillion_db::rusqlite::Connection) -> Resul
     let output = prompt_with_default("Fichier de sortie", "calibration.json")?;
     let temp_str = prompt_with_default("Température", "0.5")?;
     let temperature: f64 = temp_str.parse().context("Température invalide")?;
-    super::cmd_calibrate(conn, &windows, None, &output, temperature, 0.0, "both")
+    super::cmd_calibrate(conn, &windows, None, &output, temperature, 0.0, "both", 0)
 }
 
 fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -200,7 +200,7 @@ fn cmd_predict_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<
         0
     };
 
-    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, jackpot_mode, no_filter, top_models, false, false, 0.0, false, false, "concentrated")
+    super::cmd_predict(conn, "calibration.json", n, seed, 20, 2, temperature, jackpot, jackpot_mode, no_filter, top_models, false, false, 0.0, false, false, "concentrated", None)
 }
 
 fn cmd_history_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
@@ -234,7 +234,7 @@ fn cmd_coverage_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result
 }
 
 fn cmd_research_interactive(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
-    let tests = prompt_with_default("Catégorie (all/physical/mathematical/informational)", "all")?;
+    let tests = prompt_with_default("Catégorie (all/physical/mathematical/informational/dfa/rqa)", "all")?;
     let window_str = prompt_with_default("Fenêtre (vide = tous)", "")?;
     let window: Option<usize> = if window_str.is_empty() {
         None

@@ -48,12 +48,12 @@ impl Default for PhysicsModel {
     fn default() -> Self {
         Self {
             alpha: 0.05,
-            prior_strength: 50.0,
+            prior_strength: 10.0,
             drift_scale: 0.3,
             drift_window: 20,
             spatial_sigma: 3.0,
             changepoint_threshold: 5.0,
-            smoothing: 0.4,
+            smoothing: 0.25,
         }
     }
 }
@@ -65,9 +65,10 @@ fn ewma_frequencies(draws: &[Draw], pool: Pool, alpha: f64) -> Vec<f64> {
     let mut freq = vec![1.0 / size as f64; size];
 
     // Parcourir du plus ancien au plus récent
+    let mut current = vec![0.0; size];
     for draw in draws.iter().rev() {
         let numbers = pool.numbers_from(draw);
-        let mut current = vec![0.0; size];
+        current.fill(0.0);
         for &n in numbers {
             let idx = (n - 1) as usize;
             if idx < size {
@@ -142,23 +143,50 @@ fn temporal_drift(draws: &[Draw], pool: Pool, drift_window: usize) -> Vec<f64> {
         .collect()
 }
 
-/// Lissage spatial gaussien des biais.
-/// Hypothèse : les boules voisines (numéros proches) ont des propriétés physiques similaires.
+/// Lissage spatial par rangée de rack (décades).
+/// Les 5 décades (1-10, 11-20, ..., 41-50) correspondent aux 5 rangées du rack Stresa.
+/// Les boules de la même rangée partagent des propriétés physiques similaires.
+/// Pour les étoiles (size <= 12), on utilise un lissage gaussien classique.
 fn spatial_smooth(bias: &[f64], sigma: f64) -> Vec<f64> {
     let size = bias.len();
     let mut smoothed = vec![0.0; size];
 
-    for (i, smoothed_val) in smoothed.iter_mut().enumerate() {
-        let mut weighted_sum = 0.0;
-        let mut weight_sum = 0.0;
-        for (j, &b) in bias.iter().enumerate() {
-            let dist = (i as f64 - j as f64).abs();
-            let w = (-dist * dist / (2.0 * sigma * sigma)).exp();
-            weighted_sum += w * b;
-            weight_sum += w;
+    if size <= 12 {
+        // Étoiles: lissage gaussien classique (petit pool)
+        for (i, smoothed_val) in smoothed.iter_mut().enumerate() {
+            let mut weighted_sum = 0.0;
+            let mut weight_sum = 0.0;
+            for (j, &b) in bias.iter().enumerate() {
+                let dist = (i as f64 - j as f64).abs();
+                let w = (-dist * dist / (2.0 * sigma * sigma)).exp();
+                weighted_sum += w * b;
+                weight_sum += w;
+            }
+            if weight_sum > 0.0 {
+                *smoothed_val = weighted_sum / weight_sum;
+            }
         }
-        if weight_sum > 0.0 {
-            *smoothed_val = weighted_sum / weight_sum;
+    } else {
+        // Boules: lissage par rangée de rack (même décade = même rangée)
+        for (i, smoothed_val) in smoothed.iter_mut().enumerate() {
+            let row_i = i / 10; // décade 0-4
+            let mut weighted_sum = 0.0;
+            let mut weight_sum = 0.0;
+            for (j, &b) in bias.iter().enumerate() {
+                let row_j = j / 10;
+                // Poids fort pour même rangée, faible pour rangées différentes
+                let row_dist = (row_i as f64 - row_j as f64).abs();
+                let w = if row_i == row_j {
+                    1.0 // même rangée = poids maximal
+                } else {
+                    (-row_dist * row_dist / (2.0 * sigma * sigma)).exp()
+                };
+                weighted_sum += w * b;
+                weight_sum += w;
+            }
+            if weight_sum > 0.0 {
+                *smoothed_val = weighted_sum / weight_sum;
+            }
         }
     }
     smoothed
@@ -213,12 +241,11 @@ fn changepoint_weight(draws: &[Draw], pool: Pool, threshold: f64) -> f64 {
     // Normaliser par le nombre de degrés de liberté
     chi2 /= (size - 1) as f64;
 
-    // Si chi² dépasse le seuil, pondérer davantage les données récentes
-    if chi2 > threshold {
-        0.8 // Régime changeant : favoriser les données récentes
-    } else {
-        0.5 // Pas de changement détecté : équilibrer
-    }
+    // Sigmoid lisse au lieu de seuil binaire
+    // sigma(x) = 1 / (1 + exp(-k*(x - threshold)))
+    // Varie continûment de 0.5 (pas de changement) à ~0.8 (régime changeant)
+    let sigmoid = 1.0 / (1.0 + (-2.0 * (chi2 - threshold)).exp());
+    0.5 + 0.3 * sigmoid
 }
 
 impl ForecastModel for PhysicsModel {

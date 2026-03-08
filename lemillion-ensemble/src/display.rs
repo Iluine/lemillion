@@ -1010,6 +1010,8 @@ pub fn display_research_report(report: &ResearchReport) {
         ("Physical", &report.physical),
         ("Mathematical", &report.mathematical),
         ("Informational", &report.informational),
+        ("DFA (Detrended Fluctuation Analysis)", &report.dfa),
+        ("RQA (Recurrence Quantification Analysis)", &report.rqa),
     ];
 
     for (cat_name, results) in &categories {
