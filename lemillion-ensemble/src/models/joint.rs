@@ -130,8 +130,8 @@ impl JointConditionalModel {
     /// Score les boules + confiance du modèle joint.
     /// Retourne (log_score_normalisé, confidence ∈ [0, 1]).
     /// La confiance mesure combien d'observations supportent le conditionnement.
-    /// Seules les positions 0-1 contribuent à la confiance (les positions profondes
-    /// ont toujours très peu d'observations par état et retombent sur les marginales).
+    /// Les 5 positions contribuent avec poids décroissants [0.35, 0.25, 0.20, 0.12, 0.08],
+    /// reflétant la fiabilité décroissante des positions profondes (v13).
     pub fn score_balls_with_confidence(&self, balls: &[u8; 5]) -> (f64, f64) {
         if !self.trained { return (0.0, 0.0); }
 
@@ -141,7 +141,7 @@ impl JointConditionalModel {
         let mut log_score = 0.0;
         let alpha_ref = 20.0;
         let mut confidence_sum = 0.0f64;
-        let confidence_positions = 2; // only pos 0-1 for confidence
+        let position_weights = [0.35, 0.25, 0.20, 0.12, 0.08]; // deeper positions = less reliable
 
         for pos in 0..5 {
             let ball = sorted_balls[pos];
@@ -166,10 +166,9 @@ impl JointConditionalModel {
                 (self.normalized_marginal(pos), 0.0)
             };
 
-            // Confiance pour les 2 premières positions seulement
-            if pos < confidence_positions {
-                confidence_sum += (obs_count / (obs_count + alpha_ref)).min(1.0);
-            }
+            // Confiance pondérée pour toutes les positions
+            let conf_contrib = (obs_count / (obs_count + alpha_ref)).min(1.0);
+            confidence_sum += position_weights[pos] * conf_contrib;
 
             let available_prob: f64 = probs.iter().enumerate()
                 .filter(|(idx, _)| !prefix.contains(&((*idx + 1) as u8)))
@@ -182,7 +181,8 @@ impl JointConditionalModel {
 
         let log_uniform_seq: f64 = (0..5).map(|k| -((50 - k) as f64).ln()).sum();
         let normalized = log_score - log_uniform_seq;
-        let confidence = (confidence_sum / confidence_positions as f64).min(1.0);
+        let total_weight: f64 = position_weights.iter().sum();
+        let confidence = (confidence_sum / total_weight).min(1.0);
         (normalized, confidence)
     }
 
@@ -556,6 +556,19 @@ mod tests {
         let (score, conf) = model.score_balls_with_confidence(&[1, 2, 3, 4, 5]);
         assert_eq!(score, 0.0);
         assert_eq!(conf, 0.0);
+    }
+
+    #[test]
+    fn test_confidence_all_positions_contribute() {
+        // v13: confidence should use all 5 positions with decreasing weights
+        let mut model = JointConditionalModel::default();
+        let draws = make_test_draws(200);
+        model.train(&draws);
+
+        let (_, conf) = model.score_balls_with_confidence(&draws[0].balls);
+        // With 200 draws and all 5 positions contributing, confidence should be substantial
+        assert!(conf > 0.0, "Confidence should be > 0 with 200 draws, got {}", conf);
+        assert!(conf <= 1.0, "Confidence should be <= 1.0, got {}", conf);
     }
 
     #[test]

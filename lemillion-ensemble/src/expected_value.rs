@@ -257,6 +257,33 @@ pub fn compute_ev(
     }
 }
 
+/// EV-optimal play timing: when to play based on jackpot size.
+/// Returns a multiplier relative to the average jackpot (50M€).
+/// Player count grows sub-linearly with jackpot (~jackpot^0.6),
+/// so EV per euro is super-linear in jackpot size.
+pub fn jackpot_timing_multiplier(jackpot_eur: f64) -> f64 {
+    let base_jackpot = 50_000_000.0;
+    if jackpot_eur <= 0.0 { return 0.0; }
+    let player_growth = (jackpot_eur / base_jackpot).powf(0.6);
+    (jackpot_eur / base_jackpot) / player_growth
+}
+
+/// Returns a human-readable timing recommendation based on jackpot size.
+pub fn jackpot_timing_advice(jackpot_eur: f64) -> &'static str {
+    let mult = jackpot_timing_multiplier(jackpot_eur);
+    if mult >= 2.5 {
+        "EXCELLENT — EV nettement supérieure, jouer fortement"
+    } else if mult >= 1.8 {
+        "TRÈS BON — EV bien au-dessus de la moyenne"
+    } else if mult >= 1.3 {
+        "BON — EV au-dessus de la moyenne"
+    } else if mult >= 0.8 {
+        "NEUTRE — EV proche de la moyenne"
+    } else {
+        "FAIBLE — EV en dessous de la moyenne, attendre un meilleur jackpot"
+    }
+}
+
 /// Jackpot minimum approximatif pour que l'EV soit positive (grille moyenne).
 /// Avec une grille anti-populaire, le seuil peut etre plus bas.
 pub fn jackpot_threshold() -> f64 {
@@ -463,6 +490,23 @@ mod tests {
         // Le seuil devrait etre entre 100M et 500M EUR
         assert!(threshold > 50_000_000.0, "threshold={threshold} trop bas");
         assert!(threshold < 1_000_000_000.0, "threshold={threshold} trop haut");
+    }
+
+    #[test]
+    fn test_jackpot_timing_multiplier_increases() {
+        let m50 = jackpot_timing_multiplier(50_000_000.0);
+        let m100 = jackpot_timing_multiplier(100_000_000.0);
+        let m200 = jackpot_timing_multiplier(200_000_000.0);
+        assert!((m50 - 1.0).abs() < 1e-10, "base jackpot should give mult=1.0, got {m50}");
+        assert!(m100 > m50, "higher jackpot should give higher multiplier");
+        assert!(m200 > m100, "200M should be better than 100M");
+    }
+
+    #[test]
+    fn test_jackpot_timing_advice_varies() {
+        let advice_low = jackpot_timing_advice(17_000_000.0);
+        let advice_high = jackpot_timing_advice(230_000_000.0);
+        assert_ne!(advice_low, advice_high, "different jackpots should give different advice");
     }
 
     #[test]

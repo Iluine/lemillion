@@ -430,29 +430,37 @@ impl BallStarConditioner {
             global_probs[p] = (global_counts[p] + Self::LAPLACE_ALPHA) / global_total;
         }
 
-        // Approche hiérarchique: table[ctx][p] = global × ratio_ctx
-        // Cela permet de profiter de la force statistique globale
+        // v13: Smooth blend instead of hard threshold at 10 observations.
+        // local_weight = ctx_total / (ctx_total + 5.0)
+        // 0 obs → 0% local, 5 obs → 50%, 10 obs → 67%, 30 obs → 86%, 70 obs → 93%
         let mut table = vec![[0.0f64; 66]; Self::N_CONTEXTS];
         for ctx in 0..Self::N_CONTEXTS {
             let ctx_total: f64 = counts[ctx].iter().sum::<f64>();
-            if ctx_total < 10.0 {
-                // Pas assez de données: utiliser la distribution globale
-                // Pour 10-30 obs, blend 50/50 avec global dans le else branch
+            if ctx_total < 1.0 {
                 table[ctx] = global_probs;
             } else {
-                // Ratio multiplicatif: P(pair|ctx) ∝ global × (obs/expected)
+                let local_weight = ctx_total / (ctx_total + 5.0);
+                // Ratio multiplicatif local
                 let expected_per_pair = ctx_total / 66.0;
+                let mut local_probs = [0.0f64; 66];
                 for p in 0..66 {
                     let ratio = (counts[ctx][p] + Self::LAPLACE_ALPHA)
                         / (expected_per_pair + Self::LAPLACE_ALPHA);
-                    table[ctx][p] = global_probs[p] * ratio;
+                    local_probs[p] = global_probs[p] * ratio;
+                }
+                // Renormaliser local
+                let local_total: f64 = local_probs.iter().sum();
+                if local_total > 0.0 {
+                    for p in &mut local_probs { *p /= local_total; }
+                }
+                // Smooth blend global/local
+                for p in 0..66 {
+                    table[ctx][p] = local_weight * local_probs[p] + (1.0 - local_weight) * global_probs[p];
                 }
                 // Renormaliser
                 let total: f64 = table[ctx].iter().sum();
                 if total > 0.0 {
-                    for p in &mut table[ctx] {
-                        *p /= total;
-                    }
+                    for p in &mut table[ctx] { *p /= total; }
                 }
             }
         }
@@ -2288,11 +2296,15 @@ const SKILL_TEMP_SIGMA: f64 = 0.035;
 
 /// Compute temperature from calibrated skill level.
 /// skill = average bits above uniform for this pool.
+/// v13: soft clamp with floor at 0.08 (was hard clamp at 0.12).
+/// The formula naturally asymptotes to `floor` without a hard clamp.
 pub fn skill_temperature(skill: f64) -> f64 {
     if skill <= 0.0 {
         1.0 // no skill → no sharpening
     } else {
-        (-skill / SKILL_TEMP_SIGMA).exp().clamp(0.12, 1.0)
+        let base = (-skill / SKILL_TEMP_SIGMA).exp();
+        let floor = 0.08;
+        floor + (1.0 - floor) * base
     }
 }
 
@@ -2314,34 +2326,22 @@ pub fn conviction_temperature_split_with_skill(
     let ball_temp = match ball_skill {
         Some(s) if s > 0.0 => skill_temperature(s),
         _ => {
-            // Fallback: conviction-based (relative, not absolute thresholds)
-            // v12: aggressive temperature — the ensemble has demonstrated positive skill
-            // via calibration. Lower T concentrates on higher-probability numbers.
+            // v13: Smooth sigmoid interpolation (no step discontinuities).
+            // ball_score ≈ 0 → T ≈ 0.12, ball_score = 0.3 → T ≈ 0.085, ball_score ≈ 1 → T ≈ 0.05
             let ball_score = 0.7 * conviction.ball_concentration + 0.3 * conviction.ball_agreement;
-            // v12: aggressive temperature T_balls=0.12 default.
-            // Empirically optimal on 20-draw backtest: ~200x improvement factor.
-            // More conservative than peak (T=0.08 → 291x) to avoid overfitting.
-            if ball_score >= 0.5 {
-                0.05
-            } else if ball_score >= 0.15 {
-                0.10
-            } else {
-                0.12
-            }
+            let sigmoid = 1.0 / (1.0 + (-8.0 * (ball_score - 0.3)).exp());
+            (0.12 - 0.07 * sigmoid).clamp(0.05, 0.15)
         }
     };
 
     let star_temp = match star_skill {
-        Some(s) if s > 0.0 => skill_temperature(s).min(0.35), // v12: tighter cap (was 0.40)
+        Some(s) if s > 0.0 => skill_temperature(s).min(0.35),
         _ => {
+            // v13: Smooth sigmoid interpolation for stars.
+            // star_score ≈ 0 → T ≈ 0.35, star_score = 0.35 → T ≈ 0.265, star_score ≈ 1 → T ≈ 0.18
             let star_score = 0.7 * conviction.star_concentration + 0.3 * conviction.star_agreement;
-            if star_score >= 0.5 {
-                0.18
-            } else if star_score >= 0.2 {
-                0.30
-            } else {
-                0.35
-            }
+            let sigmoid = 1.0 / (1.0 + (-8.0 * (star_score - 0.35)).exp());
+            (0.35 - 0.17 * sigmoid).clamp(0.18, 0.40)
         }
     };
 
@@ -2823,6 +2823,7 @@ mod tests {
 
     #[test]
     fn test_conviction_temperature_split() {
+        // v13: smooth sigmoid interpolation
         let conv = ConvictionScore {
             ball_entropy: 3.0,
             star_entropy: 2.0,
@@ -2834,10 +2835,32 @@ mod tests {
             verdict: ConvictionVerdict::MediumConviction,
         };
         let (bt, st) = conviction_temperature_split(&conv);
-        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.15 → T=0.12 (v12)
-        assert!((bt - 0.12).abs() < 1e-10);
-        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.18 (v12)
-        assert!((st - 0.18).abs() < 1e-10);
+        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10, sigmoid: near low end → T ≈ 0.12
+        assert!(bt >= 0.05 && bt <= 0.15, "bt={bt}");
+        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57, sigmoid: near high end → T ≈ 0.18-0.20
+        assert!(st >= 0.18 && st <= 0.25, "st={st}");
+
+        // Extreme low conviction → highest T
+        let conv_low = ConvictionScore {
+            ball_entropy: 3.0, star_entropy: 2.0,
+            ball_concentration: 0.0, star_concentration: 0.0,
+            ball_agreement: 0.0, star_agreement: 0.0,
+            overall: 0.0, verdict: ConvictionVerdict::LowConviction,
+        };
+        let (bt_low, st_low) = conviction_temperature_split(&conv_low);
+        assert!(bt_low > 0.11 && bt_low < 0.13, "low conviction bt={bt_low}");
+        assert!(st_low > 0.33 && st_low < 0.37, "low conviction st={st_low}");
+
+        // Extreme high conviction → lowest T
+        let conv_high = ConvictionScore {
+            ball_entropy: 3.0, star_entropy: 2.0,
+            ball_concentration: 1.0, star_concentration: 1.0,
+            ball_agreement: 1.0, star_agreement: 1.0,
+            overall: 1.0, verdict: ConvictionVerdict::HighConviction,
+        };
+        let (bt_high, st_high) = conviction_temperature_split(&conv_high);
+        assert!(bt_high >= 0.05 && bt_high < 0.06, "high conviction bt={bt_high}");
+        assert!(st_high >= 0.18 && st_high < 0.20, "high conviction st={st_high}");
     }
 
     #[test]
@@ -2846,29 +2869,29 @@ mod tests {
         assert!((skill_temperature(0.0) - 1.0).abs() < 1e-10);
         assert!((skill_temperature(-0.5) - 1.0).abs() < 1e-10);
 
-        // v10: exponential formula T = exp(-skill/σ), σ=0.035
-        // Small skill (0.01) → T ≈ 0.75
+        // v13: soft clamp with floor=0.08. T = 0.08 + 0.92 * exp(-skill/0.035)
+        // Small skill (0.01) → T ≈ 0.08 + 0.92*0.751 = 0.77
         let t = skill_temperature(0.01);
-        assert!(t > 0.70 && t < 0.80, "skill=0.01 → T={t}");
+        assert!(t > 0.72 && t < 0.82, "skill=0.01 → T={t}");
 
-        // Medium skill (0.03) → T ≈ 0.42
+        // Medium skill (0.03) → T ≈ 0.08 + 0.92*0.424 = 0.47
         let t = skill_temperature(0.03);
-        assert!(t > 0.35 && t < 0.50, "skill=0.03 → T={t}");
+        assert!(t > 0.40 && t < 0.55, "skill=0.03 → T={t}");
 
-        // High skill (0.05) → T ≈ 0.24
+        // High skill (0.05) → T ≈ 0.08 + 0.92*0.239 = 0.30
         let t = skill_temperature(0.05);
-        assert!(t > 0.20 && t < 0.30, "skill=0.05 → T={t}");
+        assert!(t > 0.25 && t < 0.35, "skill=0.05 → T={t}");
 
-        // Very high skill (0.10) → T ≈ 0.12 (clamped)
+        // Very high skill (0.10) → T ≈ 0.08 + 0.92*0.057 = 0.13
         let t = skill_temperature(0.10);
-        assert!(t >= 0.12 && t < 0.15, "skill=0.10 → T={t}");
+        assert!(t > 0.10 && t < 0.16, "skill=0.10 → T={t}");
     }
 
     #[test]
-    fn test_skill_temperature_clamp() {
-        // Very high skill should clamp at 0.12
+    fn test_skill_temperature_floor() {
+        // v13: Very high skill asymptotes to floor=0.08
         let t = skill_temperature(0.50);
-        assert!((t - 0.12).abs() < 1e-10, "High skill should clamp at 0.12, got {t}");
+        assert!(t > 0.079 && t < 0.085, "High skill should approach floor 0.08, got {t}");
     }
 
     #[test]
@@ -2889,8 +2912,8 @@ mod tests {
         let expected_st = skill_temperature(0.03).min(0.35); // v12: tighter cap
         assert!((bt - expected_bt).abs() < 1e-10, "bt={bt} expected {expected_bt}");
         assert!((st - expected_st).abs() < 1e-10, "st={st} expected {expected_st}");
-        // v10: verify they're actually more aggressive than old formula
-        assert!(expected_bt < 0.30, "bt should be aggressive with exponential formula");
+        // v13: verify they're actually aggressive (soft clamp floor=0.08)
+        assert!(expected_bt < 0.35, "bt should be aggressive with soft clamp formula");
     }
 
     #[test]

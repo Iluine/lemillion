@@ -73,7 +73,7 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal,draw_order,tlr,particle_stresa,forbidden_patterns}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal,draw_order,tlr,particle_stresa,forbidden_patterns,renyi_te,cross_te}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus,meta,stacking}.rs
     src/research/{mod,physical,mathematical,informational,dfa,rqa}.rs
@@ -124,7 +124,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-23 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+25 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
 
 **IMPORTANT (v4)**: The Stresa machine uses 3 central bars + 8 external bars (mod-8 symmetry for balls), and the Pâquerette uses 4 blades (mod-4 for stars). All modular models are pool-aware via `mod4::modulus(pool)`. Star data before 2016-09-27 uses incompatible pool sizes and is filtered via `filter_star_era()`.
 
@@ -140,7 +140,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 9. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée (5 shuffles). Multi-lag scoring (v12): decay [1.0, 0.5, 0.25] for lags 1-3. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2. (alpha=2.0, te_threshold_factor=3.0, smoothing=0.30, n_top_sources=15)
 10. **StarPair** **(S×3)** — Prédit les 66 paires d'étoiles via 3 experts Hedge. Expose `predict_pair_distribution()` pour scoring direct par paires. (smoothing=0.25, learning_rate=0.15, min_draws=50)
 11. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.30, min_draws=30)
-12. **MaxEntropy** — Maximum entropy distribution with bias tilts from detected non-random signals. (smoothing=0.25, mod_tilts coef=0.08)
+12. **MaxEntropy** — Maximum entropy distribution with bias tilts from detected non-random signals. 4 constraints: mod-4, gap hazard, pair co-occurrence, autocorrelation lag-1 (v13). (smoothing=0.25, z_threshold=1.5)
 13. **HMM** **(S×3)** — Hidden Markov Model with K=4/8 hidden states (pool-aware). Baum-Welch + forward algorithm. (n_states=4/8, max_iter=20, smoothing=0.35)
 14. **Boltzmann** **(S×3)** — Markov Random Field for ball interactions. Mean-field approximation. (coupling_strength=0.3, smoothing=0.20)
 15. **Hawkes** **(S×3)** — Self-exciting point process for pair co-occurrence temporal clustering. (decay=0.1, excitation=0.5, smoothing=0.20)
@@ -152,6 +152,8 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 21. **StarMomentum** **(S×3)** — DFA Hurst exponent pour détection momentum/mean-reversion sur fréquences étoiles. (smoothing=0.30)
 22. **Spread** **(S×3)** — Clustering gaussien sur le spread (max-min) des tirages récents. (smoothing=0.25)
 23. **DrawOrder** **(S×4)** — Exploite l'ordre d'extraction physique (brevet Stresa US6145836A). Matrice positionnelle complète N×5 avec poids par position basés sur l'entropie inverse. (ewma_alpha=0.05, smoothing=0.25, min_draws_with_order=50)
+24. **RényiTE** **(S×4)** — Rényi Transfer Entropy (α=0.7) : amplifie les événements rares dans les paires causales. Seuil 2.5× baseline. Même architecture que TransferEntropy. calibration_stride=2. (alpha_boost=2.0, renyi_alpha=0.7, smoothing=0.30)
+25. **CrossTE** **(S×4)** — Cross-pool Transfer Entropy : TE(star→ball) et TE(star→star). Signal orthogonal au TE ball→ball existant. calibration_stride=2. (alpha=2.0, te_threshold_factor=3.0, smoothing=0.30)
 
 **Retired models** (modules still exist but excluded from `base_models()` — see `RETIRED_MODELS.md` for full details):
 - v11: TLR, ParticleStresa, ForbiddenPatterns (BMA dilution — near-uniform models take weight from TransferEntropy)
@@ -163,7 +165,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - v1-v3: Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion, JackpotContext
 
 **Utility types** (not `ForecastModel`, used internally):
-- **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`. Also `score_balls_with_confidence()` returning (log_score, confidence) for adaptive marginal/joint blend in jackpot mode [0.15, 0.40] based on confidence.
+- **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`. Also `score_balls_with_confidence()` returning (log_score, confidence) for adaptive marginal/joint blend in jackpot mode [0.15, 0.40] based on confidence. v13: confidence uses all 5 positions with weights [0.35, 0.25, 0.20, 0.12, 0.08].
 - **SummaryPredictor** (`summary_predictor.rs`) — Markov order-1 on summary states (sum_bin, spread_bin, odd_count). Used by sampler for adaptive filtering.
 - **NeuralScorer** (`neural_scorer.rs`) — 3-layer MLP (62→32→16→1) ensemble of 5 networks. Scores complete grids for reranking. Saved/loaded as `neural_scorer.json`. Optional in jackpot mode (`--neural-rerank`).
 
@@ -182,9 +184,9 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
 - `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls, conditioner, neural_scorer)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset, K_balls minimum 25), 5 nested loops, min-heap for large enumerations. Ball scoring blends 70% marginal + 30% joint conditional (via `JointConditionalModel.score_balls()`). Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion (disabled for jackpots >100M). Optional `conditioner` for ball→star conditional scoring. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
-- `BallStarConditioner` — models conditional star pair probabilities given ball context (sum_bin × spread_bin). v12: 3×3=9 contexts (removed odd_bin for 3x more data per context). Built from history with adaptive tercile bins (v9), produces 66 pair probability tables per context bin. Adaptive blend via `adaptive_blend()`: `obs/(obs+20)` per context (0 with few obs, ~0.78 with many).
+- `BallStarConditioner` — models conditional star pair probabilities given ball context (sum_bin × spread_bin). v12: 3×3=9 contexts (removed odd_bin for 3x more data per context). Built from history with adaptive tercile bins (v9), produces 66 pair probability tables per context bin. v13: smooth blend `ctx_total/(ctx_total+5)` (was hard threshold at 10). Adaptive blend via `adaptive_blend()`: `obs/(obs+20)` per context.
 - `conviction_temperature(verdict)` — adaptive temperature: HighConviction→0.10, MediumConviction→0.20, LowConviction→0.25
-- `conviction_temperature_split(conviction)` — separate ball/star temperatures. v12: more aggressive defaults (balls: 0.12/0.10/0.05, stars: 0.35/0.30/0.18). For jackpots >100M: T_balls forced to 1.0 (no sharpening); T_stars remains aggressive.
+- `conviction_temperature_split(conviction)` — separate ball/star temperatures. v13: smooth sigmoid interpolation (no step discontinuities). balls: sigmoid from 0.12 to 0.05, stars: sigmoid from 0.35 to 0.18. For jackpots >100M: T_balls forced to 1.0 (no sharpening); T_stars remains aggressive.
 - `few_grid_temperature(n_grids)` — forced temperatures for few-grid mode (3-10 grilles). N≤3: (0.55, 0.25), 4-6: (0.60, 0.30), 7-10: (0.65, 0.30). Overrides skill/conviction.
 - `select_optimal_n_grids(candidates, n_grids, max_common_balls, max_common_stars)` — greedy selection of N grids maximizing P(5+2) with diversity constraints. v10: Liu-Teo geometric mean overlap bonus (1 common ball optimal = 1.25x).
 - `optimal_subset_k(ball_probs, n_grids)` — (v11) computes optimal subset size K for jackpot enumeration. Currently returns k=50 for typical distributions (no-op).
@@ -194,6 +196,8 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `PopularityModel` — models player number selection biases (birthday bias, lucky numbers, recency)
 - `compute_ev(balls, stars, ball_probs, star_probs, popularity, jackpot)` — computes expected value per euro
 - `ScoredSuggestion` — extends `Suggestion` with `bayesian_score`, `anti_popularity`, `ev_per_euro`
+- `jackpot_timing_multiplier(jackpot)` — v13: EV multiplier vs 50M€ base (player growth ~jackpot^0.6)
+- `jackpot_timing_advice(jackpot)` — v13: human-readable timing recommendation
 
 **Coverage** (`coverage.rs`):
 - `optimize_coverage(ball_probs, star_probs, draws, n_tickets, jackpot, seed)` — generates a set of tickets optimizing pair/triple coverage across the ticket set

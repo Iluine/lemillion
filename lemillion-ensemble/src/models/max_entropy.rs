@@ -55,6 +55,9 @@ impl ForecastModel for MaxEntropyModel {
             self.apply_pair_constraint(draws, pool, &mut log_weights);
         }
 
+        // Constraint 4: Autocorrelation lag-1 (v13)
+        self.apply_autocorrelation_constraint(draws, pool, &mut log_weights);
+
         // Convert log-weights to probabilities
         let max_lw = log_weights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let mut probs: Vec<f64> = log_weights.iter().map(|&lw| (lw - max_lw).exp()).collect();
@@ -212,6 +215,44 @@ impl MaxEntropyModel {
         if any_significant {
             for i in 0..n {
                 log_weights[i] += gap_tilts[i];
+            }
+        }
+    }
+
+    /// Autocorrelation lag-1 constraint (v13): if a number's persistence rate
+    /// (probability of appearing at t+1 given it appeared at t) differs significantly
+    /// from its marginal rate, tilt accordingly for numbers present in the last draw.
+    fn apply_autocorrelation_constraint(&self, draws: &[Draw], pool: Pool, log_weights: &mut [f64]) {
+        if draws.len() < 20 { return; }
+        let size = pool.size();
+        let last_draw = pool.numbers_from(&draws[0]);
+
+        for num in 1..=size as u8 {
+            let idx = (num - 1) as usize;
+            let was_present = last_draw.contains(&num);
+            if !was_present { continue; }
+
+            // Count transitions 1→1 (persistence) in history
+            let mut persist_count = 0usize;
+            let mut present_count = 0usize;
+            for t in 0..draws.len() - 1 {
+                let present = pool.numbers_from(&draws[t]).contains(&num);
+                if present {
+                    present_count += 1;
+                    let next_present = pool.numbers_from(&draws[t + 1]).contains(&num);
+                    if next_present { persist_count += 1; }
+                }
+            }
+            if present_count < 10 { continue; }
+
+            let persist_rate = persist_count as f64 / present_count as f64;
+            let marginal_rate = present_count as f64 / (draws.len() - 1) as f64;
+            let se = (marginal_rate * (1.0 - marginal_rate) / present_count as f64).sqrt();
+            if se < 1e-10 { continue; }
+            let z = (persist_rate - marginal_rate) / se;
+
+            if z.abs() > self.z_threshold {
+                log_weights[idx] += 0.08 * z.signum() * (z.abs() - self.z_threshold).min(3.0);
             }
         }
     }

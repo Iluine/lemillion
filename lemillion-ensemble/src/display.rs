@@ -6,7 +6,7 @@ use crate::analysis::{AnalysisResult, Verdict};
 use crate::ensemble::EnsemblePrediction;
 use crate::ensemble::calibration::{EnsembleWeights, ModelCalibration};
 use crate::ensemble::consensus::{ConsensusCategory, ConsensusEntry};
-use crate::expected_value::{PopularityModel, PRIZE_TIERS, jackpot_threshold, compute_ev};
+use crate::expected_value::{PopularityModel, PRIZE_TIERS, jackpot_threshold, compute_ev, jackpot_timing_multiplier, jackpot_timing_advice};
 use crate::sampler::{ConvictionScore, ConvictionVerdict, DiverseGrids, JackpotResult, ScoredSuggestion};
 use crate::coverage::CoverageStats;
 use crate::research::{ResearchReport, ResearchVerdict};
@@ -691,6 +691,17 @@ pub fn display_ev_summary(popularity: &PopularityModel, jackpot: f64) {
         Cell::new(format!("{:.4}", ev_unpop.ev_per_euro)).fg(
             if ev_unpop.ev_per_euro >= 1.0 { Color::Green } else { Color::Red }
         ),
+    ]);
+
+    // v13: Jackpot timing advice
+    let timing_mult = jackpot_timing_multiplier(jackpot);
+    let timing_color = if timing_mult >= 1.8 { Color::Green }
+        else if timing_mult >= 1.0 { Color::Yellow }
+        else { Color::Red };
+    table.add_row(vec![
+        Cell::new("Timing EV (vs 50M€ base)"),
+        Cell::new(format!("{:.2}x — {}", timing_mult, jackpot_timing_advice(jackpot)))
+            .fg(timing_color),
     ]);
 
     println!("{table}");

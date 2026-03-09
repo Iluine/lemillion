@@ -47,6 +47,8 @@ pub mod draw_order;
 pub mod tlr;
 pub mod particle_stresa;
 pub mod forbidden_patterns;
+pub mod renyi_te;
+pub mod cross_te;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -187,7 +189,8 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Modèles de base de l'ensemble (23 modèles actifs).
+/// Modèles de base de l'ensemble (25 modèles actifs).
+/// v13: RényiTE, CrossTE ajoutés (signaux orthogonaux aux TE existants).
 /// v11: TLR, ParticleStresa, ForbiddenPatterns ajoutés puis exclus (dilution sans signal).
 /// Retirés v9: Copula, Wavelet, Renewal (0% poids boules+étoiles).
 /// Retirés v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles).
@@ -219,6 +222,8 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(star_momentum::StarMomentumModel::default()),
         Box::new(spread::SpreadModel::default()),
         Box::new(draw_order::DrawOrderModel::default()),
+        Box::new(renyi_te::RenyiTEModel::default()),        // v13
+        Box::new(cross_te::CrossTEModel::default()),          // v13
         //Box::new(tlr::TlrModel::default()),
         //Box::new(particle_stresa::ParticleStresaModel::default()),
         //Box::new(forbidden_patterns::ForbiddenPatternsModel::default()),
