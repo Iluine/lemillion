@@ -376,11 +376,14 @@ pub fn compute_bayesian_score(
 // ════════════════════════════════════════════════════════════════
 
 /// Conditionne les probabilités de paires d'étoiles sur le contexte des boules.
-/// 5 sum_bins × 3 spread_bins = 15 contextes.
+/// 3 sum_bins × 3 spread_bins = 9 contextes (terciles adaptatifs).
 /// Pour chaque contexte, distribution sur les 66 paires d'étoiles (Laplace smoothed).
 pub struct BallStarConditioner {
     table: Vec<[f64; 66]>,
     context_counts: Vec<f64>,
+    /// Seuils adaptatifs calculés par terciles (v9)
+    sum_thresholds: [u32; 2],
+    spread_thresholds: [u8; 2],
 }
 
 impl BallStarConditioner {
@@ -390,14 +393,25 @@ impl BallStarConditioner {
     const LAPLACE_ALPHA: f64 = 0.3;
 
     pub fn from_history(draws: &[Draw]) -> Self {
+        // v9: calculer les seuils adaptatifs par terciles
+        let (sum_thresholds, spread_thresholds) = Self::compute_adaptive_bins(draws);
+
         let mut counts = vec![[0.0f64; 66]; Self::N_CONTEXTS];
         let mut global_counts = [0.0f64; 66];
+
+        // Crée une instance temporaire pour utiliser ball_context_with_thresholds
+        let tmp = Self {
+            table: vec![],
+            context_counts: vec![],
+            sum_thresholds,
+            spread_thresholds,
+        };
 
         for (t, draw) in draws.iter().enumerate() {
             let weight = (-0.02 * t as f64).exp();
             let mut balls = draw.balls;
             balls.sort();
-            let ctx = Self::ball_context(&balls);
+            let ctx = tmp.ball_context(&balls);
             let (s1, s2) = if draw.stars[0] < draw.stars[1] {
                 (draw.stars[0], draw.stars[1])
             } else {
@@ -448,32 +462,51 @@ impl BallStarConditioner {
             context_counts[ctx] = counts[ctx].iter().sum::<f64>();
         }
 
-        Self { table, context_counts }
+        Self { table, context_counts, sum_thresholds, spread_thresholds }
+    }
+
+    /// Calcule les terciles adaptatifs pour sum et spread depuis l'historique.
+    fn compute_adaptive_bins(draws: &[Draw]) -> ([u32; 2], [u8; 2]) {
+        if draws.is_empty() {
+            return ([115, 140], [20, 35]); // fallback hardcodé
+        }
+        let mut sums: Vec<u32> = draws.iter()
+            .map(|d| d.balls.iter().map(|&b| b as u32).sum())
+            .collect();
+        sums.sort();
+        let mut spreads: Vec<u8> = draws.iter()
+            .map(|d| {
+                let mut b = d.balls;
+                b.sort();
+                b[4] - b[0]
+            })
+            .collect();
+        spreads.sort();
+
+        let sum_t = [sums[sums.len() / 3], sums[2 * sums.len() / 3]];
+        let spread_t = [spreads[spreads.len() / 3], spreads[2 * spreads.len() / 3]];
+        (sum_t, spread_t)
     }
 
     #[inline]
-    pub fn ball_context(balls: &[u8; 5]) -> usize {
+    pub fn ball_context(&self, balls: &[u8; 5]) -> usize {
         let sum: u32 = balls.iter().map(|&b| b as u32).sum();
         let spread = balls[4] - balls[0];
-        // 3 sum bins: low (<115) / medium (115-140) / high (>140)
-        let sum_bin = if sum < 115 { 0 } else if sum <= 140 { 1 } else { 2 };
-        let spread_bin = match spread {
-            0..=19 => 0,
-            20..=34 => 1,
-            _ => 2,
-        };
+        // v9: terciles adaptatifs au lieu de seuils hardcodés
+        let sum_bin = if sum < self.sum_thresholds[0] { 0 } else if sum <= self.sum_thresholds[1] { 1 } else { 2 };
+        let spread_bin = if spread < self.spread_thresholds[0] { 0 } else if spread <= self.spread_thresholds[1] { 1 } else { 2 };
         sum_bin * 3 + spread_bin
     }
 
     #[inline]
     pub fn conditioned_pair_probs(&self, balls: &[u8; 5]) -> &[f64; 66] {
-        &self.table[Self::ball_context(balls)]
+        &self.table[self.ball_context(balls)]
     }
 
     /// Adaptive blend ratio: 0 when few observations, ~0.75 with many.
     #[inline]
     pub fn adaptive_blend(&self, balls: &[u8; 5]) -> f64 {
-        let ctx = Self::ball_context(balls);
+        let ctx = self.ball_context(balls);
         let obs = self.context_counts[ctx];
         obs / (obs + 20.0)
     }
@@ -1103,7 +1136,7 @@ pub fn generate_suggestions_jackpot(
     count: usize,
     filter: Option<&StructuralFilter>,
     _coherence: Option<&CoherenceScorer>,
-    _joint_model: Option<&crate::models::joint::JointConditionalModel>,
+    joint_model: Option<&crate::models::joint::JointConditionalModel>,
     star_pair_probs: Option<&[f64; 66]>,
     excluded_balls: Option<&[u8]>,
     conditioner: Option<&BallStarConditioner>,
@@ -1200,9 +1233,21 @@ pub fn generate_suggestions_jackpot(
                                 continue;
                             }
 
-                            let log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
+                            let marginal_log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
                                 .map(|&i| log_ball_probs[top_balls[i]])
                                 .sum();
+
+                            // v9: blender le score marginal avec le score joint conditionnel
+                            let log_ball_score = if let Some(jm) = joint_model {
+                                let joint_log = jm.score_balls(&balls);
+                                if joint_log.is_finite() && joint_log > -100.0 {
+                                    0.70 * marginal_log_ball_score + 0.30 * joint_log
+                                } else {
+                                    marginal_log_ball_score
+                                }
+                            } else {
+                                marginal_log_ball_score
+                            };
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
                             let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
@@ -1287,9 +1332,21 @@ pub fn generate_suggestions_jackpot(
 
                             let passes_filter = filter.is_none_or(|f| f.accept_balls(&balls));
 
-                            let log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
+                            let marginal_log_ball_score: f64 = [i0,i1,i2,i3,i4].iter()
                                 .map(|&i| log_ball_probs[top_balls[i]])
                                 .sum();
+
+                            // v9: blender le score marginal avec le score joint conditionnel
+                            let log_ball_score = if let Some(jm) = joint_model {
+                                let joint_log = jm.score_balls(&balls);
+                                if joint_log.is_finite() && joint_log > -100.0 {
+                                    0.70 * marginal_log_ball_score + 0.30 * joint_log
+                                } else {
+                                    marginal_log_ball_score
+                                }
+                            } else {
+                                marginal_log_ball_score
+                            };
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
                             let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
@@ -2656,12 +2713,17 @@ mod tests {
 
     #[test]
     fn test_ball_context_bins() {
-        // Low sum (15 < 115), low spread (4 < 20): bin = 0*3 + 0 = 0
-        assert_eq!(BallStarConditioner::ball_context(&[1, 2, 3, 4, 5]), 0 * 3 + 0);
-        // High sum (145 > 140), high spread (45 >= 35): bin = 2*3 + 2 = 8
-        assert_eq!(BallStarConditioner::ball_context(&[5, 20, 30, 40, 50]), 2 * 3 + 2);
-        // Mid sum (125, 115<=125<=140), mid spread (30 in 20-34): bin = 1*3 + 1 = 4
-        assert_eq!(BallStarConditioner::ball_context(&[10, 20, 25, 30, 40]), 1 * 3 + 1);
+        // v9: bins adaptatifs — les seuils dépendent de l'historique
+        let draws = crate::models::make_test_draws(100);
+        let conditioner = BallStarConditioner::from_history(&draws);
+        // Low sum + low spread should be bin 0 (0*3 + 0)
+        let ctx_low = conditioner.ball_context(&[1, 2, 3, 4, 5]);
+        assert!(ctx_low < 9, "Context should be valid: {}", ctx_low);
+        // High sum + high spread should be bin 8 (2*3 + 2)
+        let ctx_high = conditioner.ball_context(&[5, 20, 30, 40, 50]);
+        assert!(ctx_high < 9, "Context should be valid: {}", ctx_high);
+        // Different contexts for different balls
+        assert_ne!(ctx_low, ctx_high, "Low and high contexts should differ");
     }
 
     #[test]

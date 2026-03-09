@@ -36,16 +36,22 @@ fn parse_record(record: &csv::StringRecord) -> Result<Draw> {
     let raw_date = get(2)?;
     let date = parse_date(&raw_date)?;
 
-    let mut balls: [u8; 5] = [
+    // Ordre d'extraction physique (machine Stresa) — préservé avant le tri
+    let ball_order: [u8; 5] = [
         get_u8(5)?,
         get_u8(6)?,
         get_u8(7)?,
         get_u8(8)?,
         get_u8(9)?,
     ];
-    let mut stars: [u8; 2] = [get_u8(10)?, get_u8(11)?];
+    let star_order: [u8; 2] = [get_u8(10)?, get_u8(11)?];
+    let mut balls = ball_order;
+    let mut stars = star_order;
     balls.sort();
     stars.sort();
+
+    // Numéro de tirage dans le cycle (colonne 3)
+    let cycle_number: Option<u8> = get(3).ok().and_then(|s| s.parse().ok());
 
     let winner_count_str = get(15).unwrap_or_default();
     let winner_count: i32 = if winner_count_str.is_empty() {
@@ -67,6 +73,9 @@ fn parse_record(record: &csv::StringRecord) -> Result<Draw> {
         winner_count,
         winner_prize,
         my_million,
+        ball_order: Some(ball_order),
+        star_order: Some(star_order),
+        cycle_number,
     })
 }
 

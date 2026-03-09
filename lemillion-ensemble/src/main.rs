@@ -1333,6 +1333,9 @@ fn cmd_add_draw(conn: &lemillion_db::rusqlite::Connection, args: &[String]) -> R
         winner_count: 0,
         winner_prize: 0.0,
         my_million: String::new(),
+        ball_order: None,
+        star_order: None,
+        cycle_number: None,
     };
     draw.normalize();
     lemillion_db::models::validate_draw(&draw.balls, &draw.stars)?;
@@ -1366,6 +1369,9 @@ fn cmd_fix_draw(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
         winner_count: 0,
         winner_prize: 0.0,
         my_million: String::new(),
+        ball_order: None,
+        star_order: None,
+        cycle_number: None,
     };
 
     let inserted = insert_draw(conn, &corrected)?;

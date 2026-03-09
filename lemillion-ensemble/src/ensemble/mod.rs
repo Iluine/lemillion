@@ -244,10 +244,12 @@ impl EnsembleCombiner {
     ) -> EnsemblePrediction {
         let base = self.predict(draws, pool);
 
-        let max_spread = base.spread.iter().cloned().fold(0.0f64, f64::max);
-        if max_spread < 1e-15 {
-            return base; // pas de spread → pas de boost
-        }
+        // v9: utiliser Q75 du spread comme référence au lieu du max
+        // (le max est sensible aux outliers — un seul modèle en désaccord extrême rend le boost inutile)
+        let mut sorted_spreads: Vec<f64> = base.spread.clone();
+        sorted_spreads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let q75_idx = (sorted_spreads.len() * 3) / 4;
+        let reference_spread = sorted_spreads[q75_idx].max(1e-15);
 
         let uniform_val = 1.0 / pool.size() as f64;
         let mut boosted = base.distribution.clone();
@@ -255,7 +257,7 @@ impl EnsembleCombiner {
             // Only boost numbers that are both FAVORED and UNANIMOUS
             // deviation > 0 = above uniform, < 0 = below uniform
             let deviation = (base.distribution[i] / uniform_val) - 1.0;
-            let spread_agreement = 1.0 - base.spread[i] / max_spread;
+            let spread_agreement = (1.0 - base.spread[i] / reference_spread).max(0.0);
             let agreement = deviation * spread_agreement;
             *p *= 1.0 + strength * agreement;
             if *p < 0.0 { *p = 1e-15; }

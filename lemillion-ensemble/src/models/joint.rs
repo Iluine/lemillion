@@ -119,6 +119,67 @@ impl JointConditionalModel {
         self.trained = true;
     }
 
+    /// Score les boules par le modèle joint, normalisé vs uniforme séquentiel.
+    /// Retourne log(P_joint / P_uniform) — même échelle que le score marginal.
+    /// P_uniform_seq = 1/50 × 1/49 × 1/48 × 1/47 × 1/46.
+    pub fn score_balls(&self, balls: &[u8; 5]) -> f64 {
+        let raw = self.score_balls_raw(balls);
+        if raw == 0.0 { return 0.0; } // untrained
+        // Normaliser: soustraire le log-score uniforme séquentiel
+        let log_uniform_seq: f64 = (0..5).map(|k| -((50 - k) as f64).ln()).sum();
+        raw - log_uniform_seq
+    }
+
+    /// Score brut log P(b1,...,b5) sans normalisation.
+    fn score_balls_raw(&self, balls: &[u8; 5]) -> f64 {
+        if !self.trained {
+            return 0.0;
+        }
+
+        let mut sorted_balls = *balls;
+        sorted_balls.sort();
+
+        let mut log_score = 0.0;
+        for pos in 0..5 {
+            let ball = sorted_balls[pos];
+            let ball_idx = (ball - 1) as usize;
+            let prefix = &sorted_balls[..pos];
+            let key = encode_prefix_state(prefix);
+
+            let probs = if let Some(table) = self.position_tables[pos].get(&key) {
+                let count: f64 = table.iter().sum::<f64>() - self.laplace_alpha * 50.0;
+                let adaptive_alpha = self.laplace_alpha / (1.0 + count.max(0.0) / 10.0);
+                let smoothed: Vec<f64> = table.iter().enumerate().map(|(i, &c)| {
+                    let raw_count = c - self.laplace_alpha;
+                    raw_count.max(0.0) + adaptive_alpha + self.normalized_marginal(pos)[i] * adaptive_alpha
+                }).collect();
+                let total: f64 = smoothed.iter().sum();
+                if total > 0.0 {
+                    smoothed.iter().map(|&c| c / total).collect::<Vec<f64>>()
+                } else {
+                    self.normalized_marginal(pos)
+                }
+            } else {
+                self.normalized_marginal(pos)
+            };
+
+            let available_prob: f64 = probs.iter().enumerate()
+                .filter(|(idx, _)| !prefix.contains(&((*idx + 1) as u8)))
+                .map(|(_, &p)| p)
+                .sum();
+
+            let p = if available_prob > 0.0 {
+                probs[ball_idx] / available_prob
+            } else {
+                1.0 / (50 - pos) as f64
+            };
+
+            log_score += p.max(1e-15).ln();
+        }
+
+        log_score
+    }
+
     /// Score une grille complète par le modèle joint.
     /// Retourne log P(grille) comme somme des log P(bk | b1,...,bk-1).
     /// Inclut cross-pool conditioning P(star | ball_sum_bin).

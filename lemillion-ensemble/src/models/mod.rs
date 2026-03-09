@@ -43,6 +43,7 @@ pub mod rqa_predictability;
 pub mod wavelet;
 pub mod copula;
 pub mod renewal;
+pub mod draw_order;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -183,9 +184,8 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Modèles de base de l'ensemble (25 modèles actifs).
-/// Ajoutés v6: TripletBoost (réactivé, z>2, temporal weighting), StarMomentum (DFA Hurst),
-///   Spread (clustering gaussien).
+/// Modèles de base de l'ensemble (23 modèles actifs).
+/// Retirés v9: Copula, Wavelet, Renewal (0% poids boules+étoiles).
 /// Retirés v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles).
 /// Retirés v5: RandomForest, ModProfile, StresaSMC, GapDynamics, ModTrans.
 /// Retirés v4: CTW, Spectral, StarRecency, BME/Mixture.
@@ -214,9 +214,7 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(triplet::TripletBoostModel::default()),
         Box::new(star_momentum::StarMomentumModel::default()),
         Box::new(spread::SpreadModel::default()),
-        Box::new(copula::CopulaModel::default()),
-        Box::new(wavelet::WaveletModel::default()),
-        Box::new(renewal::RenewalModel::default()),
+        Box::new(draw_order::DrawOrderModel::default()),
     ]
 }
 
@@ -247,6 +245,9 @@ pub fn make_test_draws(n: usize) -> Vec<Draw> {
                 winner_count: 0,
                 winner_prize: 0.0,
                 my_million: String::new(),
+                ball_order: None,
+                star_order: None,
+                cycle_number: None,
             }
         })
         .collect()
@@ -288,6 +289,9 @@ mod tests {
                 winner_count: 0,
                 winner_prize: 0.0,
                 my_million: String::new(),
+                ball_order: None,
+                star_order: None,
+                cycle_number: None,
             })
             .collect();
         let filtered = filter_star_era(&draws);
@@ -303,30 +307,35 @@ mod tests {
                 date: "2024-01-04".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
             Draw {
                 draw_id: "3".to_string(), day: "MARDI".to_string(),
                 date: "2020-06-15".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
             Draw {
                 draw_id: "2".to_string(), day: "MARDI".to_string(),
                 date: "2016-09-27".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
             Draw {
                 draw_id: "1".to_string(), day: "MARDI".to_string(),
                 date: "2016-09-26".to_string(),  // one day before cutoff
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
             Draw {
                 draw_id: "0".to_string(), day: "MARDI".to_string(),
                 date: "2010-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
         ];
         let filtered = filter_star_era(&draws);
@@ -343,12 +352,14 @@ mod tests {
                 date: "2015-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
             Draw {
                 draw_id: "0".to_string(), day: "MARDI".to_string(),
                 date: "2010-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
+                ball_order: None, star_order: None, cycle_number: None,
             },
         ];
         let filtered = filter_star_era(&draws);

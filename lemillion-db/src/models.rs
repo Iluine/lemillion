@@ -10,6 +10,12 @@ pub struct Draw {
     pub winner_count: i32,
     pub winner_prize: f64,
     pub my_million: String,
+    /// Ordre d'extraction physique des boules (machine Stresa). None pour les draws ajoutés manuellement.
+    pub ball_order: Option<[u8; 5]>,
+    /// Ordre d'extraction physique des étoiles. None pour les draws ajoutés manuellement.
+    pub star_order: Option<[u8; 2]>,
+    /// Numéro de tirage dans le cycle (colonne 3 du CSV FDJ).
+    pub cycle_number: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +172,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         assert_eq!(Pool::Balls.numbers_from(&draw), &[1, 2, 3, 4, 5]);
         assert_eq!(Pool::Stars.numbers_from(&draw), &[6, 7]);

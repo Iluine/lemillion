@@ -624,15 +624,28 @@ pub fn apply_decorrelation_penalty(
             .find(|(n, _)| *n == r.model_b)
             .map(|(_, w)| *w)
             .unwrap_or(0.0);
-        let weaker = if w_a <= w_b {
-            &r.model_a
-        } else {
-            &r.model_b
-        };
         let penalty =
             (1.0 - strength * (r.correlation - min_corr) / (1.0 - min_corr)).max(floor);
-        if let Some((_, w)) = weights.iter_mut().find(|(n, _)| n == weaker) {
-            *w *= penalty;
+
+        // Fix v9: quand les poids sont quasi-égaux, pénaliser les DEUX modèles
+        // avec sqrt(penalty) au lieu de pénaliser arbitrairement le premier.
+        let weight_ratio = if w_a > 0.0 && w_b > 0.0 {
+            (w_a / w_b).min(w_b / w_a)
+        } else {
+            0.0
+        };
+        if weight_ratio > 0.95 {
+            let sqrt_penalty = penalty.sqrt();
+            for name in [&r.model_a, &r.model_b] {
+                if let Some((_, w)) = weights.iter_mut().find(|(n, _)| n == name) {
+                    *w *= sqrt_penalty;
+                }
+            }
+        } else {
+            let weaker = if w_a <= w_b { &r.model_a } else { &r.model_b };
+            if let Some((_, w)) = weights.iter_mut().find(|(n, _)| n == weaker) {
+                *w *= penalty;
+            }
         }
     }
     let total: f64 = weights.iter().map(|(_, w)| w).sum();
@@ -1168,14 +1181,14 @@ mod tests {
             correlation: 1.0,
         }];
         // strength=1.0 would give penalty = 0, but floor = 0.30 applies
+        // v9: with equal weights (ratio > 0.95), BOTH get sqrt(floor) penalty
         apply_decorrelation_penalty(&mut weights, &redundancies, 0.80, 1.0, 0.30);
         let a_w = weights.iter().find(|(n, _)| n == "A").unwrap().1;
         let b_w = weights.iter().find(|(n, _)| n == "B").unwrap().1;
-        // One of them got floor penalty (0.30), the other is original
-        // Since both equal, first alphabetically gets penalized (model_a = "A")
-        // Actually with equal weights, w_a <= w_b → weaker = model_a = "A"
-        // A: 0.5 * 0.30 = 0.15, B: 0.5, total = 0.65
-        assert!(a_w < b_w);
+        // Both penalized equally with sqrt(0.30) ≈ 0.5477
+        // A: 0.5 * 0.5477, B: 0.5 * 0.5477 → equal after renormalization
+        assert!((a_w - b_w).abs() < 1e-10, "Equal weights should be penalized equally: A={} B={}", a_w, b_w);
+        assert!((a_w - 0.5).abs() < 1e-10, "Both should be 0.5 after renormalization: A={}", a_w);
         let sum: f64 = weights.iter().map(|(_, w)| w).sum();
         assert!((sum - 1.0).abs() < 1e-10);
     }

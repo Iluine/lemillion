@@ -376,6 +376,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         assert_eq!(count_matches(&[1, 2, 3, 4, 5], &[1, 2], &draw), (5, 2));
     }
@@ -391,6 +394,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         assert_eq!(count_matches(&[1, 2, 10, 20, 30], &[1, 8], &draw), (2, 1));
     }
@@ -406,6 +412,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         assert_eq!(count_matches(&[10, 20, 30, 40, 50], &[8, 9], &draw), (0, 0));
     }

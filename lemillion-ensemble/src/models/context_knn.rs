@@ -19,7 +19,7 @@ impl Default for ContextKnnModel {
     fn default() -> Self {
         Self {
             k: 15,
-            smoothing: 0.40,
+            smoothing: 0.30,
             min_draws: 30,
         }
     }

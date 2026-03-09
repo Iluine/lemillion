@@ -2728,6 +2728,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         let state = encode_state_balls(&draw, None);
         assert_eq!(state.len(), 3, "Balls state should be 3D");
@@ -2747,6 +2750,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: String::new(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         };
         let state = encode_state_stars(&draw, None);
         assert_eq!(state.len(), 2, "Stars state should be 2D");

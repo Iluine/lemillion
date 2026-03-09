@@ -326,6 +326,9 @@ mod tests {
                     winner_count: 0,
                     winner_prize: 0.0,
                     my_million: String::new(),
+                    ball_order: None,
+                    star_order: None,
+                    cycle_number: None,
                 }
             })
             .collect()

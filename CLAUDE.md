@@ -73,7 +73,7 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal,draw_order}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus,meta,stacking}.rs
     src/research/{mod,physical,mathematical,informational,dfa,rqa}.rs
@@ -83,7 +83,7 @@ lemillion/                          (workspace root)
 
 ### lemillion-db (shared types)
 
-- `Draw` — full draw record (id, date, 5 balls [1-50], 2 stars [1-12], winners, prize, My Million)
+- `Draw` — full draw record (id, date, 5 balls [1-50], 2 stars [1-12], winners, prize, My Million, ball_order, star_order, cycle_number)
 - `Pool` — enum `Balls | Stars` with `size()`, `pick_count()`, `numbers_from(draw)`
 - `Suggestion` — struct `{ balls: [u8;5], stars: [u8;2], score: f64 }`
 - `validate_draw` — ensures ranges and no duplicates
@@ -96,7 +96,7 @@ lemillion/                          (workspace root)
 
 Data flows: **CSV -> SQLite -> analysis -> terminal tables**.
 
-- `import.rs` — Parses the FDJ CSV (`;`-delimited, French decimals, `flexible(true)`). Dates DD/MM/YYYY to YYYY-MM-DD.
+- `import.rs` — Parses the FDJ CSV (`;`-delimited, French decimals, `flexible(true)`). Dates DD/MM/YYYY to YYYY-MM-DD. Preserves physical extraction order (ball_order, star_order) and cycle_number.
 - `analysis/` — Models operate on `Vec<([u8;5], [u8;2])>` (index 0 = most recent)
 - `PredictionModel` — local `clap::ValueEnum` enum (`Dirichlet` | `Ewma`)
 
@@ -124,7 +124,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-25 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+23 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
 
 **IMPORTANT (v4)**: The Stresa machine uses 3 central bars + 8 external bars (mod-8 symmetry for balls), and the Pâquerette uses 4 blades (mod-4 for stars). All modular models are pool-aware via `mod4::modulus(pool)`. Star data before 2016-09-27 uses incompatible pool sizes and is filtered via `filter_star_era()`.
 
@@ -139,7 +139,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 8. **StarSpecialist** **(S×3)** — Modèle dédié étoiles: 4 micro-experts combinés via Hedge. Retourne uniforme pour Pool::Balls. (smoothing=0.35, learning_rate=0.15, min_draws=30)
 9. **TransferEntropy** **(S×4)** — Paires causales TE(source→target) avec seuil vs baseline permutée. Cross-pool TE(ball→star) pour les étoiles. calibration_stride=2. (alpha=2.0, te_threshold_factor=3.0, smoothing=0.30, n_top_sources=15)
 10. **StarPair** **(S×3)** — Prédit les 66 paires d'étoiles via 3 experts Hedge. Expose `predict_pair_distribution()` pour scoring direct par paires. (smoothing=0.25, learning_rate=0.15, min_draws=50)
-11. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.40, min_draws=30)
+11. **ContextKNN** **(S×3)** — k-NN basé sur contexte 4D. Fonctionne pour boules ET étoiles. (k=15, smoothing=0.30, min_draws=30)
 12. **MaxEntropy** — Maximum entropy distribution with bias tilts from detected non-random signals. (smoothing=0.25, mod_tilts coef=0.08)
 13. **HMM** **(S×3)** — Hidden Markov Model with K=4/8 hidden states (pool-aware). Baum-Welch + forward algorithm. (n_states=4/8, max_iter=20, smoothing=0.35)
 14. **Boltzmann** **(S×3)** — Markov Random Field for ball interactions. Mean-field approximation. (coupling_strength=0.3, smoothing=0.20)
@@ -151,18 +151,17 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 20. **TripletBoost** **(S×3)** — Triplet co-occurrence patterns avec pondération temporelle et seuil z>2. (smoothing=0.25)
 21. **StarMomentum** **(S×3)** — DFA Hurst exponent pour détection momentum/mean-reversion sur fréquences étoiles. (smoothing=0.30)
 22. **Spread** **(S×3)** — Clustering gaussien sur le spread (max-min) des tirages récents. (smoothing=0.25)
-23. **Copula** **(S×3)** — Copule Gaussienne: marginales EWMA + corrélation Spearman + régression conditionnelle gaussienne. (window=100, ewma_alpha=0.05, smoothing=0.25)
-24. **Wavelet** — DWT Haar multi-échelle (3 niveaux): tendance long-terme + cycles moyens/courts. (window=64, n_levels=3, smoothing=0.30)
-25. **Renewal** **(S×4)** — Processus de renouvellement Weibull: ajustement MLE shape/scale des gaps, hazard conditionnel. (window=200, min_gaps=8, smoothing=0.25)
+23. **DrawOrder** **(S×4)** — Exploite l'ordre d'extraction physique (brevet Stresa US6145836A). EWMA fréquences + tilt positionnel (précoce vs tardif). (ewma_alpha=0.05, position_weight=0.15, smoothing=0.25, min_draws_with_order=50)
 
 **Retired models** (modules still exist but excluded from `base_models()` — see `RETIRED_MODELS.md` for full details):
+- v9: Copula, Wavelet, Renewal (0% poids boules+étoiles)
 - v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles)
 - v5: RandomForest, ModProfile, StresaSMC (corr 0.913 StresaChaos), GapDynamics, ModTrans (corr 0.975 ModularBalls)
 - v4: CTW, Spectral, StarRecency, BME/Mixture
 - v1-v3: Dirichlet, EWMA, Markov, Retard, HotStreak, ESN, TakensKNN, NVAR, NVAR-Memo, CondSummary (V1), Diffusion, JackpotContext
 
 **Utility types** (not `ForecastModel`, used internally):
-- **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`.
+- **JointConditionalModel** (`joint.rs`) — Sequential joint conditional scorer: P(draw) = P(b1) × P(b2|b1) × ... × P(b5|b1..b4). Mirrors Stresa's physical process. Scores complete grids via `score_grid()`. Also `score_balls()` for normalized ball-only scoring (used in jackpot mode with 70/30 marginal/joint blend).
 - **SummaryPredictor** (`summary_predictor.rs`) — Markov order-1 on summary states (sum_bin, spread_bin, odd_count). Used by sampler for adaptive filtering.
 - **NeuralScorer** (`neural_scorer.rs`) — 3-layer MLP (62→32→16→1) ensemble of 5 networks. Scores complete grids for reranking. Saved/loaded as `neural_scorer.json`. Optional in jackpot mode (`--neural-rerank`).
 
@@ -180,8 +179,8 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 - `CoherenceScorer` — computes historical sum/spread stats, pair and triplet co-occurrence frequencies. Weights: 0.35*sum + 0.25*spread + 0.25*pair + 0.15*triplet
 - `compute_bayesian_score(balls, stars, ball_probs, star_probs)` — standalone scoring function
 - Diversity: greedy selection enforcing `min_ball_diff` (default 2) differing balls between any pair
-- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls, conditioner, neural_scorer)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset, K_balls minimum 25), 5 nested loops, min-heap for large enumerations. Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion (disabled for jackpots >100M). Optional `conditioner` for ball→star conditional scoring. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
-- `BallStarConditioner` — models conditional star pair probabilities given ball context (sum_bin × spread_bin). Built from history, produces 12×12 probability tables per context bin. Adaptive blend via `adaptive_blend()`: `obs/(obs+20)` per context (0 with few obs, ~0.75 with many).
+- `generate_suggestions_jackpot(ball_probs, star_probs, count, filter, coherence, joint_model, star_pair_probs, excluded_balls, conditioner, neural_scorer)` — **jackpot mode**: exhaustive enumeration of top-N combinations by P(5+2). Adaptive K (balls/stars subset, K_balls minimum 25), 5 nested loops, min-heap for large enumerations. Ball scoring blends 70% marginal + 30% joint conditional (via `JointConditionalModel.score_balls()`). Optional `star_pair_probs` for pair-aware star scoring (from StarPairModel). Optional `excluded_balls` for K-reduction via consensus exclusion (disabled for jackpots >100M). Optional `conditioner` for ball→star conditional scoring. Returns `JackpotResult { suggestions, total_jackpot_probability, enumeration_size, filtered_size, improvement_factor }`
+- `BallStarConditioner` — models conditional star pair probabilities given ball context (sum_bin × spread_bin). Built from history with adaptive tercile bins (v9), produces 12×12 probability tables per context bin. Adaptive blend via `adaptive_blend()`: `obs/(obs+20)` per context (0 with few obs, ~0.75 with many).
 - `conviction_temperature(verdict)` — adaptive temperature: HighConviction→0.10, MediumConviction→0.20, LowConviction→0.25
 - `conviction_temperature_split(conviction)` — separate ball/star temperatures. For jackpots >100M: T_balls forced to 1.0 (no sharpening) to avoid over-concentration on favorite balls; T_stars remains aggressive (0.20-0.40).
 - `few_grid_temperature(n_grids)` — forced temperatures for few-grid mode (3-10 grilles). N≤3: (0.55, 0.25), 4-6: (0.60, 0.30), 7-10: (0.65, 0.30). Overrides skill/conviction.
@@ -293,6 +292,7 @@ Bias detection module organized in 3 axes. Each test returns `TestResult { test_
 - Tests use `Connection::open_in_memory()` for DB tests
 - The `--alpha` flag has different semantics per model (Dirichlet: prior strength, EWMA: decay factor 0<alpha<1)
 - `draws[0]` = most recent draw in all contexts
+- `Draw.balls`/`stars` are always sorted ascending; `Draw.ball_order`/`star_order` preserve physical extraction order (None for manually-added draws)
 - `Pool::numbers_from(draw)` to extract balls/stars from a Draw
 - Display uses `comfy-table` with `UTF8_FULL` preset and `Cell::fg(Color)` for emphasis
 - Progress bars via `indicatif` for calibrate, backtest, and grid search

@@ -42,13 +42,32 @@ pub fn open_db(path: &Path) -> Result<Connection> {
 pub fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)
         .context("Échec de la migration")?;
+
+    // Migration v9 : colonnes pour l'ordre d'extraction physique + cycle_number
+    let new_columns = [
+        "ball_order_1 INTEGER",
+        "ball_order_2 INTEGER",
+        "ball_order_3 INTEGER",
+        "ball_order_4 INTEGER",
+        "ball_order_5 INTEGER",
+        "star_order_1 INTEGER",
+        "star_order_2 INTEGER",
+        "cycle_number INTEGER",
+    ];
+    for col in &new_columns {
+        let sql = format!("ALTER TABLE draws ADD COLUMN {}", col);
+        // Ignorer "duplicate column" si la migration a déjà été appliquée
+        let _ = conn.execute_batch(&sql);
+    }
+
     Ok(())
 }
 
 pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
     let changed = conn.execute(
-        "INSERT OR IGNORE INTO draws (draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT OR IGNORE INTO draws (draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million,
+         ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         rusqlite::params![
             draw.draw_id,
             draw.day,
@@ -63,8 +82,37 @@ pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
             draw.winner_count,
             draw.winner_prize,
             draw.my_million,
+            draw.ball_order.map(|o| o[0]),
+            draw.ball_order.map(|o| o[1]),
+            draw.ball_order.map(|o| o[2]),
+            draw.ball_order.map(|o| o[3]),
+            draw.ball_order.map(|o| o[4]),
+            draw.star_order.map(|o| o[0]),
+            draw.star_order.map(|o| o[1]),
+            draw.cycle_number,
         ],
     ).context("Échec de l'insertion")?;
+
+    // Si le draw existait déjà mais sans ordre d'extraction, mettre à jour
+    if changed == 0 && draw.ball_order.is_some() {
+        conn.execute(
+            "UPDATE draws SET ball_order_1=?2, ball_order_2=?3, ball_order_3=?4, ball_order_4=?5, ball_order_5=?6,
+             star_order_1=?7, star_order_2=?8, cycle_number=?9
+             WHERE draw_id=?1 AND ball_order_1 IS NULL",
+            rusqlite::params![
+                draw.draw_id,
+                draw.ball_order.map(|o| o[0]),
+                draw.ball_order.map(|o| o[1]),
+                draw.ball_order.map(|o| o[2]),
+                draw.ball_order.map(|o| o[3]),
+                draw.ball_order.map(|o| o[4]),
+                draw.star_order.map(|o| o[0]),
+                draw.star_order.map(|o| o[1]),
+                draw.cycle_number,
+            ],
+        ).context("Échec de la mise à jour de l'ordre")?;
+    }
+
     Ok(changed > 0)
 }
 
@@ -76,32 +124,54 @@ pub fn delete_draw(conn: &Connection, draw_id: &str) -> Result<bool> {
     Ok(changed > 0)
 }
 
+const SELECT_DRAW_COLS: &str = "draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million, ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number";
+
+fn draw_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Draw> {
+    let bo1: Option<u8> = row.get(13)?;
+    let bo2: Option<u8> = row.get(14)?;
+    let bo3: Option<u8> = row.get(15)?;
+    let bo4: Option<u8> = row.get(16)?;
+    let bo5: Option<u8> = row.get(17)?;
+    let so1: Option<u8> = row.get(18)?;
+    let so2: Option<u8> = row.get(19)?;
+
+    let ball_order = match (bo1, bo2, bo3, bo4, bo5) {
+        (Some(a), Some(b), Some(c), Some(d), Some(e)) => Some([a, b, c, d, e]),
+        _ => None,
+    };
+    let star_order = match (so1, so2) {
+        (Some(a), Some(b)) => Some([a, b]),
+        _ => None,
+    };
+
+    Ok(Draw {
+        draw_id: row.get(0)?,
+        day: row.get(1)?,
+        date: row.get(2)?,
+        balls: [
+            row.get::<_, u8>(3)?,
+            row.get::<_, u8>(4)?,
+            row.get::<_, u8>(5)?,
+            row.get::<_, u8>(6)?,
+            row.get::<_, u8>(7)?,
+        ],
+        stars: [
+            row.get::<_, u8>(8)?,
+            row.get::<_, u8>(9)?,
+        ],
+        winner_count: row.get(10)?,
+        winner_prize: row.get(11)?,
+        my_million: row.get(12)?,
+        ball_order,
+        star_order,
+        cycle_number: row.get(20)?,
+    })
+}
+
 pub fn fetch_last_draws(conn: &Connection, limit: u32) -> Result<Vec<Draw>> {
-    let mut stmt = conn.prepare(
-        "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
-         FROM draws ORDER BY date DESC, draw_id DESC LIMIT ?1"
-    )?;
-    let mut draws: Vec<Draw> = stmt.query_map([limit], |row| {
-        Ok(Draw {
-            draw_id: row.get(0)?,
-            day: row.get(1)?,
-            date: row.get(2)?,
-            balls: [
-                row.get::<_, u8>(3)?,
-                row.get::<_, u8>(4)?,
-                row.get::<_, u8>(5)?,
-                row.get::<_, u8>(6)?,
-                row.get::<_, u8>(7)?,
-            ],
-            stars: [
-                row.get::<_, u8>(8)?,
-                row.get::<_, u8>(9)?,
-            ],
-            winner_count: row.get(10)?,
-            winner_prize: row.get(11)?,
-            my_million: row.get(12)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let sql = format!("SELECT {} FROM draws ORDER BY date DESC, draw_id DESC LIMIT ?1", SELECT_DRAW_COLS);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut draws: Vec<Draw> = stmt.query_map([limit], draw_from_row)?.collect::<Result<Vec<_>, _>>()?;
     for d in &mut draws { d.normalize(); }
     Ok(draws)
 }
@@ -132,62 +202,18 @@ pub fn fetch_last_draws_numbers(conn: &Connection, limit: u32) -> Result<Vec<([u
 
 /// Récupère le tirage correspondant à une date (format YYYY-MM-DD).
 pub fn fetch_draw_by_date(conn: &Connection, date: &str) -> Result<Option<Draw>> {
-    let mut stmt = conn.prepare(
-        "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
-         FROM draws WHERE date = ?1 ORDER BY draw_id DESC LIMIT 1"
-    )?;
-    let mut draws: Vec<Draw> = stmt.query_map([date], |row| {
-        Ok(Draw {
-            draw_id: row.get(0)?,
-            day: row.get(1)?,
-            date: row.get(2)?,
-            balls: [
-                row.get::<_, u8>(3)?,
-                row.get::<_, u8>(4)?,
-                row.get::<_, u8>(5)?,
-                row.get::<_, u8>(6)?,
-                row.get::<_, u8>(7)?,
-            ],
-            stars: [
-                row.get::<_, u8>(8)?,
-                row.get::<_, u8>(9)?,
-            ],
-            winner_count: row.get(10)?,
-            winner_prize: row.get(11)?,
-            my_million: row.get(12)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let sql = format!("SELECT {} FROM draws WHERE date = ?1 ORDER BY draw_id DESC LIMIT 1", SELECT_DRAW_COLS);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut draws: Vec<Draw> = stmt.query_map([date], draw_from_row)?.collect::<Result<Vec<_>, _>>()?;
     for d in &mut draws { d.normalize(); }
     Ok(draws.pop())
 }
 
 /// Récupère tous les tirages avec date strictement avant `before_date` (format YYYY-MM-DD).
 pub fn fetch_draws_before_date(conn: &Connection, before_date: &str) -> Result<Vec<Draw>> {
-    let mut stmt = conn.prepare(
-        "SELECT draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million
-         FROM draws WHERE date < ?1 ORDER BY date DESC, draw_id DESC"
-    )?;
-    let mut draws: Vec<Draw> = stmt.query_map([before_date], |row| {
-        Ok(Draw {
-            draw_id: row.get(0)?,
-            day: row.get(1)?,
-            date: row.get(2)?,
-            balls: [
-                row.get::<_, u8>(3)?,
-                row.get::<_, u8>(4)?,
-                row.get::<_, u8>(5)?,
-                row.get::<_, u8>(6)?,
-                row.get::<_, u8>(7)?,
-            ],
-            stars: [
-                row.get::<_, u8>(8)?,
-                row.get::<_, u8>(9)?,
-            ],
-            winner_count: row.get(10)?,
-            winner_prize: row.get(11)?,
-            my_million: row.get(12)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let sql = format!("SELECT {} FROM draws WHERE date < ?1 ORDER BY date DESC, draw_id DESC", SELECT_DRAW_COLS);
+    let mut stmt = conn.prepare(&sql)?;
+    let mut draws: Vec<Draw> = stmt.query_map([before_date], draw_from_row)?.collect::<Result<Vec<_>, _>>()?;
     for d in &mut draws { d.normalize(); }
     Ok(draws)
 }
@@ -211,6 +237,9 @@ mod tests {
             winner_count: 0,
             winner_prize: 0.0,
             my_million: "AA 000 0000".to_string(),
+            ball_order: None,
+            star_order: None,
+            cycle_number: None,
         }
     }
 
