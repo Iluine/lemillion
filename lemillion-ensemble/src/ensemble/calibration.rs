@@ -53,6 +53,13 @@ pub struct EnsembleWeights {
     /// Poids de stacking étoiles (optionnel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stacking_stars: Option<crate::ensemble::stacking::StackingWeights>,
+    /// Matrice de corrélation complète entre modèles (boules) — v7 decorrelation.
+    /// Vec<(model_a, model_b, correlation)> pour toutes paires avec |corr| > 0.3.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub correlation_matrix: Vec<(String, String, f64)>,
+    /// Matrice de corrélation étoiles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub star_correlation_matrix: Vec<(String, String, f64)>,
 }
 
 /// Calcule le nombre réel de test points après stride.
@@ -636,6 +643,84 @@ pub fn apply_decorrelation_penalty(
     }
 }
 
+/// Compute the full correlation matrix for all model pairs (v7).
+/// Returns all pairs with |correlation| > min_corr.
+pub fn compute_correlation_matrix(
+    detailed_ll: &[(String, Vec<f64>)],
+    min_corr: f64,
+) -> Vec<(String, String, f64)> {
+    let n = detailed_ll.len();
+    let mut results = Vec::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (name_a, lls_a) = &detailed_ll[i];
+            let (name_b, lls_b) = &detailed_ll[j];
+
+            let len = lls_a.len().min(lls_b.len());
+            if len < 5 {
+                continue;
+            }
+
+            let corr = pearson_correlation(&lls_a[..len], &lls_b[..len]);
+            if corr.abs() > min_corr {
+                results.push((name_a.clone(), name_b.clone(), corr));
+            }
+        }
+    }
+
+    results
+}
+
+/// Compute effective weights accounting for model correlations (v7).
+/// effective_w_i = w_i × Π_j sqrt(1 - ρ_ij²) for j with ρ_ij > threshold.
+/// This penalizes correlated models to avoid double-counting in the log-linear pool.
+pub fn compute_decorrelated_weights(
+    weights: &[f64],
+    model_names: &[String],
+    correlation_matrix: &[(String, String, f64)],
+    threshold: f64,
+) -> Vec<f64> {
+    let n = weights.len();
+    let mut effective = weights.to_vec();
+
+    for i in 0..n {
+        let name_i = &model_names[i];
+        let mut penalty = 1.0f64;
+
+        for (a, b, corr) in correlation_matrix {
+            if corr.abs() <= threshold {
+                continue;
+            }
+            // Check if this correlation involves model i
+            let partner = if a == name_i {
+                Some(b)
+            } else if b == name_i {
+                Some(a)
+            } else {
+                None
+            };
+
+            if partner.is_some() {
+                // Penalty: sqrt(1 - ρ²) for significant correlations
+                penalty *= (1.0 - corr * corr).max(0.01).sqrt();
+            }
+        }
+
+        effective[i] *= penalty;
+    }
+
+    // Renormalize
+    let total: f64 = effective.iter().sum();
+    if total > 0.0 {
+        for w in &mut effective {
+            *w /= total;
+        }
+    }
+
+    effective
+}
+
 fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len() as f64;
     let mean_a = a.iter().sum::<f64>() / n;
@@ -1105,6 +1190,8 @@ mod tests {
             star_detailed_ll: Vec::new(),
             stacking_balls: None,
             stacking_stars: None,
+            correlation_matrix: Vec::new(),
+            star_correlation_matrix: Vec::new(),
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

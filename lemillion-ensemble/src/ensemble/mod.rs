@@ -104,6 +104,80 @@ impl EnsembleCombiner {
 }
 
 impl EnsembleCombiner {
+    /// Prédit avec poids décorrélés (v7) : pénalise les modèles corrélés pour éviter le double-comptage
+    /// dans le log-linear pool. effective_w_i = w_i × Π_j sqrt(1 - ρ_ij²).
+    pub fn predict_decorrelated(
+        &self,
+        draws: &[Draw],
+        pool: Pool,
+        correlation_matrix: &[(String, String, f64)],
+        threshold: f64,
+    ) -> EnsemblePrediction {
+        let model_names: Vec<String> = self.models.iter().map(|m| m.name().to_string()).collect();
+        let base_weights = match pool {
+            Pool::Balls => &self.ball_weights,
+            Pool::Stars => &self.star_weights,
+        };
+
+        let effective = calibration::compute_decorrelated_weights(
+            base_weights, &model_names, correlation_matrix, threshold,
+        );
+
+        // Build a temporary combiner with decorrelated weights
+        let size = pool.size();
+
+        // Zero out ball weights for star-only models and renormalize
+        let weights = if pool == Pool::Balls {
+            let mut w = effective;
+            for (i, model) in self.models.iter().enumerate() {
+                if model.is_stars_only() {
+                    w[i] = 0.0;
+                }
+            }
+            let total: f64 = w.iter().sum();
+            if total > 0.0 {
+                for v in w.iter_mut() { *v /= total; }
+            }
+            w
+        } else {
+            effective
+        };
+
+        let all_dists: Vec<(String, Vec<f64>)> = self.models
+            .par_iter()
+            .map(|model| (model.name().to_string(), model.predict(draws, pool)))
+            .collect();
+
+        let mut log_combined = vec![0.0f64; size];
+        let mut model_distributions = Vec::with_capacity(all_dists.len());
+
+        for (i, (name, dist)) in all_dists.into_iter().enumerate() {
+            let w = weights[i];
+            for j in 0..size {
+                log_combined[j] += w * dist[j].max(1e-15).ln();
+            }
+            model_distributions.push((name, dist));
+        }
+
+        let max_lc = log_combined.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut combined: Vec<f64> = log_combined.iter().map(|&lc| (lc - max_lc).exp()).collect();
+
+        let total: f64 = combined.iter().sum();
+        if total > 0.0 {
+            for p in &mut combined { *p /= total; }
+        }
+
+        let spread = compute_spread(&model_distributions, size);
+
+        EnsemblePrediction {
+            distribution: combined,
+            model_distributions,
+            spread,
+        }
+    }
+}
+
+impl EnsembleCombiner {
     /// Prédit avec stacking : blend entre la prédiction pondérée et la prédiction stackée.
     /// blend_factor = fraction du stacking (ex: 0.6 stacked + 0.4 weighted).
     pub fn predict_stacked(

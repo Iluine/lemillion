@@ -27,7 +27,7 @@ impl Default for TransferEntropyModel {
         Self {
             alpha: 2.0,
             te_threshold_factor: 3.0,
-            smoothing: 0.40,
+            smoothing: 0.30,
             n_top_sources: 15,
             min_draws: 50,
         }

@@ -1106,10 +1106,16 @@ pub fn generate_suggestions_jackpot(
         ball_indices.retain(|&idx| !excluded.contains(&((idx + 1) as u8)));
     }
 
-    // K adaptatif (boules uniquement — étoiles : énumération exhaustive des 66 paires)
+    // K adaptatif basé sur l'entropie de la distribution (v7)
+    // Haute entropie (flat) → plus de boules nécessaires ; basse entropie (peaked) → moins
     let (k_balls, _k_stars) = compute_adaptive_k(count);
-    // Minimum 25 boules pour éviter la sur-concentration sur le top-10/15
-    let k_balls = k_balls.max(25);
+    let h: f64 = ball_probs.iter()
+        .filter(|&&p| p > 1e-30)
+        .map(|&p| -p * p.ln())
+        .sum();
+    let entropy_ratio = h / (ball_probs.len() as f64).ln();
+    let min_k = (25.0 + 20.0 * entropy_ratio).round() as usize; // 25-45 pour plus de couverture
+    let k_balls = k_balls.max(min_k);
     let top_balls = &ball_indices[..k_balls.min(ball_indices.len())];
 
     // Énumérer exhaustivement les 66 paires d'étoiles avec score direct
@@ -1955,10 +1961,88 @@ pub fn compute_conviction(
     }
 }
 
-/// Température adaptative basée sur la conviction de l'ensemble (jackpot mode).
-/// Relevée pour éviter le sharpening excessif quand le skill boules est faible.
-/// - HighConviction → T=0.60
-/// - MediumConviction → T=0.85
+/// RQA-Adaptive Temperature adjustment (v7, Phase 3.1).
+/// Quand DET élevé (système déterministe) : sharpen agressif justifié.
+/// Quand DET bas : relâcher. Retourne un facteur multiplicatif sur T.
+/// T_adjusted = T_base × rqa_factor
+pub fn rqa_temperature_factor(draws: &[Draw]) -> f64 {
+    if draws.len() < 60 {
+        return 1.0; // pas assez de données
+    }
+    // Build ball sum time series (chronological)
+    let ball_sums: Vec<f64> = draws.iter().rev()
+        .map(|d| d.balls.iter().map(|&b| b as f64).sum())
+        .collect();
+
+    // Lightweight RQA: Takens embedding (dim=3, delay=1), compute DET
+    let dim = 3usize;
+    let delay = 1usize;
+    let n = ball_sums.len();
+    let required = (dim - 1) * delay + 1;
+    if n < required + 10 {
+        return 1.0;
+    }
+
+    let m = n - (dim - 1) * delay;
+    let embedded: Vec<[f64; 3]> = (0..m)
+        .map(|i| [ball_sums[i], ball_sums[i + delay], ball_sums[i + 2 * delay]])
+        .collect();
+
+    // Compute std for epsilon
+    let mean = ball_sums.iter().sum::<f64>() / n as f64;
+    let variance = ball_sums.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+    let std_dev = variance.sqrt();
+    let epsilon = 0.2 * std_dev;
+    if epsilon < 1e-15 {
+        return 1.0;
+    }
+    let eps_sq = epsilon * epsilon;
+
+    // Count recurrence and diagonal lines for DET
+    let n_emb = embedded.len();
+    let mut total_recurrence = 0u64;
+    let mut diag_points = 0u64;
+
+    // Only check diagonals k=1..min(n_emb, 50) for efficiency
+    let max_diag = n_emb.min(50);
+    for k in 1..max_diag {
+        let mut current_line = 0u32;
+        for i in 0..(n_emb - k) {
+            let dist_sq: f64 = (0..3).map(|d| (embedded[i][d] - embedded[i + k][d]).powi(2)).sum();
+            if dist_sq < eps_sq {
+                total_recurrence += 1;
+                current_line += 1;
+            } else {
+                if current_line >= 2 {
+                    diag_points += current_line as u64;
+                }
+                current_line = 0;
+            }
+        }
+        if current_line >= 2 {
+            diag_points += current_line as u64;
+        }
+    }
+
+    let det = if total_recurrence > 0 {
+        diag_points as f64 / total_recurrence as f64
+    } else {
+        0.0
+    };
+
+    // DET baseline for random: ~0.3-0.4. Map to temperature factor.
+    // DET > 0.5 → system is predictable → sharpen (factor < 1)
+    // DET < 0.3 → system is chaotic → relax (factor > 1)
+    let det_baseline = 0.35;
+    let det_std = 0.10;
+    let predictability_score = (det - det_baseline) / det_std;
+
+    // T_adjusted = T_base × exp(-0.1 × predictability_score)
+    // Clamped to [0.7, 1.3] to avoid extreme adjustments
+    let factor = (-0.1 * predictability_score).exp().clamp(0.70, 1.30);
+    factor
+}
+
 /// Température forcée pour le mode few-grid (3-10 grilles).
 /// Avec peu de grilles, on concentre agressivement sur nos meilleurs paris.
 /// Retourne (T_balls, T_stars).
@@ -1972,9 +2056,10 @@ pub fn few_grid_temperature(n_grids: usize) -> (f64, f64) {
 }
 
 /// Sélection optimale de N grilles maximisant P(au moins un 5+2).
-/// Greedy: choisit la meilleure P(5+2), puis la meilleure parmi celles
-/// ayant ≤ max_common_balls boules et ≤ max_common_stars étoiles communes
-/// avec chaque grille déjà sélectionnée.
+/// v7: structured overlap — favorise 1-2 boules communes (structuré) et
+/// pénalise 0 (trop dispersé) ou ≥3 (trop similaire).
+/// Basé sur Liu, Liu, Teo (2024): structurer le chevauchement entre tickets
+/// améliore P(gain) vs couverture pure ou diversité pure.
 pub fn select_optimal_n_grids(
     candidates: &[Suggestion],
     n_grids: usize,
@@ -1991,49 +2076,67 @@ pub fn select_optimal_n_grids(
     // Grille 1 = plus haute P(5+2)
     selected.push(candidates[0].clone());
 
-    // Grilles suivantes avec contrainte de diversité
-    for candidate in candidates.iter().skip(1) {
-        if selected.len() >= n_grids {
-            break;
-        }
-        let is_diverse = selected.iter().all(|s| {
-            let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
-            let common_s = candidate.stars.iter().filter(|st| s.stars.contains(st)).count();
-            common_b <= max_common_balls && common_s <= max_common_stars
-        });
-        if is_diverse {
-            selected.push(candidate.clone());
-        }
-    }
+    // Grilles suivantes avec scoring overlap-aware (v7)
+    // overlap_bonus favorise 1-2 boules communes (structuré)
+    // et pénalise 0 (trop dispersé) ou ≥3 (trop similaire)
+    for _ in 1..n_grids {
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_idx = None;
 
-    // Fallback: si pas assez diversifiés, relâcher la contrainte étoiles
-    if selected.len() < n_grids {
-        for candidate in candidates {
-            if selected.len() >= n_grids {
-                break;
-            }
+        for (ci, candidate) in candidates.iter().enumerate() {
+            // Skip si déjà sélectionné
             if selected.iter().any(|s| s.balls == candidate.balls && s.stars == candidate.stars) {
                 continue;
             }
-            let is_diverse_balls = selected.iter().all(|s| {
+
+            // Vérifier la contrainte hard sur étoiles et boules max
+            let hard_ok = selected.iter().all(|s| {
                 let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
-                common_b <= max_common_balls
+                let common_s = candidate.stars.iter().filter(|st| s.stars.contains(st)).count();
+                common_b <= max_common_balls && common_s <= max_common_stars
             });
-            if is_diverse_balls {
-                selected.push(candidate.clone());
+            if !hard_ok {
+                continue;
+            }
+
+            // Score = P(5+2) × overlap_bonus moyen sur toutes les grilles sélectionnées
+            let overlap_bonus: f64 = selected.iter().map(|s| {
+                let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
+                // Structured overlap bonus:
+                // 0 common = 0.7 (trop dispersé, pas de couverture partagée)
+                // 1 common = 1.2 (optimal: un pivot commun)
+                // 2 common = 1.0 (bon: overlap modéré)
+                // 3 common = 0.5 (trop similaire)
+                // 4+ common = 0.2 (quasi-doublon)
+                match common_b {
+                    0 => 0.70,
+                    1 => 1.20,
+                    2 => 1.00,
+                    3 => 0.50,
+                    _ => 0.20,
+                }
+            }).sum::<f64>() / selected.len() as f64;
+
+            let score = candidate.score * overlap_bonus;
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(ci);
             }
         }
-    }
 
-    // Final fallback: remplir avec les meilleurs restants
-    if selected.len() < n_grids {
-        for candidate in candidates {
-            if selected.len() >= n_grids {
-                break;
+        if let Some(idx) = best_idx {
+            selected.push(candidates[idx].clone());
+        } else {
+            // Fallback: plus de candidats valides, prendre le meilleur restant sans contrainte
+            for candidate in candidates {
+                if selected.len() >= n_grids {
+                    break;
+                }
+                if !selected.iter().any(|s| s.balls == candidate.balls && s.stars == candidate.stars) {
+                    selected.push(candidate.clone());
+                }
             }
-            if !selected.iter().any(|s| s.balls == candidate.balls && s.stars == candidate.stars) {
-                selected.push(candidate.clone());
-            }
+            break;
         }
     }
 

@@ -11,15 +11,15 @@ use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::{EnsembleCombiner, compute_hedge_weights};
 use lemillion_ensemble::ensemble::calibration::{
     EnsembleWeights, STAR_DEFAULT_TEMPERATURE, apply_decorrelation_penalty, calibrate_model,
-    collect_detailed_ll, compute_weights_with_params, compute_weights_with_threshold,
-    detect_redundancy, load_weights, save_weights,
+    collect_detailed_ll, compute_correlation_matrix, compute_weights_with_params,
+    compute_weights_with_threshold, detect_redundancy, load_weights, save_weights,
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, compute_exclusion_set, consensus_score};
 use lemillion_ensemble::models::all_models;
 use lemillion_ensemble::sampler::{
     apply_temperature, compute_bayesian_score, compute_conviction,
     conviction_temperature_split, conviction_temperature_split_with_skill,
-    few_grid_temperature, select_optimal_n_grids,
+    few_grid_temperature, rqa_temperature_factor, select_optimal_n_grids,
     generate_suggestions_filtered,
     generate_diverse_grids_with_strategy, generate_suggestions_ev,
     generate_suggestions_jackpot, optimal_grid, BallStarConditioner, CoherenceScorer,
@@ -527,9 +527,9 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         })
     };
 
-    // Décorrélation continue : pénaliser les modèles corrélés (seuil abaissé 0.70→0.60)
-    apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.60, 0.5, 0.10);
-    apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.60, 0.5, 0.10);
+    // Décorrélation continue : pénaliser les modèles corrélés
+    apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.70, 0.5, 0.10);
+    apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.70, 0.5, 0.10);
 
     // Stacking : collecter données + entraîner
     println!("\nEntraînement du stacking...");
@@ -569,6 +569,26 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         existing_weights.as_ref().and_then(|w| w.stacking_stars.clone())
     };
 
+    // v7: Compute full correlation matrix for decorrelation-aware pool
+    let correlation_matrix = if !detailed_ll.is_empty() {
+        let cm = compute_correlation_matrix(&detailed_ll, 0.3);
+        if !cm.is_empty() {
+            println!("\n── Matrice de corrélation boules ({} paires > 0.3) ──", cm.len());
+            for (a, b, c) in cm.iter().take(10) {
+                println!("  {} × {} : {:.3}", a, b, c);
+            }
+            if cm.len() > 10 { println!("  ... ({} paires au total)", cm.len()); }
+        }
+        cm
+    } else {
+        Vec::new()
+    };
+    let star_correlation_matrix = if !star_detailed_ll.is_empty() {
+        compute_correlation_matrix(&star_detailed_ll, 0.3)
+    } else {
+        Vec::new()
+    };
+
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
@@ -577,6 +597,8 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         star_detailed_ll,
         stacking_balls,
         stacking_stars,
+        correlation_matrix,
+        star_correlation_matrix,
     };
 
     display::display_weights(&ensemble_weights);
@@ -752,7 +774,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         (max_w - min_w) > 1e-6
     };
 
-    // MetaPredictor : ajuster les poids boules selon le régime courant (activé par défaut)
+    // MetaPredictor : ajuster les poids boules selon le régime courant
     // Seulement si les boules ont du signal (sinon detailed_ll = bruit)
     if !no_meta_predictor
         && balls_have_signal
@@ -809,7 +831,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
     }
 
-    // Hedge weights : ajustement multiplicatif réactif (activé par défaut)
+    // Hedge weights : ajustement multiplicatif réactif
     // Boules seulement si signal, étoiles toujours
     if !no_hedge {
         let (hedged_ball, hedged_star) = compute_hedge_weights(
@@ -842,33 +864,49 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     // Stacking : utiliser les poids de stacking si disponibles
     let use_stacking = !no_stacking && weights.as_ref().map(|w| w.stacking_balls.is_some() || w.stacking_stars.is_some()).unwrap_or(false);
 
+    // v7: Decorrelation-aware prediction — utiliser la matrice de corrélation si disponible
+    let has_corr_matrix = weights.as_ref().map(|w| !w.correlation_matrix.is_empty()).unwrap_or(false);
+
+    // Helper closure: predict with decorrelation when available, otherwise standard
+    let predict_pool = |pool: Pool| -> lemillion_ensemble::ensemble::EnsemblePrediction {
+        if has_corr_matrix {
+            let w = weights.as_ref().unwrap();
+            let corr = match pool {
+                Pool::Balls => &w.correlation_matrix,
+                Pool::Stars => if w.star_correlation_matrix.is_empty() { &w.correlation_matrix } else { &w.star_correlation_matrix },
+            };
+            combiner.predict_decorrelated(&draws, pool, corr, 0.60)
+        } else if effective_boost > 0.0 {
+            combiner.predict_with_agreement_boost(&draws, pool, effective_boost)
+        } else {
+            combiner.predict(&draws, pool)
+        }
+    };
+
     let (ball_pred, star_pred) = if use_stacking {
         let w = weights.as_ref().unwrap();
         let blend = 0.6;
         let bp = if let Some(ref sw) = w.stacking_balls {
             println!("(Stacking boules : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
             combiner.predict_stacked(&draws, Pool::Balls, sw, blend)
-        } else if effective_boost > 0.0 {
-            combiner.predict_with_agreement_boost(&draws, Pool::Balls, effective_boost)
         } else {
-            combiner.predict(&draws, Pool::Balls)
+            predict_pool(Pool::Balls)
         };
         let sp = if let Some(ref sw) = w.stacking_stars {
             println!("(Stacking étoiles : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
             combiner.predict_stacked(&draws, Pool::Stars, sw, blend)
-        } else if effective_boost > 0.0 {
-            combiner.predict_with_agreement_boost(&draws, Pool::Stars, effective_boost)
         } else {
-            combiner.predict(&draws, Pool::Stars)
+            predict_pool(Pool::Stars)
         };
         (bp, sp)
-    } else if effective_boost > 0.0 {
-        println!("(Agreement boost : {:.2}{})", effective_boost, if agreement_boost_strength == 0.0 && jackpot_mode { " [auto jackpot]" } else { "" });
-        (combiner.predict_with_agreement_boost(&draws, Pool::Balls, effective_boost),
-         combiner.predict_with_agreement_boost(&draws, Pool::Stars, effective_boost))
     } else {
-        (combiner.predict(&draws, Pool::Balls),
-         combiner.predict(&draws, Pool::Stars))
+        if has_corr_matrix {
+            println!("(Decorrelation-aware pool : pénalisation des modèles corrélés > 0.5)");
+        }
+        if effective_boost > 0.0 && !has_corr_matrix {
+            println!("(Agreement boost : {:.2}{})", effective_boost, if agreement_boost_strength == 0.0 && jackpot_mode { " [auto jackpot]" } else { "" });
+        }
+        (predict_pool(Pool::Balls), predict_pool(Pool::Stars))
     };
 
     // Afficher les distributions
@@ -916,27 +954,42 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         (None, None)
     };
 
+    // v7: RQA-adaptive temperature factor
+    let rqa_factor = rqa_temperature_factor(&draws);
+    if (rqa_factor - 1.0).abs() > 0.01 {
+        println!("(RQA temperature factor: {:.2} — {})", rqa_factor,
+            if rqa_factor < 1.0 { "système prédictible → sharpen" } else { "système chaotique → relax" });
+    }
+
     // Température adaptative : few-grid override > explicit > skill-based > conviction
+    // v7: RQA factor applied post-hoc (except few-grid override)
     let (eff_bt, eff_st) = if let Some(ng) = n_grids {
-        // Mode few-grid : température forcée, overrides tout
+        // Mode few-grid : température forcée, overrides tout (y compris RQA)
         let (bt, st) = few_grid_temperature(ng);
         println!("\n(Temp few-grid [{} grilles] — balls: {:.2}, stars: {:.2})", ng, bt, st);
         (bt, st)
     } else if let Some(t) = temperature {
-        (t, t)
+        // RQA modulation on explicit temperature
+        let bt = (t * rqa_factor).clamp(0.1, 2.0);
+        let st = (t * rqa_factor).clamp(0.1, 2.0);
+        (bt, st)
     } else if jackpot_mode {
         let (mut bt, st) = conviction_temperature_split_with_skill(
             &conviction, calibrated_ball_skill, calibrated_star_skill);
         // Gros jackpot (>100M) : T_balls=1.0 pour ne pas sur-concentrer les boules
         if jackpot > 100_000_000.0 { bt = 1.0; }
-        let method = if calibrated_ball_skill.is_some() { "skill" } else { "conviction" };
+        // v7: RQA modulation (balls only, stars keep conviction-based)
+        bt = (bt * rqa_factor).clamp(0.1, 2.0);
+        let method = if calibrated_ball_skill.is_some() { "skill+RQA" } else { "conviction+RQA" };
         println!("\n(Temp split [{method}] — balls: {:.2}{}, stars: {:.2})", bt, if jackpot > 100_000_000.0 { " [no-sharpen >100M]" } else { "" }, st);
         (bt, st)
     } else {
         // Mode EV : skill-based quand disponible
         let (bt, st) = conviction_temperature_split_with_skill(
             &conviction, calibrated_ball_skill, calibrated_star_skill);
-        let method = if calibrated_ball_skill.is_some() { "skill" } else { "conviction" };
+        // v7: RQA modulation
+        let bt = (bt * rqa_factor).clamp(0.1, 2.0);
+        let method = if calibrated_ball_skill.is_some() { "skill+RQA" } else { "conviction+RQA" };
         println!("\n(Temp split [{method}] EV — balls: {:.2}, stars: {:.2})", bt, st);
         (bt, st)
     };
@@ -1822,61 +1875,50 @@ fn cmd_backtest_jackpot(
                     if ss > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= ss; } }
                 }
 
-                // MetaPredictor : ajuster les poids boules selon le régime courant
-                let balls_have_signal = {
-                    let max_w = combiner.ball_weights.iter().cloned().fold(0.0_f64, f64::max);
-                    let min_w = combiner.ball_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::MAX, f64::min);
-                    (max_w - min_w) > 1e-6
-                };
-                if balls_have_signal {
-                    if let Some(w) = weights {
-                        if !w.detailed_ll.is_empty() {
-                            use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
-                            let features = RegimeFeatures::from_draws(training_draws);
-                            if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
-                                let adjustments = meta.weight_adjustments(&features);
-                                for (name, adj) in &adjustments {
-                                    if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                                        if idx < combiner.ball_weights.len() {
-                                            combiner.ball_weights[idx] *= adj;
-                                        }
-                                    }
-                                }
-                                let total_b: f64 = combiner.ball_weights.iter().sum();
-                                if total_b > 0.0 { combiner.ball_weights.iter_mut().for_each(|w| *w /= total_b); }
-                            }
-                        }
-                    }
-                }
-
-                // MetaPredictor étoiles
+                // MetaPredictor : ajustement contextuel des poids
                 if let Some(w) = weights {
-                    if !w.star_detailed_ll.is_empty() {
+                    if !w.detailed_ll.is_empty() {
                         use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
                         let features = RegimeFeatures::from_draws(training_draws);
-                        if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                        if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
                             let adjustments = meta.weight_adjustments(&features);
                             for (name, adj) in &adjustments {
-                                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                                    if idx < combiner.star_weights.len() {
+                                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                    && idx < combiner.ball_weights.len()
+                                {
+                                    combiner.ball_weights[idx] *= adj;
+                                }
+                            }
+                            let total: f64 = combiner.ball_weights.iter().sum();
+                            if total > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= total; } }
+                        }
+                        if !w.star_detailed_ll.is_empty() {
+                            if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                                let adjustments = meta.weight_adjustments(&features);
+                                for (name, adj) in &adjustments {
+                                    if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                        && idx < combiner.star_weights.len()
+                                    {
                                         combiner.star_weights[idx] *= adj;
                                     }
                                 }
+                                let total: f64 = combiner.star_weights.iter().sum();
+                                if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
                             }
-                            let total_s: f64 = combiner.star_weights.iter().sum();
-                            if total_s > 0.0 { combiner.star_weights.iter_mut().for_each(|w| *w /= total_s); }
                         }
                     }
                 }
 
-                // Hedge : ajustement multiplicatif réactif
-                let (hedged_ball, hedged_star) = compute_hedge_weights(
-                    &combiner.models, training_draws,
-                    &combiner.ball_weights, &combiner.star_weights,
-                    100, 0.10,
-                );
-                if balls_have_signal { combiner.ball_weights = hedged_ball; }
-                combiner.star_weights = hedged_star;
+                // Hedge weights : ajustement multiplicatif réactif
+                {
+                    let (hedged_ball, hedged_star) = compute_hedge_weights(
+                        &combiner.models, training_draws,
+                        &combiner.ball_weights, &combiner.star_weights,
+                        100, 0.10,
+                    );
+                    combiner.ball_weights = hedged_ball;
+                    combiner.star_weights = hedged_star;
+                }
 
                 let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
                 let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
@@ -2132,8 +2174,8 @@ fn cmd_backtest_jackpot_top3(
         // Compute conviction on calibrated profile
         let cal_models = all_models();
         let cal_combiner = EnsembleCombiner::with_weights(cal_models, ball_w.clone(), star_w.clone());
-        let ball_pred = cal_combiner.predict(training_draws, Pool::Balls);
-        let star_pred = cal_combiner.predict(training_draws, Pool::Stars);
+        let ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
+        let star_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
         let conviction = compute_conviction(
             &ball_pred.distribution, &star_pred.distribution,
             &ball_pred.spread, &star_pred.spread,
@@ -2155,7 +2197,7 @@ fn cmd_backtest_jackpot_top3(
         let bt_star_pair_probs = bt_star_pair_model.predict_pair_distribution(training_draws);
 
         // Exclusion set from consensus
-        let bt_ball_pred = cal_combiner.predict(training_draws, Pool::Balls);
+        let bt_ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
         let bt_ball_consensus = build_consensus_map(&bt_ball_pred, Pool::Balls);
         let bt_excluded = compute_exclusion_set(&bt_ball_consensus, -0.3, 10);
         let bt_excluded_ref = if bt_excluded.is_empty() { None } else { Some(bt_excluded.as_slice()) };
@@ -2733,66 +2775,53 @@ fn cmd_backtest_realistic(
             None => EnsembleCombiner::new(models),
         };
 
-        // MetaPredictor boules
-        let balls_have_signal = {
-            let max_w = combiner.ball_weights.iter().cloned().fold(0.0_f64, f64::max);
-            let min_w = combiner.ball_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::MAX, f64::min);
-            (max_w - min_w) > 1e-6
-        };
-        if balls_have_signal {
-            if let Some(w) = weights {
-                if !w.detailed_ll.is_empty() {
-                    use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
-                    let features = RegimeFeatures::from_draws(training_draws);
-                    if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
-                        let adjustments = meta.weight_adjustments(&features);
-                        for (name, adj) in &adjustments {
-                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                                if idx < combiner.ball_weights.len() {
-                                    combiner.ball_weights[idx] *= adj;
-                                }
-                            }
-                        }
-                        let total_b: f64 = combiner.ball_weights.iter().sum();
-                        if total_b > 0.0 { combiner.ball_weights.iter_mut().for_each(|w| *w /= total_b); }
-                    }
-                }
-            }
-        }
-
-        // MetaPredictor étoiles
+        // MetaPredictor : ajustement contextuel des poids
         if let Some(w) = weights {
-            if !w.star_detailed_ll.is_empty() {
+            if !w.detailed_ll.is_empty() {
                 use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
                 let features = RegimeFeatures::from_draws(training_draws);
-                if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
                     let adjustments = meta.weight_adjustments(&features);
                     for (name, adj) in &adjustments {
-                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                            if idx < combiner.star_weights.len() {
+                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                            && idx < combiner.ball_weights.len()
+                        {
+                            combiner.ball_weights[idx] *= adj;
+                        }
+                    }
+                    let total: f64 = combiner.ball_weights.iter().sum();
+                    if total > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= total; } }
+                }
+                if !w.star_detailed_ll.is_empty() {
+                    if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                        let adjustments = meta.weight_adjustments(&features);
+                        for (name, adj) in &adjustments {
+                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                && idx < combiner.star_weights.len()
+                            {
                                 combiner.star_weights[idx] *= adj;
                             }
                         }
+                        let total: f64 = combiner.star_weights.iter().sum();
+                        if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
                     }
-                    let total_s: f64 = combiner.star_weights.iter().sum();
-                    if total_s > 0.0 { combiner.star_weights.iter_mut().for_each(|w| *w /= total_s); }
                 }
             }
         }
 
-        // Hedge
-        let (hedged_ball, hedged_star) = compute_hedge_weights(
-            &combiner.models, training_draws,
-            &combiner.ball_weights, &combiner.star_weights,
-            100, 0.10,
-        );
-        if balls_have_signal {
+        // Hedge weights
+        {
+            let (hedged_ball, hedged_star) = compute_hedge_weights(
+                &combiner.models, training_draws,
+                &combiner.ball_weights, &combiner.star_weights,
+                100, 0.10,
+            );
             combiner.ball_weights = hedged_ball;
+            combiner.star_weights = hedged_star;
         }
-        combiner.star_weights = hedged_star;
 
-        let ball_pred = combiner.predict(training_draws, Pool::Balls);
-        let star_pred = combiner.predict(training_draws, Pool::Stars);
+        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
+        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
 
         // Conviction → nombre de grilles
         let conviction = compute_conviction(
@@ -3020,70 +3049,53 @@ fn cmd_backtest_3grids(
             None => EnsembleCombiner::new(models),
         };
 
-        // Détecter si les poids boules ont du signal (non-uniformes)
-        let balls_have_signal = {
-            let max_w = combiner.ball_weights.iter().cloned().fold(0.0_f64, f64::max);
-            let min_w = combiner.ball_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::MAX, f64::min);
-            (max_w - min_w) > 1e-6
-        };
-
-        // MetaPredictor : ajuster les poids boules selon le régime courant
-        // Seulement si les boules ont du signal (sinon detailed_ll = bruit)
-        if balls_have_signal {
-            if let Some(w) = weights {
-                if !w.detailed_ll.is_empty() {
-                    use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
-                    let features = RegimeFeatures::from_draws(training_draws);
-                    if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
-                        let adjustments = meta.weight_adjustments(&features);
-                        for (name, adj) in &adjustments {
-                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                                if idx < combiner.ball_weights.len() {
-                                    combiner.ball_weights[idx] *= adj;
-                                }
-                            }
-                        }
-                        let total_b: f64 = combiner.ball_weights.iter().sum();
-                        if total_b > 0.0 { combiner.ball_weights.iter_mut().for_each(|w| *w /= total_b); }
-                    }
-                }
-            }
-        }
-
-        // MetaPredictor étoiles
+        // MetaPredictor : ajustement contextuel des poids
         if let Some(w) = weights {
-            if !w.star_detailed_ll.is_empty() {
+            if !w.detailed_ll.is_empty() {
                 use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
                 let features = RegimeFeatures::from_draws(training_draws);
-                if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
                     let adjustments = meta.weight_adjustments(&features);
                     for (name, adj) in &adjustments {
-                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name) {
-                            if idx < combiner.star_weights.len() {
+                        if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                            && idx < combiner.ball_weights.len()
+                        {
+                            combiner.ball_weights[idx] *= adj;
+                        }
+                    }
+                    let total: f64 = combiner.ball_weights.iter().sum();
+                    if total > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= total; } }
+                }
+                if !w.star_detailed_ll.is_empty() {
+                    if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                        let adjustments = meta.weight_adjustments(&features);
+                        for (name, adj) in &adjustments {
+                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                && idx < combiner.star_weights.len()
+                            {
                                 combiner.star_weights[idx] *= adj;
                             }
                         }
+                        let total: f64 = combiner.star_weights.iter().sum();
+                        if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
                     }
-                    let total_s: f64 = combiner.star_weights.iter().sum();
-                    if total_s > 0.0 { combiner.star_weights.iter_mut().for_each(|w| *w /= total_s); }
                 }
             }
         }
 
-        // Hedge : ajustement multiplicatif réactif
-        // Boules seulement si signal, étoiles toujours
-        let (hedged_ball, hedged_star) = compute_hedge_weights(
-            &combiner.models, training_draws,
-            &combiner.ball_weights, &combiner.star_weights,
-            100, 0.10,
-        );
-        if balls_have_signal {
+        // Hedge weights
+        {
+            let (hedged_ball, hedged_star) = compute_hedge_weights(
+                &combiner.models, training_draws,
+                &combiner.ball_weights, &combiner.star_weights,
+                100, 0.10,
+            );
             combiner.ball_weights = hedged_ball;
+            combiner.star_weights = hedged_star;
         }
-        combiner.star_weights = hedged_star;
 
-        let ball_pred = combiner.predict(training_draws, Pool::Balls);
-        let star_pred = combiner.predict(training_draws, Pool::Stars);
+        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
+        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
 
         let conviction = compute_conviction(
             &ball_pred.distribution,

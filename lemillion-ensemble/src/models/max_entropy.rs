@@ -22,7 +22,7 @@ pub struct MaxEntropyModel {
 impl Default for MaxEntropyModel {
     fn default() -> Self {
         Self {
-            smoothing: 0.35,
+            smoothing: 0.25,
             min_draws: 50,
             z_threshold: 1.5,
         }
@@ -111,7 +111,7 @@ impl MaxEntropyModel {
             let obs = mod_counts[r] as f64;
             let z = (obs - expected) / expected.sqrt();
             if z.abs() > self.z_threshold {
-                mod_tilts[r] = z * 0.05; // tilt per z-unit
+                mod_tilts[r] = z * 0.08; // tilt per z-unit
                 any_significant = true;
             }
         }

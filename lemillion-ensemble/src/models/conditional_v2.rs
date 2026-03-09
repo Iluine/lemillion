@@ -28,7 +28,7 @@ impl CondSummaryV2Model {
 impl Default for CondSummaryV2Model {
     fn default() -> Self {
         Self {
-            smoothing: 0.50,
+            smoothing: 0.35,
             laplace: 0.5,
             min_draws: 30,
         }

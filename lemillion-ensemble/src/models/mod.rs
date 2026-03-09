@@ -35,6 +35,11 @@ pub mod modular_balls;
 pub mod compression;
 pub mod star_momentum;
 pub mod spread;
+pub mod gap_model;
+pub mod unit_digit;
+pub mod delayed_mi;
+pub mod community;
+pub mod rqa_predictability;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -178,9 +183,8 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
 /// Modèles de base de l'ensemble (22 modèles actifs).
 /// Ajoutés v6: TripletBoost (réactivé, z>2, temporal weighting), StarMomentum (DFA Hurst),
 ///   Spread (clustering gaussien).
-/// Retirés v5: RandomForest (skill 0 balls+stars), ModProfile (skill 0 balls+stars),
-///   StresaSMC (corr 0.913 StresaChaos, skill 0 balls), GapDynamics (skill 0 balls+stars),
-///   ModTrans (corr 0.975 ModularBalls, poids 3.54% < 6.81%).
+/// Retirés v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles).
+/// Retirés v5: RandomForest, ModProfile, StresaSMC, GapDynamics, ModTrans.
 /// Retirés v4: CTW, Spectral, StarRecency, BME/Mixture.
 /// Retirés avant: Dirichlet, Markov, ESN, CondSummary, JackpotContext.
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
