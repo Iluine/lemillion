@@ -688,10 +688,8 @@ pub fn compute_decorrelated_weights(
         let name_i = &model_names[i];
         let mut penalty = 1.0f64;
 
+        let _ = threshold; // kept for API compat; continuous penalty replaces hard threshold
         for (a, b, corr) in correlation_matrix {
-            if corr.abs() <= threshold {
-                continue;
-            }
             // Check if this correlation involves model i
             let partner = if a == name_i {
                 Some(b)
@@ -702,8 +700,10 @@ pub fn compute_decorrelated_weights(
             };
 
             if partner.is_some() {
-                // Penalty: sqrt(1 - ρ²) for significant correlations
-                penalty *= (1.0 - corr * corr).max(0.01).sqrt();
+                // Continuous Gaussian penalty: center=0.50, σ=0.20
+                // Gentle below 0.50, significant at 0.60+, strong at 0.75+
+                let excess = (corr.abs() - 0.50).max(0.0);
+                penalty *= (-0.5 * excess * excess / (0.20_f64 * 0.20)).exp();
             }
         }
 

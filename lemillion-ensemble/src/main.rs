@@ -857,7 +857,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let effective_boost = if agreement_boost_strength > 0.0 {
         agreement_boost_strength
     } else if jackpot_mode {
-        0.15
+        0.20
     } else {
         0.0
     };
@@ -1920,8 +1920,8 @@ fn cmd_backtest_jackpot(
                     combiner.star_weights = hedged_star;
                 }
 
-                let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
-                let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
+                let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+                let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
 
                 // Conviction calculée sur la distribution BRUTE (avant température)
                 let conviction = compute_conviction(
@@ -2174,8 +2174,8 @@ fn cmd_backtest_jackpot_top3(
         // Compute conviction on calibrated profile
         let cal_models = all_models();
         let cal_combiner = EnsembleCombiner::with_weights(cal_models, ball_w.clone(), star_w.clone());
-        let ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
-        let star_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
+        let ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+        let star_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
         let conviction = compute_conviction(
             &ball_pred.distribution, &star_pred.distribution,
             &ball_pred.spread, &star_pred.spread,
@@ -2197,7 +2197,7 @@ fn cmd_backtest_jackpot_top3(
         let bt_star_pair_probs = bt_star_pair_model.predict_pair_distribution(training_draws);
 
         // Exclusion set from consensus
-        let bt_ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
+        let bt_ball_pred = cal_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
         let bt_ball_consensus = build_consensus_map(&bt_ball_pred, Pool::Balls);
         let bt_excluded = compute_exclusion_set(&bt_ball_consensus, -0.3, 10);
         let bt_excluded_ref = if bt_excluded.is_empty() { None } else { Some(bt_excluded.as_slice()) };
@@ -2820,8 +2820,8 @@ fn cmd_backtest_realistic(
             combiner.star_weights = hedged_star;
         }
 
-        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
-        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
+        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
 
         // Conviction → nombre de grilles
         let conviction = compute_conviction(
@@ -3094,8 +3094,8 @@ fn cmd_backtest_3grids(
             combiner.star_weights = hedged_star;
         }
 
-        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.15);
-        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.15);
+        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
 
         let conviction = compute_conviction(
             &ball_pred.distribution,

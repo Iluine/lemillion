@@ -35,8 +35,9 @@ fn context_features(draw: &Draw, prev_draw: Option<&Draw>) -> [f64; 4] {
 
     let odd_count = draw.balls.iter().filter(|&&b| b % 2 == 1).count() as f64 / 5.0;
 
+    // Normalize mod4_cosine from [-1, 1] to [0, 1] for uniform feature scaling
     let mod4_cosine = if let Some(prev) = prev_draw {
-        compute_mod4_cosine(draw, prev)
+        (compute_mod4_cosine(draw, prev) + 1.0) / 2.0
     } else {
         0.5
     };
@@ -67,7 +68,12 @@ fn compute_mod4_cosine(a: &Draw, b: &Draw) -> f64 {
 }
 
 fn euclidean_distance(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+    // Weighted distance: mod4_cosine (index 3) gets 2x weight
+    // reflecting its physical importance (Stresa machine symmetry)
+    const WEIGHTS: [f64; 4] = [1.0, 1.0, 1.0, 2.0];
+    a.iter().zip(b.iter()).zip(WEIGHTS.iter())
+        .map(|((x, y), &w)| w * (x - y).powi(2))
+        .sum::<f64>().sqrt()
 }
 
 impl ForecastModel for ContextKnnModel {

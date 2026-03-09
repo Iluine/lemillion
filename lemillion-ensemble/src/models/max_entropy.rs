@@ -168,7 +168,8 @@ impl MaxEntropyModel {
         for i in 0..n {
             if gap_counts[i] >= 10 {
                 let mean_gap = gap_sums[i] / gap_counts[i] as f64;
-                let std_gap = expected_gap; // geometric std ≈ mean for large counts
+                // Exact geometric std: sqrt((1-p)/p²)
+                let std_gap = ((1.0 - p_appear) / (p_appear * p_appear)).sqrt();
                 let z = (expected_gap - mean_gap) / (std_gap / (gap_counts[i] as f64).sqrt());
                 if z.abs() > self.z_threshold {
                     // Positive z = gap shorter than expected = number appears more often

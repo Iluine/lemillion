@@ -49,8 +49,8 @@ impl BocpdModel {
         // Hazard: constant 1/lambda
         let hazard = 1.0 / self.expected_run_length;
 
-        // Dirichlet prior concentration (per number)
-        let alpha = k as f64 / n as f64; // prior = uniform expected frequency
+        // Dirichlet prior concentration (per number), min 0.5 for regularization
+        let alpha = (k as f64 / n as f64).max(0.5);
 
         // Process chronologically (reverse of draws order since draws[0] = most recent)
         // We maintain:

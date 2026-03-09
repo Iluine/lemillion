@@ -380,6 +380,7 @@ pub fn compute_bayesian_score(
 /// Pour chaque contexte, distribution sur les 66 paires d'étoiles (Laplace smoothed).
 pub struct BallStarConditioner {
     table: Vec<[f64; 66]>,
+    context_counts: Vec<f64>,
 }
 
 impl BallStarConditioner {
@@ -441,7 +442,13 @@ impl BallStarConditioner {
             }
         }
 
-        Self { table }
+        // Compute context observation counts for adaptive blending
+        let mut context_counts = vec![0.0f64; Self::N_CONTEXTS];
+        for ctx in 0..Self::N_CONTEXTS {
+            context_counts[ctx] = counts[ctx].iter().sum::<f64>();
+        }
+
+        Self { table, context_counts }
     }
 
     #[inline]
@@ -461,6 +468,14 @@ impl BallStarConditioner {
     #[inline]
     pub fn conditioned_pair_probs(&self, balls: &[u8; 5]) -> &[f64; 66] {
         &self.table[Self::ball_context(balls)]
+    }
+
+    /// Adaptive blend ratio: 0 when few observations, ~0.75 with many.
+    #[inline]
+    pub fn adaptive_blend(&self, balls: &[u8; 5]) -> f64 {
+        let ctx = Self::ball_context(balls);
+        let obs = self.context_counts[ctx];
+        obs / (obs + 20.0)
     }
 }
 
@@ -980,7 +995,7 @@ pub fn generate_suggestions_ev(
 fn sample_without_replacement(
     probs: &[f64],
     count: usize,
-    uniform_prob: f64,
+    _uniform_prob: f64,
     rng: &mut StdRng,
 ) -> Result<(Vec<u8>, f64)> {
     let mut available: Vec<(u8, f64)> = probs
@@ -992,13 +1007,15 @@ fn sample_without_replacement(
     let mut score = 1.0f64;
 
     for _ in 0..count {
+        let remaining = available.len() as f64;
+        let current_uniform = 1.0 / remaining;
         let weights: Vec<f64> = available.iter().map(|(_, w)| *w).collect();
         let dist = WeightedIndex::new(&weights)?;
         let idx = dist.sample(rng);
 
         let (number, prob) = available.remove(idx);
         selected.push(number);
-        score *= prob / uniform_prob;
+        score *= prob / current_uniform;
     }
 
     Ok((selected, score))
@@ -1139,8 +1156,7 @@ pub fn generate_suggestions_jackpot(
     let top_star_pairs = if star_pair_probs.is_some() { 66 } else { 30 };
     star_pairs.truncate(top_star_pairs);
 
-    // Blend ratio conditionné vs marginal pour les étoiles
-    const COND_BLEND: f64 = 0.65;
+    // Blend ratio conditionné vs marginal pour les étoiles (adaptive per context)
 
     // Pré-calcul en log-espace pour stabilité numérique
     let log_ball_probs: Vec<f64> = (0..ball_probs.len())
@@ -1189,13 +1205,14 @@ pub fn generate_suggestions_jackpot(
                                 .sum();
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
+                            let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
 
                             for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
                                 let log_star_score = if let Some(cp) = cond_probs {
                                     let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                     let conditioned = cp[pidx] / uniform_pair;
-                                    let blended = COND_BLEND * conditioned + (1.0 - COND_BLEND) * base_star_score;
+                                    let blended = cond_blend * conditioned + (1.0 - cond_blend) * base_star_score;
                                     blended.max(1e-30).ln()
                                 } else {
                                     log_base_star_scores[star_idx]
@@ -1275,6 +1292,7 @@ pub fn generate_suggestions_jackpot(
                                 .sum();
 
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
+                            let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
 
                             for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
@@ -1283,7 +1301,7 @@ pub fn generate_suggestions_jackpot(
                                     let log_star_score = if let Some(cp) = cond_probs {
                                         let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
                                         let conditioned = cp[pidx] / uniform_pair;
-                                        let blended = COND_BLEND * conditioned + (1.0 - COND_BLEND) * base_star_score;
+                                        let blended = cond_blend * conditioned + (1.0 - cond_blend) * base_star_score;
                                         blended.max(1e-30).ln()
                                     } else {
                                         log_base_star_scores[star_idx]
@@ -2190,11 +2208,11 @@ pub fn conviction_temperature_split_with_skill(
             // Fallback: conviction-based (relative, not absolute thresholds)
             let ball_score = 0.7 * conviction.ball_concentration + 0.3 * conviction.ball_agreement;
             if ball_score >= 0.5 {
-                0.35
-            } else if ball_score >= 0.2 {
-                0.55
+                0.10
+            } else if ball_score >= 0.15 {
+                0.18
             } else {
-                0.80
+                0.35
             }
         }
     };
@@ -2682,8 +2700,8 @@ mod tests {
             verdict: ConvictionVerdict::MediumConviction,
         };
         let (bt, st) = conviction_temperature_split(&conv);
-        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.2 → T=0.80
-        assert!((bt - 0.80).abs() < 1e-10);
+        // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10 < 0.15 → T=0.35
+        assert!((bt - 0.35).abs() < 1e-10);
         // star_score = 0.7*0.6 + 0.3*0.5 = 0.57 >= 0.5 → T=0.20
         assert!((st - 0.20).abs() < 1e-10);
     }

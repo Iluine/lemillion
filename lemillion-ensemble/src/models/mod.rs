@@ -40,6 +40,9 @@ pub mod unit_digit;
 pub mod delayed_mi;
 pub mod community;
 pub mod rqa_predictability;
+pub mod wavelet;
+pub mod copula;
+pub mod renewal;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -180,7 +183,7 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Modèles de base de l'ensemble (22 modèles actifs).
+/// Modèles de base de l'ensemble (25 modèles actifs).
 /// Ajoutés v6: TripletBoost (réactivé, z>2, temporal weighting), StarMomentum (DFA Hurst),
 ///   Spread (clustering gaussien).
 /// Retirés v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles).
@@ -211,6 +214,9 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(triplet::TripletBoostModel::default()),
         Box::new(star_momentum::StarMomentumModel::default()),
         Box::new(spread::SpreadModel::default()),
+        Box::new(copula::CopulaModel::default()),
+        Box::new(wavelet::WaveletModel::default()),
+        Box::new(renewal::RenewalModel::default()),
     ]
 }
 

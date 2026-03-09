@@ -76,7 +76,7 @@ impl EnsembleCombiner {
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
             for j in 0..size {
-                log_combined[j] += w * dist[j].max(1e-15).ln();
+                log_combined[j] += w * dist[j].max(1e-15).ln().max(-50.0);
             }
             model_distributions.push((name, dist));
         }
@@ -154,7 +154,7 @@ impl EnsembleCombiner {
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
             for j in 0..size {
-                log_combined[j] += w * dist[j].max(1e-15).ln();
+                log_combined[j] += w * dist[j].max(1e-15).ln().max(-50.0);
             }
             model_distributions.push((name, dist));
         }
