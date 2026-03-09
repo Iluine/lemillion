@@ -119,7 +119,15 @@ pub fn walk_forward_evaluate_with_strategy(
     let stride = (max_t / max_tests).max(1);
 
     // Collecter les indices de test, puis paralléliser les predict() calls
-    let test_indices: Vec<usize> = (0..max_t).step_by(stride).collect();
+    // v10: toujours inclure les 5 tirages les plus récents (indices 0-4)
+    let mut test_indices: Vec<usize> = (0..max_t).step_by(stride).collect();
+    for recent in 0..5.min(max_t) {
+        if !test_indices.contains(&recent) {
+            test_indices.push(recent);
+        }
+    }
+    test_indices.sort();
+    test_indices.dedup();
 
     let results: Vec<f64> = test_indices
         .par_iter()
@@ -239,8 +247,20 @@ pub fn compute_weights_with_params(
                     .map(|r| r.n_tests)
                     .unwrap_or(100)
             };
+            // v11: Zero-skill threshold — models at or below uniform get 0 weight.
+            // Without this, exp(0) = 1.0 gives uniform-skill models nonzero weight,
+            // diluting the top models and reducing concentration.
+            // Threshold 0.0005 filters noise-level skill (< 0.05% per draw improvement).
+            if skill_per_draw <= 0.0005 {
+                return 0.0;
+            }
             let total_skill = (skill_per_draw * n as f64).min(20.0);
-            (total_skill / temperature).exp()
+            let raw = (total_skill / temperature).exp();
+
+            // v11: Cross-window stability penalty.
+            // Penalize models whose LL varies a lot across windows — unreliable signal.
+            let stability = cross_window_stability(&c.results);
+            raw * stability
         })
         .collect();
 
@@ -260,6 +280,30 @@ pub fn compute_weights_with_params(
             .map(|c| (c.model_name.clone(), 1.0 / n))
             .collect()
     }
+}
+
+/// v11: Compute cross-window stability penalty.
+/// Returns 1.0 for stable models, < 1.0 for models with high LL variance across windows.
+fn cross_window_stability(results: &[CalibrationResult]) -> f64 {
+    let skills: Vec<f64> = results.iter()
+        .map(|r| r.log_likelihood)
+        .filter(|&ll| ll.is_finite())
+        .collect();
+
+    if skills.len() < 2 {
+        return 1.0;
+    }
+
+    let mean = skills.iter().sum::<f64>() / skills.len() as f64;
+    let variance = skills.iter()
+        .map(|&s| (s - mean).powi(2))
+        .sum::<f64>() / skills.len() as f64;
+
+    // Very mild Gaussian penalty — only penalizes extremely unstable models.
+    // LL values across windows typically vary by 0.001-0.01.
+    // sigma=0.5 means: variance 0.01 → 0.980, 0.1 → 0.819, 1.0 → 0.135
+    let sigma = 0.5;
+    (-variance / (2.0 * sigma * sigma)).exp()
 }
 
 /// Calcule les poids avec seuil de skill minimum.
@@ -287,7 +331,9 @@ pub fn compute_weights_with_threshold(
                         .unwrap_or(100)
                 };
                 let total_skill = skill_per_draw * n as f64;
-                (total_skill / temperature).exp()
+                let raw = (total_skill / temperature).exp();
+                // v11: stability penalty
+                raw * cross_window_stability(&c.results)
             }
         })
         .collect();
@@ -945,7 +991,7 @@ mod tests {
                 best_n_tests: 100,
             },
         ];
-        // total_skill(Good) = 10, total_skill(Med) = 5
+        // total_skill(Good) = 0.10 * 100 = 10, Med = 0.05 * 100 = 5
         // T=1: ratio = exp(10)/exp(5) = exp(5) ≈ 148
         let w_t1 = compute_weights_with_params(&calibrations, Pool::Balls, 1.0);
         let ratio_t1 = w_t1[0].1 / w_t1[1].1;
@@ -1191,6 +1237,40 @@ mod tests {
         assert!((a_w - 0.5).abs() < 1e-10, "Both should be 0.5 after renormalization: A={}", a_w);
         let sum: f64 = weights.iter().map(|(_, w)| w).sum();
         assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_stability_constant_returns_one() {
+        // Model with constant LL across windows → stability = 1.0
+        let results = vec![
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.0, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -3.0, n_tests: 100 },
+        ];
+        let s = cross_window_stability(&results);
+        assert!((s - 1.0).abs() < 1e-10, "Constant LL → stability = 1.0, got {}", s);
+    }
+
+    #[test]
+    fn test_stability_variable_penalizes() {
+        // Model with high variance across windows → stability < 1.0
+        let results = vec![
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.1, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.9, n_tests: 100 },
+        ];
+        let s = cross_window_stability(&results);
+        assert!(s < 1.0, "Variable LL → stability < 1.0, got {}", s);
+        assert!(s > 0.0, "Should still be positive");
+
+        // Very stable model (tiny variance) → close to 1.0
+        let results_stable = vec![
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.000, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.001, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.999, n_tests: 100 },
+        ];
+        let s_stable = cross_window_stability(&results_stable);
+        assert!(s_stable > s, "More stable model should have higher stability: {} > {}", s_stable, s);
     }
 
     #[test]

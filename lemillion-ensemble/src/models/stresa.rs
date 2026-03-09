@@ -915,7 +915,7 @@ fn cosine_similarity(a: &[f64], b: &[f64]) -> f64 {
 /// - mod8_momentum : cosine inter-tirages du vecteur mod-8 (8 barres extérieures Stresa)
 /// - sum_norm : somme normalisée (corrèle avec la physique machine)
 /// - row_entropy : entropie des décades (diversité spatiale)
-fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
+pub(crate) fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
     let balls = &draw.balls;
     let sum: f64 = balls.iter().map(|&b| b as f64).sum();
 
@@ -952,7 +952,7 @@ fn encode_state_balls(draw: &Draw, prev: Option<&Draw>) -> Vec<f64> {
 /// Encode a stars draw as a 2D state vector.
 ///
 /// 2 features : sum_norm et spread_norm.
-fn encode_state_stars(draw: &Draw, _prev: Option<&Draw>) -> Vec<f64> {
+pub(crate) fn encode_state_stars(draw: &Draw, _prev: Option<&Draw>) -> Vec<f64> {
     let s0 = draw.stars[0].min(draw.stars[1]);
     let s1 = draw.stars[0].max(draw.stars[1]);
     let sum = (s0 as f64 + s1 as f64) / 24.0;
@@ -961,7 +961,7 @@ fn encode_state_stars(draw: &Draw, _prev: Option<&Draw>) -> Vec<f64> {
 }
 
 /// Encode all draws into state vectors (chronological order, oldest first).
-fn encode_all_states(draws: &[Draw], pool: Pool) -> Vec<Vec<f64>> {
+pub(crate) fn encode_all_states(draws: &[Draw], pool: Pool) -> Vec<Vec<f64>> {
     let n = draws.len();
     // draws[0] = most recent, we process oldest-first
     let mut states = Vec::with_capacity(n);
@@ -1146,7 +1146,7 @@ fn optimal_dim(series: &[Vec<f64>], tau: usize, max_dim: usize, threshold: f64) 
 }
 
 /// Euclidean distance between two vectors.
-fn euclidean_dist(a: &[f64], b: &[f64]) -> f64 {
+pub(crate) fn euclidean_dist(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter())
         .map(|(x, y)| (x - y).powi(2))
         .sum::<f64>()
@@ -1154,7 +1154,7 @@ fn euclidean_dist(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// Takens embedding with given tau and dim.
-fn chaos_takens_embed(states: &[Vec<f64>], tau: usize, dim: usize) -> Vec<Vec<f64>> {
+pub(crate) fn chaos_takens_embed(states: &[Vec<f64>], tau: usize, dim: usize) -> Vec<Vec<f64>> {
     let feat_dim = if states.is_empty() { 0 } else { states[0].len() };
     let offset = (dim - 1) * tau;
     if offset >= states.len() {

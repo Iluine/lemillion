@@ -47,12 +47,12 @@ impl PhysicsModel {
 impl Default for PhysicsModel {
     fn default() -> Self {
         Self {
-            alpha: 0.05,
-            prior_strength: 10.0,
+            alpha: 0.15,                   // v12: was 0.05 — half-life ~4 draws instead of ~14
+            prior_strength: 5.0,           // v12: was 10.0 — more reactive to recent data
             drift_scale: 0.3,
             drift_window: 20,
-            spatial_sigma: 3.0,
-            changepoint_threshold: 5.0,
+            spatial_sigma: 0.5,            // v12: was 3.0 — decade-only (neighbor row at 37% not 95%)
+            changepoint_threshold: 2.0,    // v12: was 5.0 — more sensitive chi²/df threshold
             smoothing: 0.25,
         }
     }

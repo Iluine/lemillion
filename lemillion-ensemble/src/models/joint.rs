@@ -123,30 +123,33 @@ impl JointConditionalModel {
     /// Retourne log(P_joint / P_uniform) — même échelle que le score marginal.
     /// P_uniform_seq = 1/50 × 1/49 × 1/48 × 1/47 × 1/46.
     pub fn score_balls(&self, balls: &[u8; 5]) -> f64 {
-        let raw = self.score_balls_raw(balls);
-        if raw == 0.0 { return 0.0; } // untrained
-        // Normaliser: soustraire le log-score uniforme séquentiel
-        let log_uniform_seq: f64 = (0..5).map(|k| -((50 - k) as f64).ln()).sum();
-        raw - log_uniform_seq
+        let (score, _) = self.score_balls_with_confidence(balls);
+        score
     }
 
-    /// Score brut log P(b1,...,b5) sans normalisation.
-    fn score_balls_raw(&self, balls: &[u8; 5]) -> f64 {
-        if !self.trained {
-            return 0.0;
-        }
+    /// Score les boules + confiance du modèle joint.
+    /// Retourne (log_score_normalisé, confidence ∈ [0, 1]).
+    /// La confiance mesure combien d'observations supportent le conditionnement.
+    /// Seules les positions 0-1 contribuent à la confiance (les positions profondes
+    /// ont toujours très peu d'observations par état et retombent sur les marginales).
+    pub fn score_balls_with_confidence(&self, balls: &[u8; 5]) -> (f64, f64) {
+        if !self.trained { return (0.0, 0.0); }
 
         let mut sorted_balls = *balls;
         sorted_balls.sort();
 
         let mut log_score = 0.0;
+        let alpha_ref = 20.0;
+        let mut confidence_sum = 0.0f64;
+        let confidence_positions = 2; // only pos 0-1 for confidence
+
         for pos in 0..5 {
             let ball = sorted_balls[pos];
             let ball_idx = (ball - 1) as usize;
             let prefix = &sorted_balls[..pos];
             let key = encode_prefix_state(prefix);
 
-            let probs = if let Some(table) = self.position_tables[pos].get(&key) {
+            let (probs, obs_count) = if let Some(table) = self.position_tables[pos].get(&key) {
                 let count: f64 = table.iter().sum::<f64>() - self.laplace_alpha * 50.0;
                 let adaptive_alpha = self.laplace_alpha / (1.0 + count.max(0.0) / 10.0);
                 let smoothed: Vec<f64> = table.iter().enumerate().map(|(i, &c)| {
@@ -155,29 +158,32 @@ impl JointConditionalModel {
                 }).collect();
                 let total: f64 = smoothed.iter().sum();
                 if total > 0.0 {
-                    smoothed.iter().map(|&c| c / total).collect::<Vec<f64>>()
+                    (smoothed.iter().map(|&c| c / total).collect::<Vec<f64>>(), count.max(0.0))
                 } else {
-                    self.normalized_marginal(pos)
+                    (self.normalized_marginal(pos), 0.0)
                 }
             } else {
-                self.normalized_marginal(pos)
+                (self.normalized_marginal(pos), 0.0)
             };
+
+            // Confiance pour les 2 premières positions seulement
+            if pos < confidence_positions {
+                confidence_sum += (obs_count / (obs_count + alpha_ref)).min(1.0);
+            }
 
             let available_prob: f64 = probs.iter().enumerate()
                 .filter(|(idx, _)| !prefix.contains(&((*idx + 1) as u8)))
                 .map(|(_, &p)| p)
                 .sum();
-
-            let p = if available_prob > 0.0 {
-                probs[ball_idx] / available_prob
-            } else {
-                1.0 / (50 - pos) as f64
-            };
-
+            let p = if available_prob > 0.0 { probs[ball_idx] / available_prob }
+                    else { 1.0 / (50 - pos) as f64 };
             log_score += p.max(1e-15).ln();
         }
 
-        log_score
+        let log_uniform_seq: f64 = (0..5).map(|k| -((50 - k) as f64).ln()).sum();
+        let normalized = log_score - log_uniform_seq;
+        let confidence = (confidence_sum / confidence_positions as f64).min(1.0);
+        (normalized, confidence)
     }
 
     /// Score une grille complète par le modèle joint.
@@ -513,6 +519,43 @@ mod tests {
         // Avec des données test synthétiques, les deux peuvent être proches
         assert!(score1.is_finite());
         assert!(score2.is_finite());
+    }
+
+    #[test]
+    fn test_score_balls_with_confidence_range() {
+        let mut model = JointConditionalModel::default();
+        let draws = make_test_draws(50);
+        model.train(&draws);
+
+        let (score, conf) = model.score_balls_with_confidence(&draws[0].balls);
+        assert!(score.is_finite(), "Score should be finite: {}", score);
+        assert!(conf >= 0.0 && conf <= 1.0, "Confidence should be in [0,1]: {}", conf);
+    }
+
+    #[test]
+    fn test_score_balls_with_confidence_increases_with_data() {
+        let mut model_small = JointConditionalModel::default();
+        let draws_small = make_test_draws(30);
+        model_small.train(&draws_small);
+
+        let mut model_large = JointConditionalModel::default();
+        let draws_large = make_test_draws(200);
+        model_large.train(&draws_large);
+
+        let (_, conf_small) = model_small.score_balls_with_confidence(&draws_small[0].balls);
+        let (_, conf_large) = model_large.score_balls_with_confidence(&draws_large[0].balls);
+
+        // Plus de données → confiance plus haute (ou au moins égale)
+        assert!(conf_large >= conf_small * 0.9,
+            "More data should give higher confidence: {} vs {}", conf_large, conf_small);
+    }
+
+    #[test]
+    fn test_score_balls_with_confidence_untrained() {
+        let model = JointConditionalModel::default();
+        let (score, conf) = model.score_balls_with_confidence(&[1, 2, 3, 4, 5]);
+        assert_eq!(score, 0.0);
+        assert_eq!(conf, 0.0);
     }
 
     #[test]

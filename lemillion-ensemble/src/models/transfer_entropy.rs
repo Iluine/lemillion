@@ -217,21 +217,23 @@ impl ForecastModel for TransferEntropyModel {
             }
         }
 
-        // 4. Scorer chaque cible
-        // Identifier quels numéros sources étaient dans le dernier tirage
-        let last_balls: Vec<u8> = draws[0].balls.to_vec();
-
+        // 4. Scorer chaque cible — v12: multi-lag scoring (lags 1-3)
+        // La causalité peut être différée de 1 à 3 tirages
         let mut scores = vec![1.0f64; size];
+        let decay_weights = [1.0, 0.5, 0.25]; // lag 1, 2, 3
 
         for pair in &significant_pairs {
-            let in_last = match pair.source_pool {
-                Pool::Balls => last_balls.contains(&pair.source),
-                Pool::Stars => draws[0].stars.contains(&pair.source),
-            };
-            if in_last {
-                let target_idx = (pair.target - 1) as usize;
-                if target_idx < size {
-                    scores[target_idx] *= 1.0 + self.alpha * pair.te_value;
+            for (lag_idx, &weight) in decay_weights.iter().enumerate() {
+                if lag_idx >= draws.len() { break; }
+                let in_draw = match pair.source_pool {
+                    Pool::Balls => draws[lag_idx].balls.contains(&pair.source),
+                    Pool::Stars => draws[lag_idx].stars.contains(&pair.source),
+                };
+                if in_draw {
+                    let target_idx = (pair.target - 1) as usize;
+                    if target_idx < size {
+                        scores[target_idx] *= 1.0 + self.alpha * pair.te_value * weight;
+                    }
                 }
             }
         }

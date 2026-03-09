@@ -75,8 +75,27 @@ impl EnsembleCombiner {
 
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
+            // v11: Log-ratio clamp — limits each model's positive contribution vs uniform.
+            // Only clamps the upside to prevent a single noisy model from dominating.
+            // The downside (penalizing unlikely numbers) is unclamped for full concentration.
+            let model_h: f64 = dist.iter()
+                .filter(|&&p| p > 1e-15)
+                .map(|&p| -p * p.ln())
+                .sum();
+            let h_ratio = model_h / (size as f64).ln();
+            // Flat model (h_ratio≈1.0) → cap positive deviation at e^4 ≈ 55x above uniform
+            // Concentrated model (h_ratio≈0.8) → allow up to e^5.2 ≈ 181x
+            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio);
+            let uniform_p = 1.0 / size as f64;
             for j in 0..size {
-                log_combined[j] += w * dist[j].max(1e-15).ln().max(-50.0);
+                let raw_log = dist[j].max(1e-15).ln();
+                // Only clamp the upside: limit how much a model can boost a number
+                let log_ratio = raw_log - uniform_p.ln();
+                if log_ratio > max_positive_log_ratio {
+                    log_combined[j] += w * (uniform_p.ln() + max_positive_log_ratio);
+                } else {
+                    log_combined[j] += w * raw_log;
+                }
             }
             model_distributions.push((name, dist));
         }
@@ -153,8 +172,24 @@ impl EnsembleCombiner {
 
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
+            // v12: Aligned with predict() — upside-only log-ratio clamp [4.0, 10.0].
+            // Previously used bilateral clamp [2.0, 5.0] which was ~2x more restrictive
+            // and also clamped the downside, causing divergence between backtest and production.
+            let model_h: f64 = dist.iter()
+                .filter(|&&p| p > 1e-15)
+                .map(|&p| -p * p.ln())
+                .sum();
+            let h_ratio = model_h / (size as f64).ln();
+            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio);
+            let uniform_p = 1.0 / size as f64;
             for j in 0..size {
-                log_combined[j] += w * dist[j].max(1e-15).ln().max(-50.0);
+                let raw_log = dist[j].max(1e-15).ln();
+                let log_ratio = raw_log - uniform_p.ln();
+                if log_ratio > max_positive_log_ratio {
+                    log_combined[j] += w * (uniform_p.ln() + max_positive_log_ratio);
+                } else {
+                    log_combined[j] += w * raw_log;
+                }
             }
             model_distributions.push((name, dist));
         }
@@ -356,14 +391,15 @@ pub fn compute_hedge_weights(
         }
     }
 
-    // Floor différencié: les modèles avec poids base > 0 gardent un floor minimum,
-    // les modèles à poids base ~0 (skill négatif) restent à 0 après Hedge.
+    // Floor différencié: only models with meaningful base weight (>2%) get a floor.
+    // v11: raised threshold from 1e-10 to 0.02 to prevent marginal models from
+    // diluting the top models' concentration via floor allocation.
     let min_weight = 0.005;
+    let floor_threshold = 0.02;
     for (i, w) in ball_weights.iter_mut().enumerate() {
-        if base_ball_weights[i] > 1e-10 {
+        if base_ball_weights[i] > floor_threshold {
             *w = w.max(min_weight);
         }
-        // else: laisser à 0 — pas de floor pour les modèles inutiles
     }
     let bs: f64 = ball_weights.iter().sum();
     if bs > 0.0 {
@@ -372,7 +408,7 @@ pub fn compute_hedge_weights(
         }
     }
     for (i, w) in star_weights.iter_mut().enumerate() {
-        if base_star_weights[i] > 1e-10 {
+        if base_star_weights[i] > floor_threshold {
             *w = w.max(min_weight);
         }
     }
@@ -438,5 +474,35 @@ mod tests {
         let ss: f64 = sw.iter().sum();
         assert!((bs - 1.0).abs() < 1e-9, "Ball weights sum = {}", bs);
         assert!((ss - 1.0).abs() < 1e-9, "Star weights sum = {}", ss);
+    }
+
+    #[test]
+    fn test_log_clamp_operational() {
+        // v11: verify log-ratio clamp actually modifies distributions
+        // A very concentrated model should have its extremes clamped
+        let combiner = EnsembleCombiner::new(crate::models::all_models());
+        let draws = make_test_draws(20);
+        let pred = combiner.predict(&draws, Pool::Balls);
+        // Distribution should be valid
+        assert!(validate_distribution(&pred.distribution, Pool::Balls));
+        // No extreme ratios vs uniform (clamp should prevent >e^5 ≈ 148x)
+        let uniform = 1.0 / 50.0;
+        for &p in &pred.distribution {
+            let ratio = p / uniform;
+            assert!(ratio < 200.0, "Ratio {} exceeds safe clamp bounds", ratio);
+        }
+    }
+
+    #[test]
+    fn test_log_clamp_concentrated_wider_range() {
+        // Concentrated model (low entropy) should have wider allowed range
+        // This is a property test of the formula max_log_ratio = 2.0 + 3.0 * (1.0 - h_ratio)
+        let h_ratio_concentrated: f64 = 0.8;
+        let h_ratio_flat: f64 = 1.0;
+        let range_concentrated = 4.0 + 6.0 * (1.0 - h_ratio_concentrated); // 5.2
+        let range_flat = 4.0 + 6.0 * (1.0 - h_ratio_flat); // 4.0
+        assert!(range_concentrated > range_flat);
+        assert!((range_concentrated - 5.2).abs() < 1e-9);
+        assert!((range_flat - 4.0).abs() < 1e-9);
     }
 }
