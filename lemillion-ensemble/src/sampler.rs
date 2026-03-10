@@ -1180,6 +1180,9 @@ impl Ord for MinHeapEntry {
 
 /// Génère les top-N combinaisons par probabilité de jackpot (5+2).
 ///
+/// Poids du bonus de cohérence dans le scoring jackpot (v14)
+const COHERENCE_WEIGHT: f64 = 30.00;
+
 /// Énumère exhaustivement les combinaisons dans la zone haute probabilité,
 /// triées par score bayésien, sans diversité.
 pub fn generate_suggestions_jackpot(
@@ -1187,7 +1190,7 @@ pub fn generate_suggestions_jackpot(
     star_probs: &[f64],
     count: usize,
     filter: Option<&StructuralFilter>,
-    _coherence: Option<&CoherenceScorer>,
+    coherence: Option<&CoherenceScorer>,
     joint_model: Option<&crate::models::joint::JointConditionalModel>,
     star_pair_probs: Option<&[f64; 66]>,
     excluded_balls: Option<&[u8]>,
@@ -1317,6 +1320,14 @@ pub fn generate_suggestions_jackpot(
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
                             let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
 
+                            // Coherence ne dépend que des boules → hors boucle étoiles
+                            let coherence_bonus = if let Some(cs) = coherence {
+                                let c = cs.score_balls(&balls);
+                                COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+                            } else {
+                                0.0
+                            };
+
                             for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
                                 let log_star_score = if let Some(cp) = cond_probs {
@@ -1327,7 +1338,7 @@ pub fn generate_suggestions_jackpot(
                                 } else {
                                     log_base_star_scores[star_idx]
                                 };
-                                let log_score = log_ball_score + log_star_score;
+                                let log_score = log_ball_score + log_star_score + coherence_bonus;
 
                                 // Élagage rapide : si le score est inférieur au min du heap plein, skip
                                 if heap.len() >= count && log_score <= min_log_score {
@@ -1418,6 +1429,13 @@ pub fn generate_suggestions_jackpot(
                             let cond_probs = conditioner.map(|c| c.conditioned_pair_probs(&balls));
                             let cond_blend = conditioner.map(|c| c.adaptive_blend(&balls)).unwrap_or(0.0);
 
+                            let coherence_bonus = if let Some(cs) = coherence {
+                                let c = cs.score_balls(&balls);
+                                COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+                            } else {
+                                0.0
+                            };
+
                             for (star_idx, &(stars, base_star_score)) in star_pairs.iter().enumerate() {
                                 enumeration_size += 1;
                                 if passes_filter {
@@ -1430,7 +1448,7 @@ pub fn generate_suggestions_jackpot(
                                     } else {
                                         log_base_star_scores[star_idx]
                                     };
-                                    let score = (log_ball_score + log_star_score).exp();
+                                    let score = (log_ball_score + log_star_score + coherence_bonus).exp();
                                     all.push(Suggestion { balls, stars, score });
                                 }
                             }

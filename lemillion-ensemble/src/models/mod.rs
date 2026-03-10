@@ -49,6 +49,9 @@ pub mod particle_stresa;
 pub mod forbidden_patterns;
 pub mod renyi_te;
 pub mod cross_te;
+pub mod te_order2;
+pub mod spectral_graph;
+pub mod evt;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -189,7 +192,8 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Modèles de base de l'ensemble (25 modèles actifs).
+/// Modèles de base de l'ensemble (27 modèles actifs).
+/// v14: SpectralGraph, EVT ajoutés (signaux orthogonaux non-TE). TEOrder2 retiré (dilution BMA via corrélation TE).
 /// v13: RényiTE, CrossTE ajoutés (signaux orthogonaux aux TE existants).
 /// v11: TLR, ParticleStresa, ForbiddenPatterns ajoutés puis exclus (dilution sans signal).
 /// Retirés v9: Copula, Wavelet, Renewal (0% poids boules+étoiles).
@@ -224,6 +228,9 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(draw_order::DrawOrderModel::default()),
         Box::new(renyi_te::RenyiTEModel::default()),        // v13
         Box::new(cross_te::CrossTEModel::default()),          // v13
+        //Box::new(te_order2::TEOrder2Model::default()),        // v14
+        Box::new(spectral_graph::SpectralGraphModel::default()), // v14
+        Box::new(evt::EvtModel::default()),                    // v14
         //Box::new(tlr::TlrModel::default()),
         //Box::new(particle_stresa::ParticleStresaModel::default()),
         //Box::new(forbidden_patterns::ForbiddenPatternsModel::default()),

@@ -150,11 +150,7 @@ impl ForecastModel for BoltzmannModel {
         }
 
         // Convert to probabilities via softmax
-        let max_e = energies
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min); // min energy = most likely
-        // P proportional to exp(-E), so shift by max to avoid overflow
+        // P proportional to exp(-E), so shift by min to avoid overflow
         let min_e = energies
             .iter()
             .cloned()
@@ -183,7 +179,6 @@ impl ForecastModel for BoltzmannModel {
             PROB_FLOOR_STARS
         };
         floor_only(&mut probs, floor);
-        let _ = max_e; // suppress unused warning
         probs
     }
 
