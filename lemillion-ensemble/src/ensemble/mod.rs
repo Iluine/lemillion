@@ -1,6 +1,7 @@
 pub mod calibration;
 pub mod consensus;
 pub mod meta;
+pub mod online;
 pub mod stacking;
 
 use rayon::prelude::*;

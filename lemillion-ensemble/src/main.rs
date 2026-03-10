@@ -23,7 +23,7 @@ use lemillion_ensemble::sampler::{
     generate_suggestions_filtered,
     generate_diverse_grids_with_strategy, generate_suggestions_ev,
     generate_suggestions_jackpot, optimal_grid, BallStarConditioner, CoherenceScorer,
-    StarStrategy, StructuralFilter,
+    StarStrategy, StarCoherenceScorer, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
     PopularityModel, count_matches, match_to_tier, PRIZE_TIERS, TICKET_PRICE,
@@ -883,7 +883,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
     };
 
-    let (ball_pred, star_pred) = if use_stacking {
+    let (mut ball_pred, star_pred) = if use_stacking {
         let w = weights.as_ref().unwrap();
         let blend = 0.6;
         let bp = if let Some(ref sw) = w.stacking_balls {
@@ -908,6 +908,14 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
         (predict_pool(Pool::Balls), predict_pool(Pool::Stars))
     };
+
+    // v15: Online/offline blend — adaptation rapide aux changements récents
+    {
+        use lemillion_ensemble::ensemble::online::online_offline_blend;
+        let blended_balls = online_offline_blend(&ball_pred.distribution, &draws, Pool::Balls, 8);
+        // Stars: skip online blend (v15b — 12 values too few for stable EWMA, keep v14b star behavior)
+        ball_pred.distribution = blended_balls;
+    }
 
     // Afficher les distributions
     display::display_forecast(&ball_pred, Pool::Balls);
@@ -1050,6 +1058,9 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         // Ball→star conditioner
         let conditioner = BallStarConditioner::from_history(&draws);
 
+        // v15: Star coherence scorer
+        let star_coherence = StarCoherenceScorer::from_history(&draws);
+
         // Neural scorer (optional)
         let neural_scorer_opt = if neural_rerank {
             let path = std::path::PathBuf::from("neural_scorer.json");
@@ -1105,6 +1116,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 star_pair_probs.as_ref(), excluded_ref,
                 Some(&conditioner),
                 neural_scorer_ref,
+                Some(&star_coherence),
             )?;
 
             for s in &result.suggestions {
@@ -1966,6 +1978,7 @@ fn cmd_backtest_jackpot(
                 let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
                 let star_pair_probs = star_pair_model.predict_pair_distribution(training_draws);
                 let conditioner = BallStarConditioner::from_history(training_draws);
+                let star_coherence = StarCoherenceScorer::from_history(training_draws);
 
                 let result = generate_suggestions_jackpot(
                     &ball_dist, &star_dist, n_suggestions, Some(&filter),
@@ -1973,6 +1986,7 @@ fn cmd_backtest_jackpot(
                     star_pair_probs.as_ref(), None,
                     Some(&conditioner),
                     None,
+                    Some(&star_coherence),
                 )?;
 
                 // Vérifier si le tirage réel est dans le top-N
@@ -2210,6 +2224,7 @@ fn cmd_backtest_jackpot_top3(
 
         // Ball→star conditioner
         let bt_conditioner = BallStarConditioner::from_history(training_draws);
+        let bt_star_coherence = StarCoherenceScorer::from_history(training_draws);
 
         // Build weight profiles with per-profile temperatures
         let profiles = build_weight_profiles(&ball_w, &star_w, &model_names, eff_bt, eff_st);
@@ -2246,6 +2261,7 @@ fn cmd_backtest_jackpot_top3(
                 bt_star_pair_probs.as_ref(), bt_excluded_ref,
                 Some(&bt_conditioner),
                 None,
+                Some(&bt_star_coherence),
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid
@@ -2546,11 +2562,55 @@ fn cmd_backtest_few_grids(
                 (vec![1.0 / n as f64; n], vec![1.0 / n as f64; n])
             }
         };
-        drop(models);
 
         if top_models > 0 {
             filter_top_models_silent(&mut ball_w, &mut star_w, top_models);
         }
+
+        // v15: MetaPredictor — ajustement contextuel des poids (aligné avec production)
+        if let Some(w) = weights {
+            if !w.detailed_ll.is_empty() {
+                use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+                let features = RegimeFeatures::from_draws(training_draws);
+                if let Some(meta) = MetaPredictor::train(training_draws, &w.detailed_ll, 1.0) {
+                    let adjustments = meta.weight_adjustments(&features);
+                    for (name, adj) in &adjustments {
+                        if let Some(idx) = model_names.iter().position(|n| n == name) {
+                            if idx < ball_w.len() {
+                                ball_w[idx] *= adj;
+                            }
+                        }
+                    }
+                    let total: f64 = ball_w.iter().sum();
+                    if total > 0.0 { ball_w.iter_mut().for_each(|w| *w /= total); }
+                }
+                if !w.star_detailed_ll.is_empty() {
+                    if let Some(meta) = MetaPredictor::train(training_draws, &w.star_detailed_ll, 1.0) {
+                        let adjustments = meta.weight_adjustments(&features);
+                        for (name, adj) in &adjustments {
+                            if let Some(idx) = model_names.iter().position(|n| n == name) {
+                                if idx < star_w.len() {
+                                    star_w[idx] *= adj;
+                                }
+                            }
+                        }
+                        let total: f64 = star_w.iter().sum();
+                        if total > 0.0 { star_w.iter_mut().for_each(|w| *w /= total); }
+                    }
+                }
+            }
+        }
+
+        // v15: Hedge weights — ajustement multiplicatif réactif (aligné avec production)
+        {
+            let (hedged_ball, hedged_star) = compute_hedge_weights(
+                &models, training_draws, &ball_w, &star_w, 100, 0.10,
+            );
+            ball_w = hedged_ball;
+            star_w = hedged_star;
+        }
+
+        drop(models);
 
         // Build combiner and predict
         let profiles = build_weight_profiles(&ball_w, &star_w, &model_names, fg_bt, fg_st);
@@ -2563,6 +2623,7 @@ fn cmd_backtest_few_grids(
         let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
         let star_pair_probs = star_pair_model.predict_pair_distribution(training_draws);
         let conditioner = BallStarConditioner::from_history(training_draws);
+        let star_coherence = StarCoherenceScorer::from_history(training_draws);
 
         // Collect candidates from all profiles
         let mut all_candidates: Vec<lemillion_db::models::Suggestion> = Vec::new();
@@ -2571,8 +2632,16 @@ fn cmd_backtest_few_grids(
         for (_label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
             let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
-            let bp = prof_combiner.predict(training_draws, Pool::Balls);
-            let sp = prof_combiner.predict(training_draws, Pool::Stars);
+            // v15: agreement boost (aligné avec production)
+            let mut bp = prof_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+            let sp = prof_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+
+            // v15: online/offline blend
+            {
+                use lemillion_ensemble::ensemble::online::online_offline_blend;
+                bp.distribution = online_offline_blend(&bp.distribution, training_draws, Pool::Balls, 8);
+                // Stars: skip online blend (v15b)
+            }
 
             let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
                 apply_temperature(&bp.distribution, *prof_bt)
@@ -2590,6 +2659,7 @@ fn cmd_backtest_few_grids(
                 Some(&coherence), Some(&joint_model),
                 star_pair_probs.as_ref(), None,
                 Some(&conditioner), None,
+                Some(&star_coherence),
             )?;
 
             for s in &result.suggestions {
@@ -2826,8 +2896,15 @@ fn cmd_backtest_realistic(
             combiner.star_weights = hedged_star;
         }
 
-        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+        let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
         let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+
+        // v15: online/offline blend
+        {
+            use lemillion_ensemble::ensemble::online::online_offline_blend;
+            ball_pred.distribution = online_offline_blend(&ball_pred.distribution, training_draws, Pool::Balls, 8);
+            // Stars: skip online blend (v15b)
+        }
 
         // Conviction → nombre de grilles
         let conviction = compute_conviction(
@@ -3100,8 +3177,15 @@ fn cmd_backtest_3grids(
             combiner.star_weights = hedged_star;
         }
 
-        let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
+        let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
         let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+
+        // v15: online/offline blend
+        {
+            use lemillion_ensemble::ensemble::online::online_offline_blend;
+            ball_pred.distribution = online_offline_blend(&ball_pred.distribution, training_draws, Pool::Balls, 8);
+            // Stars: skip online blend (v15b)
+        }
 
         let conviction = compute_conviction(
             &ball_pred.distribution,

@@ -699,6 +699,84 @@ impl CoherenceScorer {
     }
 }
 
+/// Poids du bonus de cohérence étoiles dans le scoring jackpot (v15).
+const STAR_COHERENCE_WEIGHT: f64 = 15.0;
+
+/// Score de cohérence des paires d'étoiles (v15).
+///
+/// Blende fréquence historique (60%) et fréquence EWMA récente (40%)
+/// pour chaque paire. Retourne un score [0, 1] centré à 0.5.
+pub struct StarCoherenceScorer {
+    pair_freq: [f64; 66],
+    recent_pair_freq: [f64; 66],
+}
+
+impl StarCoherenceScorer {
+    /// Construit le scorer depuis l'historique des tirages.
+    pub fn from_history(draws: &[Draw]) -> Self {
+        let mut pair_counts = [0.0f64; 66];
+        let total = draws.len() as f64;
+
+        // Fréquence historique
+        for draw in draws {
+            let pidx = crate::models::star_pair::pair_index(draw.stars[0], draw.stars[1]);
+            pair_counts[pidx] += 1.0;
+        }
+
+        let mut pair_freq = [0.0f64; 66];
+        if total > 0.0 {
+            for i in 0..66 {
+                pair_freq[i] = pair_counts[i] / total;
+            }
+        } else {
+            for p in &mut pair_freq {
+                *p = 1.0 / 66.0;
+            }
+        }
+
+        // EWMA récente (α=0.05, itération chronologique = inverse)
+        let ewma_alpha = 0.05;
+        let mut recent = [1.0 / 66.0; 66];
+
+        for draw in draws.iter().rev() {
+            let pidx = crate::models::star_pair::pair_index(draw.stars[0], draw.stars[1]);
+            for i in 0..66 {
+                let present = if i == pidx { 1.0 } else { 0.0 };
+                recent[i] = ewma_alpha * present + (1.0 - ewma_alpha) * recent[i];
+            }
+        }
+
+        // Normaliser la distribution EWMA
+        let sum: f64 = recent.iter().sum();
+        if sum > 0.0 {
+            for p in &mut recent {
+                *p /= sum;
+            }
+        }
+
+        Self {
+            pair_freq,
+            recent_pair_freq: recent,
+        }
+    }
+
+    /// Score de cohérence pour une paire d'étoiles [0, 1] centré 0.5.
+    pub fn score_star_pair(&self, stars: &[u8; 2]) -> f64 {
+        let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+        let historical = self.pair_freq[pidx];
+        let recent = self.recent_pair_freq[pidx];
+
+        // Blend 60% historique + 40% récent
+        let blended = 0.60 * historical + 0.40 * recent;
+        let expected: f64 = 1.0 / 66.0;
+        let ratio = blended / expected.max(1e-15);
+
+        // Map ratio → [0, 1] centré 0.5 via log-ratio
+        let log_ratio = ratio.max(1e-6).ln();
+        (0.5 + log_ratio / 3.0).clamp(0.0, 1.0)
+    }
+}
+
 /// Génère des suggestions avec scoring conjoint (cohérence historique + modèle joint conditionnel).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_suggestions_joint(
@@ -1196,6 +1274,7 @@ pub fn generate_suggestions_jackpot(
     excluded_balls: Option<&[u8]>,
     conditioner: Option<&BallStarConditioner>,
     _neural_scorer: Option<&crate::models::neural_scorer::NeuralScorer>,
+    star_coherence: Option<&StarCoherenceScorer>,
 ) -> Result<JackpotResult> {
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
@@ -1338,7 +1417,13 @@ pub fn generate_suggestions_jackpot(
                                 } else {
                                     log_base_star_scores[star_idx]
                                 };
-                                let log_score = log_ball_score + log_star_score + coherence_bonus;
+                                let star_coherence_bonus = if let Some(scs) = star_coherence {
+                                    let sc = scs.score_star_pair(&stars);
+                                    STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+                                } else {
+                                    0.0
+                                };
+                                let log_score = log_ball_score + log_star_score + coherence_bonus + star_coherence_bonus;
 
                                 // Élagage rapide : si le score est inférieur au min du heap plein, skip
                                 if heap.len() >= count && log_score <= min_log_score {
@@ -1448,7 +1533,13 @@ pub fn generate_suggestions_jackpot(
                                     } else {
                                         log_base_star_scores[star_idx]
                                     };
-                                    let score = (log_ball_score + log_star_score + coherence_bonus).exp();
+                                    let star_coherence_bonus = if let Some(scs) = star_coherence {
+                                        let sc = scs.score_star_pair(&stars);
+                                        STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+                                    } else {
+                                        0.0
+                                    };
+                                    let score = (log_ball_score + log_star_score + coherence_bonus + star_coherence_bonus).exp();
                                     all.push(Suggestion { balls, stars, score });
                                 }
                             }
@@ -2706,7 +2797,7 @@ mod tests {
         let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 5);
         assert!(result.total_jackpot_probability > 0.0);
         assert!(result.enumeration_size > 0);
@@ -2732,7 +2823,7 @@ mod tests {
         let total: f64 = star_probs.iter().sum();
         let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 100);
         assert!(result.improvement_factor > 1.0,
             "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
@@ -2745,7 +2836,7 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None, None).unwrap();
         for w in result.suggestions.windows(2) {
             assert!(w[0].score >= w[1].score,
                 "Suggestions non triées : {} < {}", w[0].score, w[1].score);
@@ -2759,8 +2850,8 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None).unwrap();
-        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None).unwrap();
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None).unwrap();
         for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
@@ -2778,7 +2869,7 @@ mod tests {
             spread_range: (10, 45),
         };
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None, None).unwrap();
         // Toutes les suggestions doivent passer le filtre
         for s in &result.suggestions {
             assert!(filter.accept_balls(&s.balls),

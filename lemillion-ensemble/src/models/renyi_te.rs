@@ -43,24 +43,22 @@ fn presence_series(draws: &[Draw], pool: Pool, num: u8) -> Vec<bool> {
         .collect()
 }
 
-/// Rényi Transfer Entropy (α < 1).
+/// Rényi Transfer Entropy lagué (v15).
 ///
-/// TE_α(X→Y) = (1/(α-1)) × ln[ Σ p(y_{t+1}, y_t, x_t) × (p(y_{t+1}|y_t,x_t) / p(y_{t+1}|y_t))^(α-1) ]
-///
-/// For α=0.7, terms where p(cond_joint) >> p(cond_marg) (rare events with strong causality) are amplified.
-fn renyi_transfer_entropy(source: &[bool], target: &[bool], alpha: f64) -> f64 {
+/// TE_α,k(X→Y) = (1/(α-1)) × ln[ Σ p(y_t, y_{t-1}, x_{t-k}) × (p(y_t|y_{t-1},x_{t-k}) / p(y_t|y_{t-1}))^(α-1) ]
+fn renyi_transfer_entropy_lagged(source: &[bool], target: &[bool], alpha: f64, lag: usize) -> f64 {
     let n = source.len().min(target.len());
-    if n < 3 { return 0.0; }
+    let start = lag.max(1);
+    if n <= start || (n - start) < 3 { return 0.0; }
 
-    // Counts: (y_t, x_t, y_{t+1}) → 8 cells
     let mut counts = [0.0f64; 8];
-    let total = (n - 1) as f64;
+    let total = (n - start) as f64;
 
-    for t in 0..n - 1 {
+    for t in start..n {
+        let yt_prev = target[t - 1] as usize;
+        let x_lagged = source[t - lag] as usize;
         let yt = target[t] as usize;
-        let xt = source[t] as usize;
-        let yt1 = target[t + 1] as usize;
-        counts[yt * 4 + xt * 2 + yt1] += 1.0;
+        counts[yt_prev * 4 + x_lagged * 2 + yt] += 1.0;
     }
 
     let mut sum = 0.0f64;
@@ -91,8 +89,14 @@ fn renyi_transfer_entropy(source: &[bool], target: &[bool], alpha: f64) -> f64 {
     te.max(0.0)
 }
 
-/// Baseline Rényi TE via permutation (5 shuffles).
-fn baseline_renyi_te(source: &[bool], target: &[bool], alpha: f64, seed: u64) -> f64 {
+/// Compatibilité : Rényi TE classique (lag=1). Utilisé par les tests.
+#[cfg(test)]
+fn renyi_transfer_entropy(source: &[bool], target: &[bool], alpha: f64) -> f64 {
+    renyi_transfer_entropy_lagged(source, target, alpha, 1)
+}
+
+/// Baseline Rényi TE lagué via permutation (5 shuffles).
+fn baseline_renyi_te_lagged(source: &[bool], target: &[bool], alpha: f64, lag: usize, seed: u64) -> f64 {
     let n_shuffles = 5;
     let mut total = 0.0f64;
     let mut rng = seed.wrapping_add(1);
@@ -107,7 +111,7 @@ fn baseline_renyi_te(source: &[bool], target: &[bool], alpha: f64, seed: u64) ->
             let j = (rng as usize) % (i + 1);
             shuffled.swap(i, j);
         }
-        total += renyi_transfer_entropy(&shuffled, target, alpha);
+        total += renyi_transfer_entropy_lagged(&shuffled, target, alpha, lag);
     }
 
     total / n_shuffles as f64
@@ -118,6 +122,7 @@ struct CausalPair {
     source_pool: Pool,
     target: u8,
     te_value: f64,
+    best_lag: usize,
 }
 
 impl ForecastModel for RenyiTEModel {
@@ -162,8 +167,9 @@ impl ForecastModel for RenyiTEModel {
             }
         }
 
-        // 4. Compute Rényi TE for each source→target pair
+        // 4. v15: True lagged Rényi TE — compute at lags [1,2,3], keep best
         let mut significant_pairs: Vec<CausalPair> = Vec::new();
+        let test_lags: [usize; 3] = [1, 2, 3];
 
         match pool {
             Pool::Balls => {
@@ -171,15 +177,18 @@ impl ForecastModel for RenyiTEModel {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_num, ref src_series) in &source_series {
                         if source_num == target_num { continue; }
-                        let te = renyi_transfer_entropy(src_series, target_series, self.renyi_alpha);
-                        let baseline = baseline_renyi_te(src_series, target_series, self.renyi_alpha,
-                            source_num as u64 * 100 + target_num as u64);
-                        if te > self.te_threshold_factor * baseline.max(1e-6) {
+                        let mut best_te = 0.0f64;
+                        let mut best_lag = 1usize;
+                        for &lag in &test_lags {
+                            let te = renyi_transfer_entropy_lagged(src_series, target_series, self.renyi_alpha, lag);
+                            if te > best_te { best_te = te; best_lag = lag; }
+                        }
+                        let seed = source_num as u64 * 100 + target_num as u64;
+                        let baseline = baseline_renyi_te_lagged(src_series, target_series, self.renyi_alpha, best_lag, seed);
+                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
-                                source: source_num,
-                                source_pool: Pool::Balls,
-                                target: target_num,
-                                te_value: te,
+                                source: source_num, source_pool: Pool::Balls,
+                                target: target_num, te_value: best_te, best_lag,
                             });
                         }
                     }
@@ -189,15 +198,18 @@ impl ForecastModel for RenyiTEModel {
                 for target_num in 1..=12u8 {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_num, ref src_series) in &source_series {
-                        let te = renyi_transfer_entropy(src_series, target_series, self.renyi_alpha);
-                        let baseline = baseline_renyi_te(src_series, target_series, self.renyi_alpha,
-                            source_num as u64 * 100 + target_num as u64);
-                        if te > self.te_threshold_factor * baseline.max(1e-6) {
+                        let mut best_te = 0.0f64;
+                        let mut best_lag = 1usize;
+                        for &lag in &test_lags {
+                            let te = renyi_transfer_entropy_lagged(src_series, target_series, self.renyi_alpha, lag);
+                            if te > best_te { best_te = te; best_lag = lag; }
+                        }
+                        let seed = source_num as u64 * 100 + target_num as u64;
+                        let baseline = baseline_renyi_te_lagged(src_series, target_series, self.renyi_alpha, best_lag, seed);
+                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
-                                source: source_num,
-                                source_pool: Pool::Balls,
-                                target: target_num,
-                                te_value: te,
+                                source: source_num, source_pool: Pool::Balls,
+                                target: target_num, te_value: best_te, best_lag,
                             });
                         }
                     }
@@ -205,22 +217,20 @@ impl ForecastModel for RenyiTEModel {
             }
         }
 
-        // 5. Multi-lag scoring (lags 1-3)
+        // 5. v15: Score at optimal lag only
         let mut scores = vec![1.0f64; size];
-        let decay_weights = [1.0, 0.5, 0.25];
 
         for pair in &significant_pairs {
-            for (lag_idx, &weight) in decay_weights.iter().enumerate() {
-                if lag_idx >= draws.len() { break; }
-                let in_draw = match pair.source_pool {
-                    Pool::Balls => draws[lag_idx].balls.contains(&pair.source),
-                    Pool::Stars => draws[lag_idx].stars.contains(&pair.source),
-                };
-                if in_draw {
-                    let target_idx = (pair.target - 1) as usize;
-                    if target_idx < size {
-                        scores[target_idx] *= 1.0 + self.alpha_boost * pair.te_value * weight;
-                    }
+            let lag_idx = pair.best_lag - 1;
+            if lag_idx >= draws.len() { continue; }
+            let in_draw = match pair.source_pool {
+                Pool::Balls => draws[lag_idx].balls.contains(&pair.source),
+                Pool::Stars => draws[lag_idx].stars.contains(&pair.source),
+            };
+            if in_draw {
+                let target_idx = (pair.target - 1) as usize;
+                if target_idx < size {
+                    scores[target_idx] *= 1.0 + self.alpha_boost * pair.te_value;
                 }
             }
         }

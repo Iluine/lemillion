@@ -39,19 +39,20 @@ fn presence_series(draws: &[Draw], pool: Pool, num: u8) -> Vec<bool> {
         .collect()
 }
 
-/// Shannon TE(source→target).
-fn transfer_entropy(source: &[bool], target: &[bool]) -> f64 {
+/// Shannon TE lagué (v15).
+fn transfer_entropy_lagged(source: &[bool], target: &[bool], lag: usize) -> f64 {
     let n = source.len().min(target.len());
-    if n < 3 { return 0.0; }
+    let start = lag.max(1);
+    if n <= start || (n - start) < 3 { return 0.0; }
 
     let mut counts = [0.0f64; 8];
-    let total = (n - 1) as f64;
+    let total = (n - start) as f64;
 
-    for t in 0..n - 1 {
+    for t in start..n {
+        let yt_prev = target[t - 1] as usize;
+        let x_lagged = source[t - lag] as usize;
         let yt = target[t] as usize;
-        let xt = source[t] as usize;
-        let yt1 = target[t + 1] as usize;
-        counts[yt * 4 + xt * 2 + yt1] += 1.0;
+        counts[yt_prev * 4 + x_lagged * 2 + yt] += 1.0;
     }
 
     let mut te = 0.0f64;
@@ -75,8 +76,9 @@ fn transfer_entropy(source: &[bool], target: &[bool]) -> f64 {
     te.max(0.0)
 }
 
-/// Baseline TE via permutation (5 shuffles).
-fn baseline_te(source: &[bool], target: &[bool], seed: u64) -> f64 {
+
+/// Baseline TE lagué via permutation (5 shuffles).
+fn baseline_te_lagged(source: &[bool], target: &[bool], lag: usize, seed: u64) -> f64 {
     let n_shuffles = 5;
     let mut total = 0.0f64;
     let mut rng = seed.wrapping_add(1);
@@ -91,7 +93,7 @@ fn baseline_te(source: &[bool], target: &[bool], seed: u64) -> f64 {
             let j = (rng as usize) % (i + 1);
             shuffled.swap(i, j);
         }
-        total += transfer_entropy(&shuffled, target);
+        total += transfer_entropy_lagged(&shuffled, target, lag);
     }
     total / n_shuffles as f64
 }
@@ -100,6 +102,7 @@ struct CausalPair {
     source: u8,
     target: u8,
     te_value: f64,
+    best_lag: usize,
 }
 
 impl ForecastModel for CrossTEModel {
@@ -130,42 +133,49 @@ impl ForecastModel for CrossTEModel {
             }
         }
 
-        // Compute TE for each star→target pair
+        // v15: True lagged TE — compute at lags [1,2,3], keep best
         let mut significant_pairs: Vec<CausalPair> = Vec::new();
+        let test_lags: [usize; 3] = [1, 2, 3];
 
         match pool {
             Pool::Balls => {
-                // Star → Ball (600 pairs)
                 for target_num in 1..=50u8 {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_star, ref src_series) in &star_series {
-                        let te = transfer_entropy(src_series, target_series);
-                        let baseline = baseline_te(src_series, target_series,
-                            source_star as u64 * 1000 + target_num as u64);
-                        if te > self.te_threshold_factor * baseline.max(1e-6) {
+                        let mut best_te = 0.0f64;
+                        let mut best_lag = 1usize;
+                        for &lag in &test_lags {
+                            let te = transfer_entropy_lagged(src_series, target_series, lag);
+                            if te > best_te { best_te = te; best_lag = lag; }
+                        }
+                        let seed = source_star as u64 * 1000 + target_num as u64;
+                        let baseline = baseline_te_lagged(src_series, target_series, best_lag, seed);
+                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
-                                source: source_star,
-                                target: target_num,
-                                te_value: te,
+                                source: source_star, target: target_num,
+                                te_value: best_te, best_lag,
                             });
                         }
                     }
                 }
             }
             Pool::Stars => {
-                // Star → Star (144 pairs)
                 for target_num in 1..=12u8 {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_star, ref src_series) in &star_series {
                         if source_star == target_num { continue; }
-                        let te = transfer_entropy(src_series, target_series);
-                        let baseline = baseline_te(src_series, target_series,
-                            source_star as u64 * 1000 + target_num as u64);
-                        if te > self.te_threshold_factor * baseline.max(1e-6) {
+                        let mut best_te = 0.0f64;
+                        let mut best_lag = 1usize;
+                        for &lag in &test_lags {
+                            let te = transfer_entropy_lagged(src_series, target_series, lag);
+                            if te > best_te { best_te = te; best_lag = lag; }
+                        }
+                        let seed = source_star as u64 * 1000 + target_num as u64;
+                        let baseline = baseline_te_lagged(src_series, target_series, best_lag, seed);
+                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
-                                source: source_star,
-                                target: target_num,
-                                te_value: te,
+                                source: source_star, target: target_num,
+                                te_value: best_te, best_lag,
                             });
                         }
                     }
@@ -173,19 +183,17 @@ impl ForecastModel for CrossTEModel {
             }
         }
 
-        // Multi-lag scoring (lags 1-3)
+        // v15: Score at optimal lag only
         let mut scores = vec![1.0f64; size];
-        let decay_weights = [1.0, 0.5, 0.25];
 
         for pair in &significant_pairs {
-            for (lag_idx, &weight) in decay_weights.iter().enumerate() {
-                if lag_idx >= draws.len() { break; }
-                let in_draw = draws[lag_idx].stars.contains(&pair.source);
-                if in_draw {
-                    let target_idx = (pair.target - 1) as usize;
-                    if target_idx < size {
-                        scores[target_idx] *= 1.0 + self.alpha * pair.te_value * weight;
-                    }
+            let lag_idx = pair.best_lag - 1;
+            if lag_idx >= draws.len() { continue; }
+            let in_draw = draws[lag_idx].stars.contains(&pair.source);
+            if in_draw {
+                let target_idx = (pair.target - 1) as usize;
+                if target_idx < size {
+                    scores[target_idx] *= 1.0 + self.alpha * pair.te_value;
                 }
             }
         }
