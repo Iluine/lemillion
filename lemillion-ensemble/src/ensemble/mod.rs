@@ -69,6 +69,9 @@ impl EnsembleCombiner {
             .map(|model| (model.name().to_string(), model.predict(draws, pool)))
             .collect();
 
+        // v18: max weight for weight-modulated clamp
+        let max_w = weights.iter().cloned().fold(0.0f64, f64::max);
+
         // Log-linear pool: P(x) ∝ Π P_i(x)^w_i (geometric combination)
         // In log-space: log P(x) = Σ w_i × log P_i(x)
         let mut log_combined = vec![0.0f64; size];
@@ -76,17 +79,16 @@ impl EnsembleCombiner {
 
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
-            // v11: Log-ratio clamp — limits each model's positive contribution vs uniform.
-            // Only clamps the upside to prevent a single noisy model from dominating.
-            // The downside (penalizing unlikely numbers) is unclamped for full concentration.
+            // v18: Log-ratio clamp modulated by calibrated weight.
+            // Well-calibrated models (high weight) get full headroom.
+            // Marginal models (low weight) get reduced headroom to prevent domination.
             let model_h: f64 = dist.iter()
                 .filter(|&&p| p > 1e-15)
                 .map(|&p| -p * p.ln())
                 .sum();
             let h_ratio = model_h / (size as f64).ln();
-            // Flat model (h_ratio≈1.0) → cap positive deviation at e^4 ≈ 55x above uniform
-            // Concentrated model (h_ratio≈0.8) → allow up to e^5.2 ≈ 181x
-            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio);
+            let w_ratio = if max_w > 1e-15 { weights[i] / max_w } else { 0.5 };
+            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio) * w_ratio;
             let uniform_p = 1.0 / size as f64;
             for j in 0..size {
                 let raw_log = dist[j].max(1e-15).ln();
@@ -110,6 +112,27 @@ impl EnsembleCombiner {
         if total > 0.0 {
             for p in &mut combined {
                 *p /= total;
+            }
+        }
+
+        // v19: Star floor — prevent any star from being crushed below 1/5 of uniform.
+        // Safety net against unanimous momentum bias (★4 scenario).
+        if pool == Pool::Stars {
+            let floor = 1.0 / (size as f64 * 5.0); // ~0.0167 (uniform = 0.0833)
+            let mut floored = false;
+            for p in combined.iter_mut() {
+                if *p < floor {
+                    *p = floor;
+                    floored = true;
+                }
+            }
+            if floored {
+                let total: f64 = combined.iter().sum();
+                if total > 0.0 {
+                    for p in combined.iter_mut() {
+                        *p /= total;
+                    }
+                }
             }
         }
 
@@ -168,20 +191,22 @@ impl EnsembleCombiner {
             .map(|model| (model.name().to_string(), model.predict(draws, pool)))
             .collect();
 
+        // v18: max weight for weight-modulated clamp (aligned with predict())
+        let max_w = weights.iter().cloned().fold(0.0f64, f64::max);
+
         let mut log_combined = vec![0.0f64; size];
         let mut model_distributions = Vec::with_capacity(all_dists.len());
 
         for (i, (name, dist)) in all_dists.into_iter().enumerate() {
             let w = weights[i];
-            // v12: Aligned with predict() — upside-only log-ratio clamp [4.0, 10.0].
-            // Previously used bilateral clamp [2.0, 5.0] which was ~2x more restrictive
-            // and also clamped the downside, causing divergence between backtest and production.
+            // v18: Weight-modulated log-ratio clamp (aligned with predict()).
             let model_h: f64 = dist.iter()
                 .filter(|&&p| p > 1e-15)
                 .map(|&p| -p * p.ln())
                 .sum();
             let h_ratio = model_h / (size as f64).ln();
-            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio);
+            let w_ratio = if max_w > 1e-15 { weights[i] / max_w } else { 0.5 };
+            let max_positive_log_ratio = 4.0 + 6.0 * (1.0 - h_ratio) * w_ratio;
             let uniform_p = 1.0 / size as f64;
             for j in 0..size {
                 let raw_log = dist[j].max(1e-15).ln();
@@ -201,6 +226,21 @@ impl EnsembleCombiner {
         let total: f64 = combined.iter().sum();
         if total > 0.0 {
             for p in &mut combined { *p /= total; }
+        }
+
+        // v19: Star floor (aligned with predict())
+        if pool == Pool::Stars {
+            let floor = 1.0 / (size as f64 * 5.0);
+            let mut floored = false;
+            for p in combined.iter_mut() {
+                if *p < floor { *p = floor; floored = true; }
+            }
+            if floored {
+                let total: f64 = combined.iter().sum();
+                if total > 0.0 {
+                    for p in combined.iter_mut() { *p /= total; }
+                }
+            }
         }
 
         let spread = compute_spread(&model_distributions, size);

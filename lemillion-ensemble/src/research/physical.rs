@@ -11,6 +11,7 @@ pub fn run_physical_tests(draws: &[Draw]) -> Vec<TestResult> {
     results.extend(trap_bias_tests(draws));
     results.extend(cooccurrence_tests(draws));
     results.push(balls_stars_independence(draws));
+    results.push(ink_complexity_test(draws));
 
     results
 }
@@ -516,6 +517,91 @@ fn balls_stars_independence(draws: &[Draw]) -> TestResult {
         detail: format!(
             "chi2={:.2}, df={}, p={:.4}, MI={:.5} | Contingence {}x{}",
             chi2, df, p, mi, n_bins_ball, n_bins_star
+        ),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// 5. Ink Complexity Bias (v18)
+// ════════════════════════════════════════════════════════════════
+
+/// Approximate ink complexity for a number (7-segment encoding).
+/// Multi-digit numbers get the sum of both digits' segment counts.
+fn ink_segments(n: u8) -> f64 {
+    // 7-segment display counts per digit: 0=6, 1=2, 2=5, 3=5, 4=4, 5=5, 6=6, 7=3, 8=7, 9=6
+    let segs = [6.0, 2.0, 5.0, 5.0, 4.0, 5.0, 6.0, 3.0, 7.0, 6.0];
+    if n < 10 {
+        segs[n as usize]
+    } else {
+        let d1 = (n / 10) as usize;
+        let d2 = (n % 10) as usize;
+        segs[d1] + segs[d2]
+    }
+}
+
+/// Test whether numbers with more "ink" (heavier balls) appear more/less frequently.
+/// Hypothesis: multi-digit numbers with more ink segments are microscopically heavier,
+/// creating a gravity bias in the Stresa machine.
+fn ink_complexity_test(draws: &[Draw]) -> TestResult {
+    let n = draws.len();
+
+    // Compute frequency deviation per ball number
+    let expected_freq = 5.0 * n as f64 / 50.0; // expected picks per number
+    let mut counts = vec![0.0f64; 50];
+    for d in draws {
+        for &b in &d.balls {
+            counts[(b - 1) as usize] += 1.0;
+        }
+    }
+
+    // Pearson correlation between ink_segments and frequency deviation
+    let mut ink_scores = vec![0.0f64; 50];
+    let mut freq_devs = vec![0.0f64; 50];
+    for i in 0..50 {
+        ink_scores[i] = ink_segments((i + 1) as u8);
+        freq_devs[i] = (counts[i] - expected_freq) / expected_freq; // relative deviation
+    }
+
+    let mean_ink: f64 = ink_scores.iter().sum::<f64>() / 50.0;
+    let mean_dev: f64 = freq_devs.iter().sum::<f64>() / 50.0;
+
+    let mut cov = 0.0f64;
+    let mut var_ink = 0.0f64;
+    let mut var_dev = 0.0f64;
+    for i in 0..50 {
+        let di = ink_scores[i] - mean_ink;
+        let dd = freq_devs[i] - mean_dev;
+        cov += di * dd;
+        var_ink += di * di;
+        var_dev += dd * dd;
+    }
+
+    let r = if var_ink > 1e-15 && var_dev > 1e-15 {
+        cov / (var_ink.sqrt() * var_dev.sqrt())
+    } else {
+        0.0
+    };
+
+    // t-test for correlation significance
+    let t_stat = if (1.0 - r * r).abs() > 1e-15 {
+        r * ((50.0 - 2.0) / (1.0 - r * r)).sqrt()
+    } else {
+        0.0
+    };
+    let p = two_sided_p(t_stat);
+
+    let verdict = verdict_from_p(p);
+
+    TestResult {
+        test_name: "Biais complexité encre (gravité Stresa)".to_string(),
+        category: "physical".to_string(),
+        statistic: r,
+        p_value: Some(p),
+        effect_size: r.abs(),
+        verdict,
+        detail: format!(
+            "r={:.4}, t={:.2}, p={:.4} | Corrélation encre(7-seg) vs déviation fréquence",
+            r, t_stat, p
         ),
     }
 }

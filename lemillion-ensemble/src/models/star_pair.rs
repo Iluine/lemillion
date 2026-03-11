@@ -137,6 +137,57 @@ fn pair_transition(draws: &[Draw]) -> [f64; N_PAIRS] {
     probs
 }
 
+/// Expert 4: Extraction-order conditioned pair probability (v18)
+/// Uses star_order from previous draw: P(pair | mod-4 class of 1st extracted star)
+fn extraction_order_pair(draws: &[Draw]) -> [f64; N_PAIRS] {
+    let n_mod4 = 4;
+    let laplace = 0.3;
+
+    // Condition on mod-4 class of 1st extracted star from previous draw
+    let mut counts = vec![[laplace; N_PAIRS]; n_mod4];
+    let mut totals = vec![laplace * N_PAIRS as f64; n_mod4];
+
+    for i in 0..draws.len().saturating_sub(1) {
+        let prev = &draws[i + 1]; // previous draw (older)
+        let target = &draws[i];   // target draw (newer)
+
+        if let Some(ref order) = prev.star_order {
+            if !order.is_empty() && order[0] >= 1 {
+                let cls = ((order[0] - 1) % 4) as usize;
+                let (s1, s2) = pair_from_draw(target);
+                let pidx = pair_index(s1, s2);
+                counts[cls][pidx] += 1.0;
+                totals[cls] += 1.0;
+            }
+        }
+    }
+
+    // Use last draw's extraction order to condition
+    if draws.is_empty() {
+        return [1.0 / N_PAIRS as f64; N_PAIRS];
+    }
+
+    let last = &draws[0];
+    let cls = if let Some(ref order) = last.star_order {
+        if !order.is_empty() && order[0] >= 1 {
+            ((order[0] - 1) % 4) as usize
+        } else {
+            return pair_frequency(draws); // fallback to frequency
+        }
+    } else {
+        return pair_frequency(draws); // fallback if no extraction order
+    };
+
+    let mut probs = [0.0; N_PAIRS];
+    let total = totals[cls];
+    if total > 0.0 {
+        for i in 0..N_PAIRS {
+            probs[i] = counts[cls][i] / total;
+        }
+    }
+    probs
+}
+
 /// Expert 3: Ball-conditioned pair probability
 /// Condition on (ball_sum_bin, ball_spread_bin) — 5×3 = 15 contexts
 fn ball_conditioned_pair(draws: &[Draw]) -> [f64; N_PAIRS] {
@@ -200,10 +251,12 @@ impl StarPairModel {
             return None;
         }
 
+        // v18: 4 experts (added extraction-order conditioned)
         let experts: Vec<[f64; N_PAIRS]> = vec![
             pair_frequency(draws),
             pair_transition(draws),
             ball_conditioned_pair(draws),
+            extraction_order_pair(draws),
         ];
         let n_experts = experts.len();
 
@@ -221,6 +274,7 @@ impl StarPairModel {
                 pair_frequency(train_data),
                 pair_transition(train_data),
                 ball_conditioned_pair(train_data),
+                extraction_order_pair(train_data),
             ];
 
             let target = &draws[t - 1];

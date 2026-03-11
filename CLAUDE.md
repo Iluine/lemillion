@@ -73,7 +73,7 @@ lemillion/                          (workspace root)
     src/linalg.rs, metrics.rs, gridsearch.rs, display.rs
   lemillion-ensemble/              (bin+lib crate - ensemble forecasting)
     src/main.rs, lib.rs, display.rs, sampler.rs, interactive.rs, analysis.rs, coverage.rs, expected_value.rs
-    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal,draw_order,tlr,particle_stresa,forbidden_patterns,renyi_te,cross_te}.rs
+    src/models/{mod,dirichlet,logistic,random_forest,markov,esn,spectral,ctw,mixture,transformer,tda,physics,mod4,mod4_profile,triplet,conditional,conditional_v2,gap_dynamics,joint,summary_predictor,star_specialist,stresa,transfer_entropy,star_pair,star_recency,context_knn,max_entropy,neural_scorer,jackpot_context,hmm,boltzmann,hawkes,bocpd,decade_persist,modular_balls,compression,star_momentum,spread,gap_model,unit_digit,delayed_mi,community,rqa_predictability,copula,wavelet,renewal,draw_order,tlr,particle_stresa,forbidden_patterns,renyi_te,cross_te,paquerette,position_mod8}.rs
     src/features/{mod,compute}.rs
     src/ensemble/{mod,calibration,consensus,meta,stacking}.rs
     src/research/{mod,physical,mathematical,informational,dfa,rqa}.rs
@@ -124,7 +124,7 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 
 ### lemillion-ensemble (ensemble forecasting)
 
-25 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
+30 active models behind `trait ForecastModel` (takes `&[Draw]`, returns `Vec<f64>` summing to 1.0). Each model declares a `SamplingStrategy` (default: `Consecutive`) — models marked **(S)** use `Sparse { span_multiplier }` for wider temporal coverage during calibration. Models can also override `calibration_stride()` (default 1) to skip test points during calibration for expensive models. `SamplingStrategy` also supports `FullHistory` for walk-forward trained models.
 
 **IMPORTANT (v4)**: The Stresa machine uses 3 central bars + 8 external bars (mod-8 symmetry for balls), and the Pâquerette uses 4 blades (mod-4 for stars). All modular models are pool-aware via `mod4::modulus(pool)`. Star data before 2016-09-27 uses incompatible pool sizes and is filtered via `filter_star_era()`.
 
@@ -154,6 +154,11 @@ Standalone ESN implementation with sparse reservoir, zero-alloc step, and dual r
 23. **DrawOrder** **(S×4)** — Exploite l'ordre d'extraction physique (brevet Stresa US6145836A). Matrice positionnelle complète N×5 avec poids par position basés sur l'entropie inverse. (ewma_alpha=0.05, smoothing=0.25, min_draws_with_order=50)
 24. **RényiTE** **(S×4)** — Rényi Transfer Entropy (α=0.7) : amplifie les événements rares dans les paires causales. Seuil 2.5× baseline. Même architecture que TransferEntropy. calibration_stride=2. (alpha_boost=2.0, renyi_alpha=0.7, smoothing=0.30)
 25. **CrossTE** **(S×4)** — Cross-pool Transfer Entropy : TE(star→ball) et TE(star→star). Signal orthogonal au TE ball→ball existant. calibration_stride=2. (alpha=2.0, te_threshold_factor=3.0, smoothing=0.30)
+26. **SpectralGraph** **(S×3)** — Graph spectral analysis on co-occurrence network.
+27. **EVT** **(S×3)** — Extreme Value Theory for tail frequency events.
+28. **DayOfWeek** — Signal jour MARDI vs VENDREDI.
+29. **PaqueretteMod4** **(S×3)** — Position d'extraction × Mod-4 pour étoiles. Exploite la symétrie 4 pales de la Pâquerette via EWMA positionnelle + transition mod-4 intra-tirage. Star-only. (ewma_alpha=0.08, smoothing=0.30, min_draws_with_order=30)
+30. **PositionMod8** **(S×4)** — Position d'extraction × Mod-8 pour boules. Exploite les 8 barres annulaires Stresa via distribution EWMA par position + transition intra-tirage. Pondéré par entropie inverse. (ewma_alpha=0.05, smoothing=0.25, min_draws_with_order=50)
 
 **Retired models** (modules still exist but excluded from `base_models()` — see `RETIRED_MODELS.md` for full details):
 - v11: TLR, ParticleStresa, ForbiddenPatterns (BMA dilution — near-uniform models take weight from TransferEntropy)

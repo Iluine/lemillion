@@ -208,7 +208,13 @@ pub fn walk_forward_evaluate_with_strategy(
             for &n in test_numbers {
                 let idx = (n - 1) as usize;
                 if idx < dist.len() {
-                    let ll = dist[idx].max(1e-15).ln().max(ll_cap);
+                    let raw_ll = dist[idx].max(1e-15).ln();
+                    // Huber-style soft cap: attenuate below cap but preserve ordering
+                    let ll = if raw_ll < ll_cap {
+                        ll_cap + 0.5 * (raw_ll - ll_cap)
+                    } else {
+                        raw_ll
+                    };
                     draw_ll += ll;
                 }
             }
@@ -329,10 +335,10 @@ fn cross_window_stability(results: &[CalibrationResult]) -> f64 {
         .map(|&s| (s - mean).powi(2))
         .sum::<f64>() / skills.len() as f64;
 
-    // Very mild Gaussian penalty — only penalizes extremely unstable models.
+    // v18: Tighter Gaussian penalty — penalizes unstable models more aggressively.
     // LL values across windows typically vary by 0.001-0.01.
-    // sigma=0.5 means: variance 0.01 → 0.980, 0.1 → 0.819, 1.0 → 0.135
-    let sigma = 0.5;
+    // sigma=0.20 means: variance 0.01 → 0.882, 0.05 → 0.535, 0.10 → 0.082
+    let sigma = 0.20;
     (-variance / (2.0 * sigma * sigma)).exp()
 }
 
@@ -616,7 +622,13 @@ pub fn collect_detailed_ll(
             for &n in test_numbers {
                 let idx = (n - 1) as usize;
                 if idx < dist.len() {
-                    let ll = dist[idx].max(1e-15).ln().max(ll_cap);
+                    let raw_ll = dist[idx].max(1e-15).ln();
+                    // Huber-style soft cap: attenuate below cap but preserve ordering
+                    let ll = if raw_ll < ll_cap {
+                        ll_cap + 0.5 * (raw_ll - ll_cap)
+                    } else {
+                        raw_ll
+                    };
                     draw_ll += ll;
                 }
             }
@@ -789,10 +801,11 @@ pub fn compute_decorrelated_weights(
             };
 
             if partner.is_some() {
-                // Continuous Gaussian penalty: center=0.50, σ=0.20
-                // Gentle below 0.50, significant at 0.60+, strong at 0.75+
-                let excess = (corr.abs() - 0.50).max(0.0);
-                penalty *= (-0.5 * excess * excess / (0.20_f64 * 0.20)).exp();
+                // v19: Only penalize POSITIVE correlations. Negative correlations
+                // are BENEFICIAL (reduce ensemble variance) — don't penalize them.
+                // ρ=0.5 → 0.95, ρ=0.7 → 0.15, ρ=0.8 → 0.01, ρ<0 → no penalty
+                let excess = (*corr - 0.45).max(0.0);
+                penalty *= (-0.5 * excess * excess / (0.15_f64 * 0.15)).exp();
             }
         }
 

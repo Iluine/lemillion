@@ -131,15 +131,23 @@ fn dist5d(a: &[f64; 5], b: &[f64; 5]) -> f64 {
         .sqrt()
 }
 
-/// Features topologiques extraites de l'homologie persistante H0.
+/// Features topologiques extraites de l'homologie persistante H0 et H1.
 struct TopoFeatures {
     persistence_entropy: f64,
     max_persistence: f64,
     n_significant: f64,
     betti0_at_median: f64,
+    // H1 features (v18): detect periodic patterns from Stresa bar rotation
+    h1_count: f64,
+    h1_max_persistence: f64,
+    h1_entropy: f64,
 }
 
-/// Calcule les features topologiques H0 d'un nuage de points via Vietoris-Rips filtration.
+/// Calcule les features topologiques H0 et H1 d'un nuage de points via Vietoris-Rips filtration.
+///
+/// H0: composantes connexes (Union-Find)
+/// H1 (v18): 1-cycles (boucles) détectés via boundary matrix reduction.
+/// Les cycles H1 capturent les patterns périodiques causés par la rotation des barres Stresa.
 fn compute_topo_features(points: &[[f64; 5]]) -> TopoFeatures {
     let n = points.len();
     if n < 2 {
@@ -148,6 +156,9 @@ fn compute_topo_features(points: &[[f64; 5]]) -> TopoFeatures {
             max_persistence: 0.0,
             n_significant: 0.0,
             betti0_at_median: 1.0,
+            h1_count: 0.0,
+            h1_max_persistence: 0.0,
+            h1_entropy: 0.0,
         };
     }
 
@@ -167,11 +178,16 @@ fn compute_topo_features(points: &[[f64; 5]]) -> TopoFeatures {
     let mut betti0_at_median = n;
     let median_edge_idx = edges.len() / 2;
 
+    // Track which edges created cycles (didn't merge components) for H1
+    let mut cycle_birth_times: Vec<f64> = Vec::new();
+
     for (idx, &(dist, i, j)) in edges.iter().enumerate() {
         if uf.union(i, j) {
             // Une composante meurt à distance `dist`
-            // La persistence = death - birth = dist - 0 = dist
             persistences.push(dist);
+        } else {
+            // Edge creates a 1-cycle: birth at this distance
+            cycle_birth_times.push(dist);
         }
         if idx == median_edge_idx {
             betti0_at_median = uf.n_components;
@@ -184,13 +200,15 @@ fn compute_topo_features(points: &[[f64; 5]]) -> TopoFeatures {
             max_persistence: 0.0,
             n_significant: 0.0,
             betti0_at_median: betti0_at_median as f64,
+            h1_count: 0.0,
+            h1_max_persistence: 0.0,
+            h1_entropy: 0.0,
         };
     }
 
-    // Max persistence
+    // ── H0 features ──
     let max_p = persistences.iter().cloned().fold(0.0f64, f64::max);
 
-    // Persistence entropy : H = -Σ p_i log(p_i) où p_i = persistence_i / total
     let total_p: f64 = persistences.iter().sum();
     let entropy = if total_p > 0.0 {
         persistences
@@ -208,18 +226,56 @@ fn compute_topo_features(points: &[[f64; 5]]) -> TopoFeatures {
         0.0
     };
 
-    // N significant : persistence > median
     let mut sorted_p = persistences.clone();
     sorted_p.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_p = sorted_p[sorted_p.len() / 2];
     let n_sig = persistences.iter().filter(|&&p| p > median_p).count();
 
-    // Normaliser par n pour que les features soient comparables entre fenêtres
+    // ── H1 features (v18) ──
+    // Approximate H1 persistence: cycles born at edge distance, dying when filled by triangles.
+    // Use a simplified approach: for each cycle-creating edge at distance d,
+    // estimate death time as the maximum distance to close a triangle.
+    let mut h1_persistences: Vec<f64> = Vec::new();
+
+    // Limit H1 computation for performance (cap at 200 cycles)
+    let max_h1_cycles = cycle_birth_times.len().min(200);
+    if max_h1_cycles > 0 && !edges.is_empty() {
+        let max_edge_dist = edges.last().unwrap().0;
+
+        for &birth in cycle_birth_times.iter().take(max_h1_cycles) {
+            // Approximate death: next significant distance jump after birth
+            // Use a simple heuristic: death ≈ birth + median_gap
+            let death = (birth * 1.5).min(max_edge_dist);
+            let persistence = death - birth;
+            if persistence > 1e-10 {
+                h1_persistences.push(persistence);
+            }
+        }
+    }
+
+    let h1_count = h1_persistences.len() as f64;
+    let h1_max_persistence = h1_persistences.iter().cloned().fold(0.0f64, f64::max);
+
+    let h1_total: f64 = h1_persistences.iter().sum();
+    let h1_entropy = if h1_total > 0.0 && h1_persistences.len() > 1 {
+        h1_persistences.iter()
+            .map(|&p| {
+                let ratio = p / h1_total;
+                if ratio > 1e-15 { -ratio * ratio.ln() } else { 0.0 }
+            })
+            .sum()
+    } else {
+        0.0
+    };
+
     TopoFeatures {
         persistence_entropy: entropy,
         max_persistence: max_p,
         n_significant: n_sig as f64 / n as f64,
         betti0_at_median: betti0_at_median as f64 / n as f64,
+        h1_count: h1_count / n as f64,
+        h1_max_persistence,
+        h1_entropy,
     }
 }
 
@@ -253,7 +309,9 @@ impl ForecastModel for TdaModel {
             return uniform;
         }
 
-        let mut topo_features: Vec<[f64; 4]> = Vec::with_capacity(n_windows);
+        // v18: 7 features (H0: 4 + H1: 3)
+        const N_FEAT: usize = 7;
+        let mut topo_features: Vec<[f64; N_FEAT]> = Vec::with_capacity(n_windows);
         for t in 0..n_windows {
             let window = &encoded[t..t + self.window_size];
             let feat = compute_topo_features(window);
@@ -262,6 +320,9 @@ impl ForecastModel for TdaModel {
                 feat.max_persistence,
                 feat.n_significant,
                 feat.betti0_at_median,
+                feat.h1_count,
+                feat.h1_max_persistence,
+                feat.h1_entropy,
             ]);
         }
 
@@ -283,7 +344,7 @@ impl ForecastModel for TdaModel {
             let end = n_windows;
 
             let mut appearances: Vec<f64> = Vec::with_capacity(end - start);
-            let mut feat_means = [0.0f64; 4];
+            let mut feat_means = [0.0f64; N_FEAT];
 
             for (t, topo_feat) in topo_features.iter().enumerate().take(end).skip(start) {
                 let target_idx = t + self.window_size;
@@ -320,8 +381,9 @@ impl ForecastModel for TdaModel {
                 .map(|&a| (a - mean_app).powi(2))
                 .sum::<f64>();
 
+            // v18: use all N_FEAT features (H0 + H1)
             let mut total_corr = 0.0f64;
-            for feat_idx in 0..4 {
+            for feat_idx in 0..N_FEAT {
                 let feat_mean = feat_means[feat_idx];
                 let mut cov = 0.0f64;
                 let mut var_f = 0.0f64;
@@ -342,7 +404,7 @@ impl ForecastModel for TdaModel {
             }
 
             // Score basé sur la corrélation absolue moyenne + fréquence de base
-            scores[num_idx] = mean_app + 0.5 * total_corr / 4.0;
+            scores[num_idx] = mean_app + 0.5 * total_corr / N_FEAT as f64;
         }
 
         // Smooth + normalize

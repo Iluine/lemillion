@@ -230,24 +230,38 @@ impl ForecastModel for ModularBallsModel {
             return uniform;
         }
 
-        // Test mod-3, mod-8, mod-24
+        // v18: Test mod-3, mod-8, mod-24 and combine via KL-weighted blend
+        // instead of selecting the single best modulus.
+        // The Stresa physics is an INTERACTION between 3 central bars AND 8 annular bars.
         let moduli = [3, 8, 24];
-        let predictions: Vec<(usize, Vec<f64>)> = moduli.iter()
-            .map(|&m| (m, predict_with_modulus(draws, m, self.smoothing)))
+        let predictions: Vec<(f64, Vec<f64>)> = moduli.iter()
+            .map(|&m| {
+                let pred = predict_with_modulus(draws, m, self.smoothing);
+                let kl = kl_from_uniform(&pred);
+                (kl, pred)
+            })
             .collect();
 
-        // Select the modulus with highest KL divergence from uniform
-        // (most informative prediction)
-        let best = predictions.iter()
-            .max_by(|a, b| {
-                let kl_a = kl_from_uniform(&a.1);
-                let kl_b = kl_from_uniform(&b.1);
-                kl_a.partial_cmp(&kl_b).unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let eps = 1e-15;
+        let kl_total: f64 = predictions.iter().map(|(kl, _)| kl).sum::<f64>() + eps;
 
-        match best {
-            Some((_, probs)) => probs.clone(),
-            None => uniform,
+        let mut blended = vec![0.0f64; size];
+        for (kl, pred) in &predictions {
+            let w = kl / kl_total;
+            for j in 0..size {
+                blended[j] += w * pred[j];
+            }
+        }
+
+        // Normalize
+        let sum: f64 = blended.iter().sum();
+        if sum > 0.0 {
+            for p in &mut blended {
+                *p /= sum;
+            }
+            blended
+        } else {
+            uniform
         }
     }
 

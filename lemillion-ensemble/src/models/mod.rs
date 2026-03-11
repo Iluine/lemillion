@@ -53,6 +53,10 @@ pub mod te_order2;
 pub mod spectral_graph;
 pub mod evt;
 pub mod day_of_week;
+pub mod paquerette;
+pub mod position_mod8;
+pub mod ou_reversion;
+pub mod star_volatility;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -193,22 +197,20 @@ pub fn validate_distribution(dist: &[f64], pool: Pool) -> bool {
     (sum - 1.0).abs() < 1e-9
 }
 
-/// Modèles de base de l'ensemble (28 modèles actifs).
-/// v15: DayOfWeek ajouté (signal jour MARDI/VENDREDI). True lagged TE (lags 1-3). StarCoherenceScorer. Online/offline blend.
-/// v14: SpectralGraph, EVT ajoutés (signaux orthogonaux non-TE). TEOrder2 retiré (dilution BMA via corrélation TE).
+/// Modèles de base de l'ensemble (30 modèles actifs).
+/// v19: Retirés Physics (0% balls+stars), DayOfWeek (0% les deux).
+/// v18: PaqueretteMod4 (étoiles position×mod-4), PositionMod8 (boules position×mod-8).
+/// v14: SpectralGraph, EVT ajoutés (signaux orthogonaux non-TE).
 /// v13: RényiTE, CrossTE ajoutés (signaux orthogonaux aux TE existants).
-/// v11: TLR, ParticleStresa, ForbiddenPatterns ajoutés puis exclus (dilution sans signal).
+/// Retirés v19: Physics (0% both), DayOfWeek (0% both).
 /// Retirés v9: Copula, Wavelet, Renewal (0% poids boules+étoiles).
 /// Retirés v7: RqaPredictability, UnitDigit, DelayedMI, Community, GapModel (0% poids boules+étoiles).
-/// Retirés v5: RandomForest, ModProfile, StresaSMC, GapDynamics, ModTrans.
-/// Retirés v4: CTW, Spectral, StarRecency, BME/Mixture.
-/// Retirés avant: Dirichlet, Markov, ESN, CondSummary, JackpotContext.
 pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
     vec![
         Box::new(logistic::LogisticModel::new(0.01, 0.0001, 200, 100)),
         Box::new(transformer::TransformerModel::default()),
         Box::new(tda::TdaModel::default()),
-        Box::new(physics::PhysicsModel::default()),
+        // Physics retiré v19 (0% balls+stars)
         Box::new(stresa::StresaSgdModel::default()),
         Box::new(stresa::StresaChaosModel::default()),
         Box::new(conditional_v2::CondSummaryV2Model::default()),
@@ -228,15 +230,15 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(star_momentum::StarMomentumModel::default()),
         Box::new(spread::SpreadModel::default()),
         Box::new(draw_order::DrawOrderModel::default()),
-        Box::new(renyi_te::RenyiTEModel::default()),        // v13
-        Box::new(cross_te::CrossTEModel::default()),          // v13
-        //Box::new(te_order2::TEOrder2Model::default()),        // v14
-        Box::new(spectral_graph::SpectralGraphModel::default()), // v14
-        Box::new(evt::EvtModel::default()),                    // v14
-        Box::new(day_of_week::DayOfWeekModel::default()),        // v15
-        //Box::new(tlr::TlrModel::default()),
-        //Box::new(particle_stresa::ParticleStresaModel::default()),
-        //Box::new(forbidden_patterns::ForbiddenPatternsModel::default()),
+        Box::new(renyi_te::RenyiTEModel::default()),              // v13
+        Box::new(cross_te::CrossTEModel::default()),                // v13
+        Box::new(spectral_graph::SpectralGraphModel::default()),   // v14
+        Box::new(evt::EvtModel::default()),                        // v14
+        // DayOfWeek retiré v19 (0% balls+stars)
+        Box::new(paquerette::PaqueretteMod4Model::default()),     // v18
+        Box::new(position_mod8::PositionMod8Model::default()),    // v18
+        Box::new(ou_reversion::OUReversionModel::default()),      // v19
+        Box::new(star_volatility::StarVolatilityModel::default()), // v19
     ]
 }
 

@@ -29,7 +29,7 @@ impl Default for StarMomentumModel {
             min_draws: 80,
             ewma_alpha: 0.10,
             momentum_boost: 0.15,
-            reversion_boost: 0.10,
+            reversion_boost: 0.25,
             persistence_threshold: 0.52,
             reversion_threshold: 0.48,
         }
@@ -95,27 +95,33 @@ impl ForecastModel for StarMomentumModel {
                 draws.len() as f64
             };
 
-            // Fréquence globale
-            let global_freq = total_appearances / draws.len() as f64;
+            // v19: Continuous weighting instead of discrete thresholds.
+            // Reversion weight scales linearly with distance from 0.50, capped at 0.50.
+            // base_freq (uniform 2/12) used in neutral zone instead of EWMA-biased global_freq.
+            let reversion_weight = (0.50 - hurst).max(0.0) * 5.0; // [0, 0.5] for H ∈ [0.40, 0.50]
+            let momentum_weight = (hurst - 0.50).max(0.0) * 5.0;  // [0, 0.5] for H ∈ [0.50, 0.60]
+            let neutral_weight = (1.0 - reversion_weight - momentum_weight).max(0.0);
 
-            if hurst > self.persistence_threshold {
-                // Persistant: boost la fréquence récente EWMA
-                probs[star_idx] = ewma_freq * (1.0 + self.momentum_boost);
-            } else if hurst < self.reversion_threshold {
-                // Anti-persistant: mean-reversion
-                if current_gap as f64 > mean_gap {
-                    // Gap long → boost proportionnel au retard
-                    let gap_ratio = (current_gap as f64 / mean_gap).min(2.0);
-                    probs[star_idx] = global_freq * (1.0 + self.reversion_boost * gap_ratio);
-                } else {
-                    // Gap court → réduction
-                    let gap_ratio = (current_gap as f64 / mean_gap).max(0.1);
-                    probs[star_idx] = global_freq * gap_ratio;
-                }
+            // Momentum component
+            let momentum_val = ewma_freq * (1.0 + self.momentum_boost);
+
+            // Reversion component: boost based on gap ratio
+            let gap_ratio = if mean_gap > 0.1 {
+                (current_gap as f64 / mean_gap).clamp(0.1, 3.0)
             } else {
-                // Neutre: fréquence globale
-                probs[star_idx] = global_freq;
-            }
+                1.0
+            };
+            let reversion_val = if current_gap as f64 > mean_gap {
+                base_freq * (1.0 + self.reversion_boost * gap_ratio)
+            } else {
+                base_freq * gap_ratio.sqrt() // Gentle dampening for short gaps
+            };
+
+            // Neutral component: use base_freq (uniform theoretical) instead of
+            // global_freq (which is EWMA-biased and defeats the purpose)
+            probs[star_idx] = neutral_weight * base_freq
+                + momentum_weight * momentum_val
+                + reversion_weight * reversion_val;
         }
 
         // Normaliser

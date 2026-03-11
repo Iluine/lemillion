@@ -1194,6 +1194,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         // Collect all candidates from all profiles
         let mut all_candidates: Vec<(String, lemillion_db::models::Suggestion, Vec<f64>, Vec<f64>)> = Vec::new();
         let mut last_result = None;
+        let cw_ball = weights.as_ref().ok().and_then(|w| w.coherence_ball_weight);
+        let cw_star = weights.as_ref().ok().and_then(|w| w.coherence_star_weight);
 
         for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
@@ -1231,8 +1233,6 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
 
             let neural_scorer_ref = if neural_rerank { neural_scorer_opt.as_ref() } else { None };
 
-            let cw_ball = weights.as_ref().ok().and_then(|w| w.coherence_ball_weight);
-            let cw_star = weights.as_ref().ok().and_then(|w| w.coherence_star_weight);
             let result = generate_suggestions_jackpot(
                 &bd, &sd, n_per_profile, filter.as_ref(),
                 Some(&coherence), Some(&joint_model),
@@ -1259,6 +1259,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 filter.as_ref(), Some(&coherence), Some(&joint_model),
                 star_pair_probs.as_ref(), Some(&conditioner), Some(&star_coherence),
                 8, eff_bt.max(0.3), gibbs_seed,
+                cw_ball, cw_star,
             ) {
                 Ok(gibbs_result) => {
                     println!("(Gibbs sampling: {} candidats supplémentaires)", gibbs_result.suggestions.len());
@@ -1445,8 +1446,8 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
 
     // Charger les poids si disponibles
     let weights = load_weights(&PathBuf::from(calibration_path));
-    let combiner = match weights {
-        Ok(w) => {
+    let mut combiner = match weights {
+        Ok(ref w) => {
             let ball_w: Vec<f64> = models.iter()
                 .map(|m| w.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
                 .collect();
@@ -1455,14 +1456,112 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
                 .collect();
             EnsembleCombiner::with_weights(models, ball_w, star_w)
         }
-        Err(e) => {
+        Err(ref e) => {
             println!("(Pas de fichier de calibration, utilisation de poids uniformes: {e})");
             EnsembleCombiner::new(models)
         }
     };
 
-    let ball_pred = combiner.predict(&draws, Pool::Balls);
-    let star_pred = combiner.predict(&draws, Pool::Stars);
+    // ── Pipeline aligné sur cmd_predict (sans température) ──
+
+    // MetaPredictor : ajuster les poids selon le régime courant
+    let balls_have_signal = {
+        let max_w = combiner.ball_weights.iter().cloned().fold(0.0_f64, f64::max);
+        let min_w = combiner.ball_weights.iter().filter(|&&w| w > 0.0).cloned().fold(f64::MAX, f64::min);
+        (max_w - min_w) > 1e-6
+    };
+
+    if balls_have_signal
+        && let Ok(ref w) = weights
+        && !w.detailed_ll.is_empty()
+    {
+        use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+        let features = RegimeFeatures::from_draws(&draws);
+        if let Some(meta) = MetaPredictor::train(&draws, &w.detailed_ll, 1.0) {
+            let adjustments = meta.weight_adjustments(&features);
+            for (name, adj) in &adjustments {
+                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                    && idx < combiner.ball_weights.len()
+                {
+                    combiner.ball_weights[idx] *= adj;
+                }
+            }
+            let total: f64 = combiner.ball_weights.iter().sum();
+            if total > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= total; } }
+        }
+    }
+
+    if let Ok(ref w) = weights
+        && !w.star_detailed_ll.is_empty()
+    {
+        use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+        let features = RegimeFeatures::from_draws(&draws);
+        if let Some(meta) = MetaPredictor::train(&draws, &w.star_detailed_ll, 1.0) {
+            let adjustments = meta.weight_adjustments(&features);
+            for (name, adj) in &adjustments {
+                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                    && idx < combiner.star_weights.len()
+                {
+                    combiner.star_weights[idx] *= adj;
+                }
+            }
+            let total: f64 = combiner.star_weights.iter().sum();
+            if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
+        }
+    }
+
+    // Hedge weights : ajustement multiplicatif réactif
+    {
+        let (hedged_ball, hedged_star) = compute_hedge_weights(
+            &combiner.models, &draws,
+            &combiner.ball_weights, &combiner.star_weights,
+            100, 0.10,
+        );
+        if balls_have_signal {
+            combiner.ball_weights = hedged_ball;
+        }
+        combiner.star_weights = hedged_star;
+    }
+
+    // Prédiction avec décorrélation/stacking/agreement boost (comme cmd_predict)
+    let has_corr_matrix = weights.as_ref().map(|w| !w.correlation_matrix.is_empty()).unwrap_or(false);
+    let use_stacking = weights.as_ref().map(|w| w.stacking_balls.is_some() || w.stacking_stars.is_some()).unwrap_or(false);
+
+    let (ball_pred, star_pred) = if use_stacking {
+        let w = weights.as_ref().unwrap();
+        let blend_b = w.stacking_blend_balls.unwrap_or(0.6);
+        let bp = if let Some(ref sw) = w.stacking_balls {
+            combiner.predict_stacked(&draws, Pool::Balls, sw, blend_b)
+        } else if has_corr_matrix {
+            let corr = &w.correlation_matrix;
+            combiner.predict_decorrelated(&draws, Pool::Balls, corr, 0.60)
+        } else {
+            combiner.predict_with_agreement_boost(&draws, Pool::Balls, 0.20)
+        };
+        let blend_s = w.stacking_blend_stars.unwrap_or(0.6);
+        let sp = if let Some(ref sw) = w.stacking_stars {
+            combiner.predict_stacked(&draws, Pool::Stars, sw, blend_s)
+        } else if has_corr_matrix {
+            let corr = if w.star_correlation_matrix.is_empty() { &w.correlation_matrix } else { &w.star_correlation_matrix };
+            combiner.predict_decorrelated(&draws, Pool::Stars, corr, 0.60)
+        } else {
+            combiner.predict_with_agreement_boost(&draws, Pool::Stars, 0.20)
+        };
+        (bp, sp)
+    } else if has_corr_matrix {
+        let w = weights.as_ref().unwrap();
+        let ball_corr = &w.correlation_matrix;
+        let star_corr = if w.star_correlation_matrix.is_empty() { &w.correlation_matrix } else { &w.star_correlation_matrix };
+        (
+            combiner.predict_decorrelated(&draws, Pool::Balls, ball_corr, 0.60),
+            combiner.predict_decorrelated(&draws, Pool::Stars, star_corr, 0.60),
+        )
+    } else {
+        (
+            combiner.predict_with_agreement_boost(&draws, Pool::Balls, 0.20),
+            combiner.predict_with_agreement_boost(&draws, Pool::Stars, 0.20),
+        )
+    };
 
     display::display_compare(&balls, &stars, &ball_pred, &star_pred);
 

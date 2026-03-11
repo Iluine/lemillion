@@ -1327,9 +1327,8 @@ pub fn generate_suggestions_jackpot(
     let k_min_entropy = (25.0 + 20.0 * entropy_ratio).round() as usize; // v7 formula
     let k_min_favored = (n_favored + 8).max(15);
     let k_min = k_min_entropy.max(k_min_favored); // prendre la plus haute des deux bornes
-    // v11: plafond intelligent via optimal_subset_k (Pereira 2025)
-    // Only apply when k_optimal > k_min (never reduce below consensus minimum)
-    let k_optimal = optimal_subset_k(ball_probs, count);
+    // v18: Use conformal K when available, fallback to optimal_subset_k
+    let k_optimal = conformal_subset_k(ball_probs, count, None);
     let k_balls = k_balls_base.max(k_min);
     // Apply optimal cap only if it wouldn't restrict below k_min
     let k_balls = if k_optimal >= k_min { k_balls.min(k_optimal) } else { k_balls };
@@ -1562,7 +1561,7 @@ pub fn generate_suggestions_jackpot(
                                     };
                                     let star_coherence_bonus = if let Some(scs) = star_coherence {
                                         let sc = scs.score_star_pair(&stars);
-                                        STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+                                        scw * (sc - 0.5).clamp(-0.5, 0.5)
                                     } else {
                                         0.0
                                     };
@@ -1630,7 +1629,11 @@ pub fn generate_suggestions_gibbs(
     n_chains: usize,
     temperature: f64,
     seed: u64,
+    coherence_ball_w: Option<f64>,
+    coherence_star_w: Option<f64>,
 ) -> Result<JackpotResult> {
+    let cw = coherence_ball_w.unwrap_or(COHERENCE_WEIGHT);
+    let scw_val = coherence_star_w.unwrap_or(STAR_COHERENCE_WEIGHT);
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
     let uniform_pair = 1.0 / 66.0;
@@ -1822,6 +1825,8 @@ pub fn generate_suggestions_gibbs(
                     conditioner,
                     star_coherence,
                     star_probs,
+                    cw,
+                    scw_val,
                 );
 
                 all_samples.push((balls, stars, score));
@@ -1892,6 +1897,8 @@ fn gibbs_score_grid(
     conditioner: Option<&BallStarConditioner>,
     star_coherence: Option<&StarCoherenceScorer>,
     star_probs: &[f64],
+    cw: f64,
+    scw: f64,
 ) -> f64 {
     // Ball score: sum of log(prob/uniform) for each ball
     let marginal_log_ball_score: f64 = balls
@@ -1936,7 +1943,7 @@ fn gibbs_score_grid(
     // Coherence bonus (balls only)
     let coherence_bonus = if let Some(cs) = coherence {
         let c = cs.score_balls(balls);
-        COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+        cw * (c - 0.5).clamp(-0.5, 0.5)
     } else {
         0.0
     };
@@ -1944,7 +1951,7 @@ fn gibbs_score_grid(
     // Star coherence bonus
     let star_coherence_bonus = if let Some(scs) = star_coherence {
         let sc = scs.score_star_pair(stars);
-        STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+        scw * (sc - 0.5).clamp(-0.5, 0.5)
     } else {
         0.0
     };
