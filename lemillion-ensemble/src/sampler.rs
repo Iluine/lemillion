@@ -3276,6 +3276,49 @@ pub fn conviction_temperature_split_with_skill(
     (ball_temp, star_temp)
 }
 
+/// Conformal prediction set for abstention recommendation
+pub struct ConformalPrediction {
+    pub ball_set_size: usize,
+    pub star_set_size: usize,
+    pub ball_entropy: f64,
+    pub star_entropy: f64,
+    pub recommendation: &'static str,
+}
+
+/// Compute conformal prediction sets from ensemble probabilities.
+/// prediction set = numbers needed to cover (1-alpha) probability mass.
+pub fn conformal_prediction(ball_probs: &[f64], star_probs: &[f64], alpha: f64) -> ConformalPrediction {
+    // Reuse existing prediction_set_size (takes coverage target directly)
+    let coverage = 1.0 - alpha;
+    let ball_set_size = prediction_set_size(ball_probs, coverage);
+    let star_set_size = prediction_set_size(star_probs, coverage);
+
+    let ball_entropy = -ball_probs.iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| p * p.ln())
+        .sum::<f64>();
+    let star_entropy = -star_probs.iter()
+        .filter(|&&p| p > 0.0)
+        .map(|&p| p * p.ln())
+        .sum::<f64>();
+
+    let recommendation = if ball_set_size < 35 {
+        "JOUER"
+    } else if ball_set_size <= 42 {
+        "PRUDENT"
+    } else {
+        "PASSER"
+    };
+
+    ConformalPrediction {
+        ball_set_size,
+        star_set_size,
+        ball_entropy,
+        star_entropy,
+        recommendation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

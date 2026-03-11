@@ -4,7 +4,7 @@ use lemillion_db::models::{Draw, Pool};
 use lemillion_esn::config::EsnConfig;
 use lemillion_esn::training::{predict_next, train_and_evaluate};
 
-use super::ForecastModel;
+use super::{floor_only, ForecastModel, SamplingStrategy, PROB_FLOOR_BALLS, PROB_FLOOR_STARS};
 
 pub struct EsnModel {
     config: EsnConfig,
@@ -17,6 +17,25 @@ impl EsnModel {
 
     fn uniform(pool: Pool) -> Vec<f64> {
         vec![1.0 / pool.size() as f64; pool.size()]
+    }
+}
+
+impl Default for EsnModel {
+    fn default() -> Self {
+        Self {
+            config: EsnConfig {
+                reservoir_size: 100,
+                spectral_radius: 0.9,
+                sparsity: 0.8,
+                leaking_rate: 0.3,
+                ridge_lambda: 1e-3,
+                input_scaling: 0.1,
+                encoding: lemillion_esn::config::Encoding::OneHot,
+                washout: 10,
+                noise_amplitude: 0.0,
+                seed: 42,
+            },
+        }
     }
 }
 
@@ -47,10 +66,16 @@ impl ForecastModel for EsnModel {
 
         let (ball_probs, star_probs) = predict_next(&mut esn, draws);
 
-        match pool {
+        let mut probs = match pool {
             Pool::Balls => ball_probs,
             Pool::Stars => star_probs,
-        }
+        };
+        let floor = match pool {
+            Pool::Balls => PROB_FLOOR_BALLS,
+            Pool::Stars => PROB_FLOOR_STARS,
+        };
+        floor_only(&mut probs, floor);
+        probs
     }
 
     fn params(&self) -> HashMap<String, f64> {
@@ -63,6 +88,14 @@ impl ForecastModel for EsnModel {
             ("input_scaling".to_string(), self.config.input_scaling),
             ("washout".to_string(), self.config.washout as f64),
         ])
+    }
+
+    fn sampling_strategy(&self) -> SamplingStrategy {
+        SamplingStrategy::Sparse { span_multiplier: 4 }
+    }
+
+    fn calibration_stride(&self) -> usize {
+        3
     }
 }
 

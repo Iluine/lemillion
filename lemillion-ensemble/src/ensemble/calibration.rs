@@ -37,6 +37,193 @@ where D: serde::Deserializer<'de> {
     Ok(v.unwrap_or(f64::NEG_INFINITY))
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// H1: Multi-score calibration diagnostics (Brier + CRPS alongside LL)
+// These metrics are purely diagnostic — they do NOT affect weights.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Calibration diagnostics per model (separate from weight computation).
+/// Brier and CRPS are computed at each model's best window/strategy
+/// and serve as calibration quality indicators only.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CalibrationDiagnostics {
+    pub model_name: String,
+    pub pool: String,
+    /// Brier score: lower is better, range [0, 2] for lottery distributions.
+    /// Brier = (1/N) * Σ_draws Σ_i (p_i - o_i)² where o_i = 1 if drawn.
+    pub brier_score: f64,
+    /// CRPS (Continuous Ranked Probability Score): lower is better.
+    /// Measures CDF calibration: (1/N) * Σ_draws Σ_x (F(x) - 1[y<=x])².
+    pub crps_score: f64,
+    /// Average log-likelihood per draw (higher is better), same as calibration LL.
+    pub log_likelihood: f64,
+    /// Number of test draws used.
+    pub n_tests: usize,
+}
+
+/// Compute Brier score for a single draw prediction.
+/// Brier = Σ_i (p_i - o_i)² where o_i = 1 if number i was drawn, 0 otherwise.
+/// Lower is better. For uniform predictions on balls: 5*(1/50-1)² + 45*(1/50)² ≈ 4.80.
+pub fn brier_score(probs: &[f64], drawn_numbers: &[u8], pool_size: usize) -> f64 {
+    let mut score = 0.0;
+    for i in 0..pool_size {
+        let num = (i + 1) as u8;
+        let target = if drawn_numbers.contains(&num) { 1.0 } else { 0.0 };
+        let p = if i < probs.len() { probs[i] } else { 1.0 / pool_size as f64 };
+        score += (p - target).powi(2);
+    }
+    score
+}
+
+/// Compute CRPS (Continuous Ranked Probability Score) for a discrete distribution.
+/// CRPS = (1/pool_size) * Σ_x (F(x) - I(x))² where F is the predicted CDF
+/// and I is the empirical CDF of the drawn numbers.
+/// Lower is better.
+pub fn crps_score(probs: &[f64], drawn_numbers: &[u8], pool_size: usize) -> f64 {
+    let mut cdf = 0.0;
+    let mut empirical_cdf = 0.0;
+    let mut score = 0.0;
+    let n_drawn = drawn_numbers.len() as f64;
+
+    for i in 0..pool_size {
+        let num = (i + 1) as u8;
+        let p = if i < probs.len() { probs[i] } else { 1.0 / pool_size as f64 };
+        cdf += p;
+        if drawn_numbers.contains(&num) {
+            empirical_cdf += 1.0 / n_drawn;
+        }
+        score += (cdf - empirical_cdf).powi(2);
+    }
+    score / pool_size as f64
+}
+
+/// Compute Brier and CRPS diagnostics for a model using walk-forward evaluation.
+/// Uses the same walk-forward logic as `walk_forward_evaluate_with_strategy`
+/// but computes Brier/CRPS instead of LL.
+/// Returns (mean_brier, mean_crps, n_tests).
+pub fn compute_diagnostics_for_model(
+    model: &dyn ForecastModel,
+    draws: &[Draw],
+    window: usize,
+    pool: Pool,
+    strategy: SamplingStrategy,
+) -> (f64, f64, usize) {
+    // For stars, filter to current era only
+    let draws = if pool == Pool::Stars {
+        filter_star_era(draws)
+    } else {
+        draws
+    };
+
+    let min_history = 10;
+
+    let max_t = match strategy {
+        SamplingStrategy::Consecutive => draws.len().saturating_sub(window + 1),
+        SamplingStrategy::Sparse { span_multiplier } => draws.len().saturating_sub(window * span_multiplier + 1),
+        SamplingStrategy::FullHistory => draws.len().saturating_sub(min_history + 1),
+    };
+
+    if max_t == 0 {
+        return (f64::NAN, f64::NAN, 0);
+    }
+
+    // Use same stride as walk_forward to keep computation time reasonable
+    let max_tests = 500;
+    let stride = (max_t / max_tests).max(1);
+    let mut test_indices: Vec<usize> = (0..max_t).step_by(stride).collect();
+    for recent in 0..5.min(max_t) {
+        if !test_indices.contains(&recent) {
+            test_indices.push(recent);
+        }
+    }
+    test_indices.sort();
+    test_indices.dedup();
+
+    let results: Vec<(f64, f64)> = test_indices
+        .par_iter()
+        .filter_map(|&t| {
+            let dist = match strategy {
+                SamplingStrategy::Consecutive => {
+                    let train_end = (t + 1 + window).min(draws.len());
+                    let train_data = &draws[t + 1..train_end];
+                    if train_data.len() < 3 { return None; }
+                    model.predict(train_data, pool)
+                }
+                SamplingStrategy::Sparse { span_multiplier } => {
+                    let span = window * span_multiplier;
+                    let actual_span = span.min(draws.len() - t - 1);
+                    let full_range = &draws[t + 1..t + 1 + actual_span];
+                    if full_range.len() < 3 { return None; }
+                    let step = (actual_span / window).max(1);
+                    let train_data: Vec<Draw> = full_range
+                        .iter().step_by(step).take(window).cloned().collect();
+                    if train_data.len() < 3 { return None; }
+                    model.predict(&train_data, pool)
+                }
+                SamplingStrategy::FullHistory => {
+                    let train_data = &draws[t + 1..];
+                    if train_data.len() < min_history { return None; }
+                    model.predict(train_data, pool)
+                }
+            };
+
+            let test_draw = &draws[t];
+            let test_numbers = pool.numbers_from(test_draw);
+            let pool_size = pool.size();
+
+            let bs = brier_score(&dist, test_numbers, pool_size);
+            let cs = crps_score(&dist, test_numbers, pool_size);
+
+            if bs.is_nan() || cs.is_nan() { None } else { Some((bs, cs)) }
+        })
+        .collect();
+
+    let n_tests = results.len();
+    if n_tests == 0 {
+        return (f64::NAN, f64::NAN, 0);
+    }
+
+    let mean_brier = results.iter().map(|(b, _)| b).sum::<f64>() / n_tests as f64;
+    let mean_crps = results.iter().map(|(_, c)| c).sum::<f64>() / n_tests as f64;
+
+    (mean_brier, mean_crps, n_tests)
+}
+
+/// Compute diagnostics for all models given their calibration results.
+/// Uses each model's best window and strategy.
+pub fn compute_all_diagnostics(
+    models: &[Box<dyn ForecastModel>],
+    calibrations: &[ModelCalibration],
+    draws: &[Draw],
+    pool: Pool,
+) -> Vec<CalibrationDiagnostics> {
+    models.par_iter()
+        .zip(calibrations.par_iter())
+        .map(|(model, cal)| {
+            let strategy = if cal.best_sparse {
+                model.sampling_strategy()
+            } else if cal.best_window == 0 {
+                SamplingStrategy::FullHistory
+            } else {
+                SamplingStrategy::Consecutive
+            };
+
+            let (brier, crps, n_tests) = compute_diagnostics_for_model(
+                model.as_ref(), draws, cal.best_window, pool, strategy,
+            );
+
+            CalibrationDiagnostics {
+                model_name: model.name().to_string(),
+                pool: format!("{:?}", pool),
+                brier_score: if brier.is_nan() { -1.0 } else { brier },
+                crps_score: if crps.is_nan() { -1.0 } else { crps },
+                log_likelihood: cal.best_ll,
+                n_tests,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationResult {
     pub model_name: String,
@@ -116,6 +303,9 @@ pub struct EnsembleWeights {
     /// v17: Learned online blend window size. Default: 8.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub online_window: Option<usize>,
+    /// H1: Multi-score diagnostics (Brier + CRPS) per model. Purely informational.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<CalibrationDiagnostics>,
 }
 
 /// Calcule le nombre réel de test points après stride.
@@ -1888,6 +2078,7 @@ mod tests {
             stacking_blend_stars: None,
             online_ewma_alpha: None,
             online_window: None,
+            diagnostics: Vec::new(),
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();
@@ -1963,5 +2154,174 @@ mod tests {
         assert_eq!(result.len(), 2);
         // Both should pass since shuffling mean LL ≈ original mean LL for both
         // (the knockoff filter tests temporal structure, not absolute level)
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // H1: Brier and CRPS diagnostic tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_brier_score_perfect_prediction() {
+        // Perfect prediction: all probability mass on drawn numbers
+        let mut probs = vec![0.0; 50];
+        let drawn = [3u8, 15, 27, 38, 44];
+        for &d in &drawn {
+            probs[(d - 1) as usize] = 0.2;
+        }
+        let bs = brier_score(&probs, &drawn, 50);
+        // Perfect: Σ (0.2-1)^2 * 5 + (0-0)^2 * 45 = 5 * 0.64 = 3.20
+        assert!((bs - 3.2).abs() < 1e-10, "Perfect Brier = {}, expected 3.2", bs);
+    }
+
+    #[test]
+    fn test_brier_score_uniform() {
+        let probs = vec![1.0 / 50.0; 50];
+        let drawn = [1u8, 10, 20, 30, 50];
+        let bs = brier_score(&probs, &drawn, 50);
+        // Uniform: 5*(1/50-1)^2 + 45*(1/50)^2 = 5*0.9604 + 45*0.0004 = 4.802 + 0.018 = 4.82
+        let expected = 5.0 * (1.0 / 50.0 - 1.0_f64).powi(2) + 45.0 * (1.0 / 50.0_f64).powi(2);
+        assert!((bs - expected).abs() < 1e-10, "Uniform Brier = {}, expected {}", bs, expected);
+    }
+
+    #[test]
+    fn test_brier_score_concentrated_better_than_uniform() {
+        // A distribution that concentrates probability on the drawn numbers
+        // should have a LOWER Brier score than uniform
+        let drawn = [5u8, 15, 25, 35, 45];
+        let mut concentrated = vec![1.0 / 100.0; 50]; // start near-uniform
+        for &d in &drawn {
+            concentrated[(d - 1) as usize] = 0.15; // boost drawn numbers
+        }
+        // Renormalize
+        let sum: f64 = concentrated.iter().sum();
+        for p in &mut concentrated { *p /= sum; }
+
+        let uniform_probs = vec![1.0 / 50.0; 50];
+        let bs_concentrated = brier_score(&concentrated, &drawn, 50);
+        let bs_uniform = brier_score(&uniform_probs, &drawn, 50);
+        assert!(bs_concentrated < bs_uniform,
+            "Concentrated Brier ({}) should be < uniform Brier ({})", bs_concentrated, bs_uniform);
+    }
+
+    #[test]
+    fn test_crps_score_uniform() {
+        let probs = vec![1.0 / 50.0; 50];
+        let drawn = [1u8, 10, 20, 30, 50];
+        let cs = crps_score(&probs, &drawn, 50);
+        // CRPS should be positive and finite
+        assert!(cs > 0.0, "CRPS should be positive, got {}", cs);
+        assert!(cs.is_finite(), "CRPS should be finite");
+    }
+
+    #[test]
+    fn test_crps_score_stars() {
+        let probs = vec![1.0 / 12.0; 12];
+        let drawn = [3u8, 9];
+        let cs = crps_score(&probs, &drawn, 12);
+        assert!(cs > 0.0 && cs.is_finite(), "Star CRPS should be positive finite, got {}", cs);
+    }
+
+    #[test]
+    fn test_crps_concentrated_better_than_uniform() {
+        let drawn = [5u8, 15, 25, 35, 45];
+        let mut concentrated = vec![0.005; 50];
+        for &d in &drawn {
+            concentrated[(d - 1) as usize] = 0.15;
+        }
+        let sum: f64 = concentrated.iter().sum();
+        for p in &mut concentrated { *p /= sum; }
+
+        let uniform_probs = vec![1.0 / 50.0; 50];
+        let crps_concentrated = crps_score(&concentrated, &drawn, 50);
+        let crps_uniform = crps_score(&uniform_probs, &drawn, 50);
+        assert!(crps_concentrated < crps_uniform,
+            "Concentrated CRPS ({}) should be < uniform CRPS ({})", crps_concentrated, crps_uniform);
+    }
+
+    #[test]
+    fn test_brier_and_crps_consistent_ordering() {
+        // If model A is better than model B by Brier, it should also be
+        // at least not worse by CRPS (for reasonable distributions)
+        let drawn = [2u8, 14, 28, 37, 49];
+
+        // Good model: concentrates on drawn numbers
+        let mut good = vec![0.01; 50];
+        for &d in &drawn { good[(d - 1) as usize] = 0.10; }
+        let sum: f64 = good.iter().sum();
+        for p in &mut good { *p /= sum; }
+
+        // Bad model: concentrates on wrong numbers
+        let mut bad = vec![0.02; 50];
+        bad[0] = 0.30; // boost number 1 (not drawn)
+        bad[4] = 0.20; // boost number 5 (not drawn)
+        let sum: f64 = bad.iter().sum();
+        for p in &mut bad { *p /= sum; }
+
+        let brier_good = brier_score(&good, &drawn, 50);
+        let brier_bad = brier_score(&bad, &drawn, 50);
+        let crps_good = crps_score(&good, &drawn, 50);
+        let crps_bad = crps_score(&bad, &drawn, 50);
+
+        assert!(brier_good < brier_bad, "Good model should have lower Brier");
+        assert!(crps_good < crps_bad, "Good model should have lower CRPS");
+    }
+
+    #[test]
+    fn test_diagnostics_do_not_affect_weights() {
+        // Verify that CalibrationDiagnostics is completely separate from weight computation
+        let uniform_ll = uniform_log_likelihood(Pool::Balls);
+        let calibrations = vec![
+            ModelCalibration {
+                model_name: "A".to_string(),
+                results: vec![],
+                best_window: 20,
+                best_sparse: false,
+                best_ll: uniform_ll + 0.10,
+                best_n_tests: 100,
+            },
+            ModelCalibration {
+                model_name: "B".to_string(),
+                results: vec![],
+                best_window: 30,
+                best_sparse: false,
+                best_ll: uniform_ll + 0.05,
+                best_n_tests: 100,
+            },
+        ];
+
+        // Compute weights — these should be the same regardless of diagnostics
+        let weights = compute_weights(&calibrations, Pool::Balls);
+        assert!((weights.iter().map(|(_, w)| w).sum::<f64>() - 1.0).abs() < 1e-10);
+
+        // CalibrationDiagnostics exists independently
+        let diag = CalibrationDiagnostics {
+            model_name: "A".to_string(),
+            pool: "Balls".to_string(),
+            brier_score: 4.5,
+            crps_score: 0.02,
+            log_likelihood: uniform_ll + 0.10,
+            n_tests: 100,
+        };
+        // Diagnostics are informational only — weights unchanged
+        let weights2 = compute_weights(&calibrations, Pool::Balls);
+        assert_eq!(weights[0].1, weights2[0].1);
+        assert_eq!(weights[1].1, weights2[1].1);
+        // Brier/CRPS values are on their own scale
+        assert!(diag.brier_score > 0.0);
+        assert!(diag.crps_score > 0.0);
+    }
+
+    #[test]
+    fn test_compute_diagnostics_for_model_returns_finite() {
+        let draws = make_test_draws(50);
+        let model = crate::models::dirichlet::DirichletModel::new(1.0);
+        let (brier, crps, n_tests) = compute_diagnostics_for_model(
+            &model, &draws, 20, Pool::Balls, SamplingStrategy::Consecutive,
+        );
+        assert!(brier.is_finite(), "Brier should be finite, got {}", brier);
+        assert!(crps.is_finite(), "CRPS should be finite, got {}", crps);
+        assert!(n_tests > 0, "Should have at least 1 test point");
+        assert!(brier > 0.0, "Brier should be positive");
+        assert!(crps > 0.0, "CRPS should be positive");
     }
 }

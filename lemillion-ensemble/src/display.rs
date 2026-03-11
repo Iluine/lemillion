@@ -128,6 +128,96 @@ pub fn display_weights(weights: &EnsembleWeights) {
         table.add_row(vec![name.as_str(), &format!("{:.4}", weight), &bar]);
     }
     println!("{table}");
+
+    // H1: Display Brier/CRPS diagnostics if available
+    if !weights.diagnostics.is_empty() {
+        display_diagnostics(&weights.diagnostics);
+    }
+}
+
+/// H1: Display Brier and CRPS diagnostics alongside LL for each model.
+/// These metrics are purely informational and do NOT affect weights.
+pub fn display_diagnostics(diagnostics: &[crate::ensemble::calibration::CalibrationDiagnostics]) {
+    // Compute uniform baselines for reference
+    let uniform_brier_balls = brier_uniform(50, 5);
+    let uniform_crps_balls = crps_uniform(50, 5);
+    let uniform_brier_stars = brier_uniform(12, 2);
+    let uniform_crps_stars = crps_uniform(12, 2);
+
+    // Split by pool
+    let ball_diags: Vec<_> = diagnostics.iter().filter(|d| d.pool == "Balls").collect();
+    let star_diags: Vec<_> = diagnostics.iter().filter(|d| d.pool == "Stars").collect();
+
+    if !ball_diags.is_empty() {
+        println!("\n── Diagnostics Boules (Brier / CRPS) ──");
+        println!("  Uniforme: Brier={:.4}, CRPS={:.4}\n", uniform_brier_balls, uniform_crps_balls);
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec!["Modèle", "LL", "Brier", "Brier vs Unif", "CRPS", "CRPS vs Unif"]);
+
+        for d in &ball_diags {
+            if d.brier_score < 0.0 { continue; } // skip invalid
+            let brier_delta = d.brier_score - uniform_brier_balls;
+            let crps_delta = d.crps_score - uniform_crps_balls;
+            table.add_row(vec![
+                d.model_name.as_str(),
+                &format!("{:.4}", d.log_likelihood),
+                &format!("{:.4}", d.brier_score),
+                &format!("{:+.4}", brier_delta),
+                &format!("{:.6}", d.crps_score),
+                &format!("{:+.6}", crps_delta),
+            ]);
+        }
+        println!("{table}");
+    }
+
+    if !star_diags.is_empty() {
+        println!("\n── Diagnostics Étoiles (Brier / CRPS) ──");
+        println!("  Uniforme: Brier={:.4}, CRPS={:.4}\n", uniform_brier_stars, uniform_crps_stars);
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .set_content_arrangement(ContentArrangement::Dynamic)
+            .set_header(vec!["Modèle", "LL", "Brier", "Brier vs Unif", "CRPS", "CRPS vs Unif"]);
+
+        for d in &star_diags {
+            if d.brier_score < 0.0 { continue; } // skip invalid
+            let brier_delta = d.brier_score - uniform_brier_stars;
+            let crps_delta = d.crps_score - uniform_crps_stars;
+            table.add_row(vec![
+                d.model_name.as_str(),
+                &format!("{:.4}", d.log_likelihood),
+                &format!("{:.4}", d.brier_score),
+                &format!("{:+.4}", brier_delta),
+                &format!("{:.6}", d.crps_score),
+                &format!("{:+.6}", crps_delta),
+            ]);
+        }
+        println!("{table}");
+    }
+}
+
+/// Compute Brier score for a uniform distribution.
+fn brier_uniform(pool_size: usize, pick_count: usize) -> f64 {
+    let p = 1.0 / pool_size as f64;
+    let k = pick_count as f64;
+    // k numbers with target=1: (p - 1)^2
+    // (pool_size - k) numbers with target=0: p^2
+    k * (p - 1.0).powi(2) + (pool_size as f64 - k) * p.powi(2)
+}
+
+/// Compute CRPS for a uniform distribution.
+fn crps_uniform(pool_size: usize, pick_count: usize) -> f64 {
+    use crate::ensemble::calibration::{crps_score};
+    // Use the actual crps function with a uniform distribution and a "typical" draw
+    // For a stable reference, pick the first `pick_count` numbers
+    let probs = vec![1.0 / pool_size as f64; pool_size];
+    let drawn: Vec<u8> = (1..=pick_count as u8).collect();
+    crps_score(&probs, &drawn, pool_size)
 }
 
 pub fn display_forecast(prediction: &EnsemblePrediction, pool: Pool) {

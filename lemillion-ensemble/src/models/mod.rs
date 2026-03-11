@@ -251,6 +251,7 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(tensor_model::TensorModel::default()),           // v19 H2
         Box::new(definetti::DeFinettiModel::default()),           // v19 H6
         Box::new(gnn_cooccurrence::GnnCooccurrenceModel::default()), // v19 H7
+        Box::new(esn::EsnModel::default()),                          // v19 G6: conditional reintegration
     ]
 }
 

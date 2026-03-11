@@ -647,6 +647,24 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         (Some(cw_b), Some(cw_s), Some(sb_b), Some(sb_s), Some(oa), Some(ow))
     };
 
+    // H1: Compute Brier + CRPS diagnostics (purely informational, does NOT affect weights)
+    println!("\nCalcul des diagnostics Brier/CRPS...");
+    let diagnostics = {
+        use lemillion_ensemble::ensemble::calibration::compute_all_diagnostics;
+        let diag_models = all_models();
+        let mut all_diags = Vec::new();
+        if calibrate_balls {
+            let ball_diags = compute_all_diagnostics(&diag_models, &ball_calibrations, &draws, Pool::Balls);
+            all_diags.extend(ball_diags);
+        }
+        if calibrate_stars {
+            let star_diags = compute_all_diagnostics(&diag_models, &star_calibrations, &draws, Pool::Stars);
+            all_diags.extend(star_diags);
+        }
+        println!("  {} diagnostics calculés", all_diags.len());
+        all_diags
+    };
+
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
@@ -667,6 +685,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         stacking_blend_stars,
         online_ewma_alpha,
         online_window,
+        diagnostics,
     };
 
     display::display_weights(&ensemble_weights);
@@ -1009,6 +1028,15 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     let star_consensus = build_consensus_map(&star_pred, Pool::Stars);
     display::display_consensus(&ball_consensus, Pool::Balls);
     display::display_consensus(&star_consensus, Pool::Stars);
+
+    // E6: Conformal prediction / abstention recommendation
+    let conformal = lemillion_ensemble::sampler::conformal_prediction(&ball_pred.distribution, &star_pred.distribution, 0.10);
+    println!("\nConformal Prediction (alpha=0.10):");
+    println!("  Ball prediction set: {}/50 numbers", conformal.ball_set_size);
+    println!("  Star prediction set: {}/12 numbers", conformal.star_set_size);
+    println!("  Ball entropy: {:.3} (uniform: {:.3})", conformal.ball_entropy, (50.0_f64).ln());
+    println!("  Star entropy: {:.3} (uniform: {:.3})", conformal.star_entropy, (12.0_f64).ln());
+    println!("  Recommendation: {}", conformal.recommendation);
 
     if let Some(t) = temperature
         && t <= 0.0

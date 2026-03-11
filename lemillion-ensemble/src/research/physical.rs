@@ -12,6 +12,7 @@ pub fn run_physical_tests(draws: &[Draw]) -> Vec<TestResult> {
     results.extend(cooccurrence_tests(draws));
     results.push(balls_stars_independence(draws));
     results.push(ink_complexity_test(draws));
+    results.push(test_transfer_learning(draws));
 
     results
 }
@@ -602,6 +603,87 @@ fn ink_complexity_test(draws: &[Draw]) -> TestResult {
         detail: format!(
             "r={:.4}, t={:.2}, p={:.4} | Corrélation encre(7-seg) vs déviation fréquence",
             r, t_stat, p
+        ),
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+// G4: Transfer learning — mod-8 profile stability across eras
+// ════════════════════════════════════════════════════════════════
+
+fn compute_mod8_profile(draws: &[Draw]) -> Vec<f64> {
+    let mut counts = vec![0.0f64; 8];
+    let mut total = 0.0;
+    for d in draws {
+        for &b in &d.balls {
+            counts[((b - 1) % 8) as usize] += 1.0;
+            total += 1.0;
+        }
+    }
+    if total > 0.0 {
+        for c in &mut counts { *c /= total; }
+    }
+    counts
+}
+
+fn pearson_corr(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let mean_x: f64 = x.iter().sum::<f64>() / n;
+    let mean_y: f64 = y.iter().sum::<f64>() / n;
+    let mut cov = 0.0;
+    let mut var_x = 0.0;
+    let mut var_y = 0.0;
+    for (xi, yi) in x.iter().zip(y.iter()) {
+        let dx = xi - mean_x;
+        let dy = yi - mean_y;
+        cov += dx * dy;
+        var_x += dx * dx;
+        var_y += dy * dy;
+    }
+    let denom = (var_x * var_y).sqrt();
+    if denom < 1e-15 { 0.0 } else { cov / denom }
+}
+
+/// G4: Test whether mod-8 bias is stable across era halves (proxy for cross-lottery transfer).
+pub fn test_transfer_learning(draws: &[Draw]) -> TestResult {
+    if draws.len() < 100 {
+        return TestResult {
+            test_name: "Transfer Learning (mod-8 stability)".to_string(),
+            category: "physical".to_string(),
+            statistic: 0.0,
+            p_value: Some(1.0),
+            effect_size: 0.0,
+            verdict: ResearchVerdict::NotSignificant,
+            detail: "Not enough draws for transfer learning analysis".to_string(),
+        };
+    }
+
+    let mid = draws.len() / 2;
+    let profile1 = compute_mod8_profile(&draws[..mid]);
+    let profile2 = compute_mod8_profile(&draws[mid..]);
+    let correlation = pearson_corr(&profile1, &profile2);
+
+    let verdict = if correlation > 0.7 {
+        ResearchVerdict::Significant
+    } else if correlation > 0.4 {
+        ResearchVerdict::Marginal
+    } else {
+        ResearchVerdict::NotSignificant
+    };
+
+    TestResult {
+        test_name: "Transfer Learning (mod-8 stability)".to_string(),
+        category: "physical".to_string(),
+        statistic: correlation,
+        p_value: None,
+        effect_size: correlation,
+        verdict,
+        detail: format!(
+            "Mod-8 profile correlation between era halves: {:.4}. {}",
+            correlation,
+            if correlation > 0.7 { "Strong stability — transfer learning viable" }
+            else if correlation > 0.4 { "Moderate stability — partial transfer possible" }
+            else { "Weak stability — transfer learning not recommended" }
         ),
     }
 }
