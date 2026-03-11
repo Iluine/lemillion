@@ -28,11 +28,6 @@ impl Default for PaqueretteMod4Model {
     }
 }
 
-/// Star mod-4 class: (star - 1) % 4
-fn star_mod4(star: u8) -> usize {
-    ((star - 1) % 4) as usize
-}
-
 impl ForecastModel for PaqueretteMod4Model {
     fn name(&self) -> &str {
         "PaqueretteMod4"
@@ -97,59 +92,11 @@ impl ForecastModel for PaqueretteMod4Model {
             pos_scores[j] /= n_pos as f64;
         }
 
-        // ── Signal 2: Mod-4 transition intra-draw ──
-        // P(mod4 class at pos 2 | mod4 class at pos 1)
-        let n_mod = 4usize;
-        let laplace = 0.5;
-        let mut transition = vec![vec![laplace; n_mod]; n_mod];
-        let mut totals = vec![laplace * n_mod as f64; n_mod];
+        // ── Signal 2: KL-weighted multi-modular analysis (v19 C3) ──
+        // Test mod-2 (even/odd), mod-3, mod-4 (Pâquerette blades), mod-6
+        // Weight each by KL-divergence from uniform (more informative = higher weight)
 
-        for &draw in &draws_with_order {
-            let order = draw.star_order.as_ref().unwrap();
-            if order.len() >= 2 && order[0] >= 1 && order[1] >= 1 {
-                let from_class = star_mod4(order[0]);
-                let to_class = star_mod4(order[1]);
-                transition[from_class][to_class] += 1.0;
-                totals[from_class] += 1.0;
-            }
-        }
-
-        // Normalize transition rows
-        for c in 0..n_mod {
-            if totals[c] > 0.0 {
-                for t in &mut transition[c] {
-                    *t /= totals[c];
-                }
-            }
-        }
-
-        // Predict mod-4 class distribution for each position based on last draw
-        let last_draw = &draws_with_order[0];
-        let last_order = last_draw.star_order.as_ref().unwrap();
-
-        let mut mod4_pred = vec![0.0f64; n_mod];
-        if !last_order.is_empty() && last_order[0] >= 1 {
-            // Use last 1st-extracted star's mod-4 class to predict transition
-            let last_class = star_mod4(last_order[0]);
-            for c in 0..n_mod {
-                mod4_pred[c] = transition[last_class][c];
-            }
-        } else {
-            for c in 0..n_mod {
-                mod4_pred[c] = 1.0 / n_mod as f64;
-            }
-        }
-
-        // Redistribute mod-4 class probabilities to individual stars
-        // using within-class historical frequency
-        let mut class_freq = vec![vec![0.0f64; 0]; n_mod];
-        let mut class_members: Vec<Vec<usize>> = vec![vec![]; n_mod];
-        for s in 0..size {
-            let c = ((s) % n_mod) as usize; // (star-1) % 4, star = s+1
-            class_members[c].push(s);
-        }
-
-        // Historical frequency
+        // Historical frequency for redistribution
         let mut freq = vec![1.0f64; size]; // Laplace prior
         for &draw in &draws_with_order {
             for &s in &draw.stars {
@@ -159,39 +106,121 @@ impl ForecastModel for PaqueretteMod4Model {
             }
         }
 
-        // Class frequency sums
-        let mut class_sum = vec![0.0f64; n_mod];
-        for c in 0..n_mod {
-            class_freq.push(vec![]);
-            for &idx in &class_members[c] {
-                class_sum[c] += freq[idx];
-            }
-        }
+        let last_draw = &draws_with_order[0];
+        let last_order = last_draw.star_order.as_ref().unwrap();
 
-        // Mod-4 redistributed scores
-        let mut mod4_scores = vec![0.0f64; size];
-        for c in 0..n_mod {
-            if class_sum[c] > 0.0 {
-                for &idx in &class_members[c] {
-                    mod4_scores[idx] = mod4_pred[c] * freq[idx] / class_sum[c];
+        let moduli = [2usize, 3, 4, 6];
+        let mut mod_scores_all: Vec<(Vec<f64>, f64)> = Vec::new(); // (scores, kl_divergence)
+
+        for &modulus in &moduli {
+            let laplace = 0.5;
+            let mut transition = vec![vec![laplace; modulus]; modulus];
+            let mut totals = vec![laplace * modulus as f64; modulus];
+
+            for &draw in &draws_with_order {
+                let order = draw.star_order.as_ref().unwrap();
+                if order.len() >= 2 && order[0] >= 1 && order[1] >= 1 {
+                    let from_class = ((order[0] - 1) as usize) % modulus;
+                    let to_class = ((order[1] - 1) as usize) % modulus;
+                    transition[from_class][to_class] += 1.0;
+                    totals[from_class] += 1.0;
                 }
             }
+
+            // Normalize transition rows
+            for c in 0..modulus {
+                if totals[c] > 0.0 {
+                    for t in &mut transition[c] {
+                        *t /= totals[c];
+                    }
+                }
+            }
+
+            // Predict class distribution based on last draw
+            let mut class_pred = vec![0.0f64; modulus];
+            if !last_order.is_empty() && last_order[0] >= 1 {
+                let last_class = ((last_order[0] - 1) as usize) % modulus;
+                for c in 0..modulus {
+                    class_pred[c] = transition[last_class][c];
+                }
+            } else {
+                for c in 0..modulus {
+                    class_pred[c] = 1.0 / modulus as f64;
+                }
+            }
+
+            // KL divergence from uniform
+            let uniform_class = 1.0 / modulus as f64;
+            let kl: f64 = class_pred.iter()
+                .map(|&p| {
+                    let p = p.max(1e-15);
+                    p * (p / uniform_class).ln()
+                })
+                .sum();
+
+            // Redistribute to individual stars using within-class frequency
+            let mut class_members: Vec<Vec<usize>> = vec![vec![]; modulus];
+            for s in 0..size {
+                let c = s % modulus;
+                class_members[c].push(s);
+            }
+            let mut class_sum = vec![0.0f64; modulus];
+            for c in 0..modulus {
+                for &idx in &class_members[c] {
+                    class_sum[c] += freq[idx];
+                }
+            }
+
+            let mut scores = vec![0.0f64; size];
+            for c in 0..modulus {
+                if class_sum[c] > 0.0 {
+                    for &idx in &class_members[c] {
+                        scores[idx] = class_pred[c] * freq[idx] / class_sum[c];
+                    }
+                }
+            }
+
+            // Normalize
+            let sum: f64 = scores.iter().sum();
+            if sum > 0.0 {
+                for p in &mut scores {
+                    *p /= sum;
+                }
+            }
+
+            mod_scores_all.push((scores, kl.max(1e-10)));
         }
 
-        // Normalize mod4_scores
-        let sum: f64 = mod4_scores.iter().sum();
+        // KL-weighted blend of modular scores
+        let total_kl: f64 = mod_scores_all.iter().map(|(_, kl)| kl).sum();
+        let mut mod_combined = vec![0.0f64; size];
+        if total_kl > 0.0 {
+            for (scores, kl) in &mod_scores_all {
+                let w = kl / total_kl;
+                for j in 0..size {
+                    mod_combined[j] += w * scores[j];
+                }
+            }
+        } else {
+            for j in 0..size {
+                mod_combined[j] = 1.0 / size as f64;
+            }
+        }
+
+        // Normalize mod_combined
+        let sum: f64 = mod_combined.iter().sum();
         if sum > 0.0 {
-            for p in &mut mod4_scores {
+            for p in &mut mod_combined {
                 *p /= sum;
             }
         }
 
-        // ── Blend: 60% positional + 40% mod-4 transition ──
+        // ── Blend: 60% positional + 40% KL-weighted modular ──
         let blend_pos = 0.6;
         let blend_mod = 0.4;
         let mut combined = vec![0.0f64; size];
         for j in 0..size {
-            combined[j] = blend_pos * pos_scores[j] + blend_mod * mod4_scores[j];
+            combined[j] = blend_pos * pos_scores[j] + blend_mod * mod_combined[j];
         }
 
         // Smooth with uniform
@@ -331,10 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn test_star_mod4_classes() {
-        assert_eq!(star_mod4(1), 0); // (1-1)%4 = 0
-        assert_eq!(star_mod4(2), 1); // (2-1)%4 = 1
-        assert_eq!(star_mod4(5), 0); // (5-1)%4 = 0
-        assert_eq!(star_mod4(12), 3); // (12-1)%4 = 3
+    fn test_star_mod_classes() {
+        // (star-1) % modulus
+        assert_eq!((1u8 - 1) as usize % 4, 0); // star 1 → mod4 class 0
+        assert_eq!((2u8 - 1) as usize % 4, 1); // star 2 → mod4 class 1
+        assert_eq!((5u8 - 1) as usize % 4, 0); // star 5 → mod4 class 0
+        assert_eq!((12u8 - 1) as usize % 4, 3); // star 12 → mod4 class 3
+        // mod-2 (even/odd)
+        assert_eq!((1u8 - 1) as usize % 2, 0);
+        assert_eq!((2u8 - 1) as usize % 2, 1);
+        // mod-6
+        assert_eq!((7u8 - 1) as usize % 6, 0);
+        assert_eq!((12u8 - 1) as usize % 6, 5);
     }
 }

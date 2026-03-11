@@ -243,6 +243,65 @@ fn ball_conditioned_pair(draws: &[Draw]) -> [f64; N_PAIRS] {
     probs
 }
 
+/// Expert 5: Pair autocorrelation lag-1/2 via EWMA (v19 C1)
+/// Tracks persistence of specific pairs at short lags.
+/// With 66 pairs and only 12 numbers, pair persistence is a stronger signal
+/// than individual persistence.
+fn pair_autocorrelation(draws: &[Draw]) -> [f64; N_PAIRS] {
+    let uniform = [1.0 / N_PAIRS as f64; N_PAIRS];
+
+    if draws.len() < 20 {
+        return uniform;
+    }
+
+    let alpha_lag1 = 0.15; // Fast EWMA for lag-1
+    let alpha_lag2 = 0.08; // Slower EWMA for lag-2
+
+    let mut ewma_lag1 = [1.0 / N_PAIRS as f64; N_PAIRS];
+    let mut ewma_lag2 = [1.0 / N_PAIRS as f64; N_PAIRS];
+
+    // Process chronologically (oldest first)
+    let len = draws.len();
+    for i in (0..len).rev() {
+        let (s1, s2) = pair_from_draw(&draws[i]);
+        let pidx = pair_index(s1, s2);
+
+        // Lag-1: update EWMA with current draw
+        for j in 0..N_PAIRS {
+            let val = if j == pidx { 1.0 } else { 0.0 };
+            ewma_lag1[j] = alpha_lag1 * val + (1.0 - alpha_lag1) * ewma_lag1[j];
+        }
+
+        // Lag-2: only update every other step for lag-2 signal
+        if i + 2 < len {
+            let (ps1, ps2) = pair_from_draw(&draws[i + 2]);
+            let ppidx = pair_index(ps1, ps2);
+            // If same pair appeared 2 draws ago, this is a lag-2 persistence signal
+            if ppidx == pidx {
+                for j in 0..N_PAIRS {
+                    let val = if j == pidx { 1.0 } else { 0.0 };
+                    ewma_lag2[j] = alpha_lag2 * val + (1.0 - alpha_lag2) * ewma_lag2[j];
+                }
+            }
+        }
+    }
+
+    // Blend lag-1 (70%) and lag-2 (30%)
+    let mut probs = [0.0f64; N_PAIRS];
+    for j in 0..N_PAIRS {
+        probs[j] = 0.7 * ewma_lag1[j] + 0.3 * ewma_lag2[j];
+    }
+
+    // Normalize
+    let sum: f64 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in &mut probs {
+            *p /= sum;
+        }
+    }
+    probs
+}
+
 impl StarPairModel {
     /// Compute combined pair distribution using Hedge-weighted experts.
     /// Returns None if not enough draws.
@@ -251,12 +310,13 @@ impl StarPairModel {
             return None;
         }
 
-        // v18: 4 experts (added extraction-order conditioned)
+        // v19: 5 experts (added pair autocorrelation C1)
         let experts: Vec<[f64; N_PAIRS]> = vec![
             pair_frequency(draws),
             pair_transition(draws),
             ball_conditioned_pair(draws),
             extraction_order_pair(draws),
+            pair_autocorrelation(draws),
         ];
         let n_experts = experts.len();
 
@@ -275,6 +335,7 @@ impl StarPairModel {
                 pair_transition(train_data),
                 ball_conditioned_pair(train_data),
                 extraction_order_pair(train_data),
+                pair_autocorrelation(train_data),
             ];
 
             let target = &draws[t - 1];
@@ -284,7 +345,17 @@ impl StarPairModel {
             for (e, pred) in preds.iter().enumerate() {
                 let p = pred[target_idx].max(1e-15);
                 let loss = (-p.ln()).clamp(0.0, 10.0);
-                weights[e] *= (-eta * loss).exp();
+
+                // F5: Entropy-weighted Hedge loss — experts making more concentrated
+                // (lower entropy) predictions are penalized/rewarded more heavily
+                let max_entropy = (N_PAIRS as f64).ln();
+                let expert_entropy = -pred.iter()
+                    .filter(|&&p| p > 1e-30)
+                    .map(|&p| p * p.ln())
+                    .sum::<f64>();
+                let entropy_weight = 1.0 + (max_entropy - expert_entropy) / max_entropy;
+
+                weights[e] *= (-eta * loss * entropy_weight).exp();
             }
 
             let wsum: f64 = weights.iter().sum();

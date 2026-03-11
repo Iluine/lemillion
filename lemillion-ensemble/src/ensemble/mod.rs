@@ -3,6 +3,8 @@ pub mod consensus;
 pub mod meta;
 pub mod online;
 pub mod stacking;
+pub mod wasserstein;
+pub mod bayesopt;
 
 use rayon::prelude::*;
 use lemillion_db::models::{Draw, Pool};
@@ -296,6 +298,51 @@ impl EnsembleCombiner {
     }
 }
 
+impl EnsembleCombiner {
+    /// F4: Multi-scale ensemble prediction blending short/medium/long horizons.
+    /// Runs predict() with 3 different draw windows (short=30, medium=100, long=all)
+    /// and blends their predictions weighted by KL-divergence from uniform
+    /// (more informative scale = higher weight).
+    pub fn predict_multi_scale(&self, draws: &[Draw], pool: Pool) -> Vec<f64> {
+        let scales = [30usize, 100, draws.len()];
+        let uniform = 1.0 / pool.size() as f64;
+        let mut scale_preds = Vec::new();
+        let mut scale_kls = Vec::new();
+
+        for &window in &scales {
+            let w = window.min(draws.len());
+            let sub_draws = &draws[..w];
+            let pred = self.predict(sub_draws, pool);
+            // KL divergence from uniform: D_KL(pred || uniform)
+            let kl: f64 = pred.distribution.iter()
+                .map(|&p| if p > 1e-30 { p * (p / uniform).ln() } else { 0.0 })
+                .sum();
+            scale_preds.push(pred.distribution);
+            scale_kls.push(kl.max(1e-10));
+        }
+
+        // KL-proportional weights
+        let kl_sum: f64 = scale_kls.iter().sum();
+        let weights: Vec<f64> = scale_kls.iter().map(|k| k / kl_sum).collect();
+
+        // Blend
+        let size = pool.size();
+        let mut blended = vec![0.0f64; size];
+        for (pred, &w) in scale_preds.iter().zip(weights.iter()) {
+            for (i, &p) in pred.iter().enumerate() {
+                blended[i] += w * p;
+            }
+        }
+
+        // Normalize
+        let sum: f64 = blended.iter().sum();
+        for p in &mut blended {
+            *p /= sum;
+        }
+        blended
+    }
+}
+
 /// Beta-transform: recalibrates a pooled distribution using p^alpha * (1-p)^(beta-1).
 /// alpha=1, beta=1 is identity. alpha>1 sharpens high-probability entries.
 /// beta>1 suppresses low-probability entries. Asymmetric unlike temperature.
@@ -422,20 +469,32 @@ pub fn compute_hedge_weights(
                         -ll
                     })
                     .sum();
-                ball_weights[m] *= (-eta * ball_loss).exp();
+                // v19 E3: Natural gradient on probability simplex
+                // Fisher metric approx: F_ii ≈ 1/w_i → natural grad = w_i * grad
+                let natural_eta = eta * ball_weights[m].max(1e-6);
+                ball_weights[m] *= (-natural_eta * ball_loss).exp();
             }
 
             if need_star {
                 // Loss étoiles (pure log-likelihood)
+                // v19 D1: Asymmetric loss — halve penalty for stars below uniform
+                // when the star actually appeared. This reduces over-reward for
+                // momentum models that correctly predict hot stars but miss cold ones.
                 let star_ll_cap = 2.0 * (1.0_f64 / 12.0).ln();
+                let star_uniform = 1.0 / 12.0_f64;
                 let star_dist = model.predict(training_draws, Pool::Stars);
                 let star_loss: f64 = test_draw.stars.iter()
                     .map(|&s| {
-                        let ll = star_dist[(s - 1) as usize].max(1e-15).ln().max(star_ll_cap);
-                        -ll
+                        let p = star_dist[(s - 1) as usize].max(1e-15);
+                        let ll = p.ln().max(star_ll_cap);
+                        let loss = -ll;
+                        // If model was below uniform for a drawn star, halve the loss
+                        if p < star_uniform { loss * 0.5 } else { loss }
                     })
                     .sum();
-                star_weights[m] *= (-eta * star_loss).exp();
+                // v19 E3: Natural gradient (same as balls)
+                let natural_eta = eta * star_weights[m].max(1e-6);
+                star_weights[m] *= (-natural_eta * star_loss).exp();
             }
         }
 
@@ -451,6 +510,77 @@ pub fn compute_hedge_weights(
             for w in &mut star_weights {
                 *w /= ss;
             }
+        }
+    }
+
+    // H4: Tsallis q=0.5 mirror descent — more exploratory than Shannon entropy.
+    // After the exp update, apply w^(1/(2-q)) transform to prevent weight collapse
+    // on mean-reversion models. Tsallis q<1 spreads weight more evenly.
+    let q = 0.5_f64;
+    let tsallis_exp = 1.0 / (2.0 - q); // = 1/1.5 ≈ 0.6667
+    for w in ball_weights.iter_mut() {
+        *w = w.powf(tsallis_exp);
+    }
+    let bs: f64 = ball_weights.iter().sum();
+    if bs > 0.0 {
+        for w in ball_weights.iter_mut() {
+            *w /= bs;
+        }
+    }
+    for w in star_weights.iter_mut() {
+        *w = w.powf(tsallis_exp);
+    }
+    let ss: f64 = star_weights.iter().sum();
+    if ss > 0.0 {
+        for w in star_weights.iter_mut() {
+            *w /= ss;
+        }
+    }
+
+    // v19 G5: Surprise-based model boost.
+    // After the Hedge loop, if a model predicted the last draw's "surprising" numbers
+    // (numbers the ensemble gave low probability but the model favored), boost it.
+    if n > 0 {
+        let last_draw = &draws[0];
+        let training = &draws[1..];
+        if training.len() >= 10 {
+            // Compute ensemble-level distribution for surprise reference
+            let ball_total: f64 = ball_weights.iter().sum();
+            let star_total: f64 = star_weights.iter().sum();
+            for (m, model) in models.iter().enumerate() {
+                if ball_weights[m] > floor_threshold && ball_total > 0.0 {
+                    let dist = model.predict(training, Pool::Balls);
+                    let w_norm = ball_weights[m] / ball_total;
+                    for &b in &last_draw.balls {
+                        let model_p = dist[(b - 1) as usize].max(1e-15);
+                        let uniform_p = 1.0 / 50.0;
+                        let surprise = model_p / uniform_p;
+                        // If model was above 2x uniform for this drawn number → it "knew"
+                        if surprise > 2.0 {
+                            let boost = 1.0 + 0.05 * (surprise - 2.0).min(3.0);
+                            ball_weights[m] *= boost.powf(w_norm);
+                        }
+                    }
+                }
+                if star_weights[m] > floor_threshold && star_total > 0.0 {
+                    let dist = model.predict(training, Pool::Stars);
+                    let w_norm = star_weights[m] / star_total;
+                    for &s in &last_draw.stars {
+                        let model_p = dist[(s - 1) as usize].max(1e-15);
+                        let uniform_p = 1.0 / 12.0;
+                        let surprise = model_p / uniform_p;
+                        if surprise > 2.0 {
+                            let boost = 1.0 + 0.05 * (surprise - 2.0).min(3.0);
+                            star_weights[m] *= boost.powf(w_norm);
+                        }
+                    }
+                }
+            }
+            // Renormalize after surprise boost
+            let bs: f64 = ball_weights.iter().sum();
+            if bs > 0.0 { for w in &mut ball_weights { *w /= bs; } }
+            let ss: f64 = star_weights.iter().sum();
+            if ss > 0.0 { for w in &mut star_weights { *w /= ss; } }
         }
     }
 
@@ -595,5 +725,29 @@ mod tests {
         assert!(range_concentrated > range_flat);
         assert!((range_concentrated - 5.2).abs() < 1e-9);
         assert!((range_flat - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_multi_scale_sums_to_one() {
+        let combiner = EnsembleCombiner::new(crate::models::all_models());
+        let draws = make_test_draws(120);
+        for pool in [Pool::Balls, Pool::Stars] {
+            let pred = combiner.predict_multi_scale(&draws, pool);
+            assert_eq!(pred.len(), pool.size());
+            let sum: f64 = pred.iter().sum();
+            assert!((sum - 1.0).abs() < 1e-9, "Multi-scale {:?} sum = {}", pool, sum);
+            for &p in &pred {
+                assert!(p >= 0.0, "Multi-scale produced negative probability");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multi_scale_short_data() {
+        // With fewer draws than the short window, all 3 scales should use the same data
+        let combiner = EnsembleCombiner::new(crate::models::all_models());
+        let draws = make_test_draws(15);
+        let pred = combiner.predict_multi_scale(&draws, Pool::Balls);
+        assert!(validate_distribution(&pred, Pool::Balls));
     }
 }

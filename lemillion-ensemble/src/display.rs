@@ -1192,6 +1192,13 @@ pub fn display_jackpot_results(
             if result.improvement_factor > 1.0 { Color::Green } else { Color::Yellow }
         ),
     ]);
+    // v19 D2: Show overlap-adjusted factor
+    summary.add_row(vec![
+        Cell::new("Facteur ajusté (overlap)"),
+        Cell::new(format!("{:.2}x", result.adjusted_improvement_factor)).fg(
+            if result.adjusted_improvement_factor > 1.0 { Color::Green } else { Color::Yellow }
+        ),
+    ]);
 
     let equiv_uniform = result.total_jackpot_probability * 139_838_160.0;
     summary.add_row(vec![

@@ -4,15 +4,16 @@ use lemillion_db::models::{Draw, Pool};
 
 use super::{ForecastModel, SamplingStrategy};
 
-/// StarSpecialist — modèle dédié aux 12 étoiles avec 4 micro-experts combinés via Hedge.
+/// StarSpecialist — modèle dédié aux 12 étoiles avec 5 micro-experts combinés via Hedge.
 ///
 /// Experts :
 /// 1. Gap-hazard étoiles : fonction de hasard empirique adaptée (gaps plus courts)
 /// 2. Conditionnel ball→star : P(étoile | sum_bin des boules du tirage précédent)
 /// 3. Balance haut/bas : persistence étoiles 1-6 vs 7-12, EWMA
 /// 4. Mod-4 transition étoiles : (star-1)%4 → 3 classes, matrice de transition 3×3
+/// 5. OU mean-reversion : boosts cold stars via Ornstein-Uhlenbeck process (v19 B3)
 ///
-/// Pour Pool::Stars : moyenne pondérée Hedge des 4 experts.
+/// Pour Pool::Stars : moyenne pondérée Hedge des 5 experts.
 /// Pour Pool::Balls : uniforme.
 pub struct StarSpecialistModel {
     smoothing: f64,
@@ -294,6 +295,77 @@ fn mod4_transition_stars(draws: &[Draw]) -> Vec<f64> {
     dist
 }
 
+// ── Expert 5 : OU Mean-Reversion (v19 B3) ──────────────────────────────────
+
+fn ou_mean_reversion_stars(draws: &[Draw]) -> Vec<f64> {
+    let size = 12;
+    let uniform = vec![1.0 / size as f64; size];
+
+    if draws.len() < 40 {
+        return uniform;
+    }
+
+    let pick = 2;
+    let mu = pick as f64 / size as f64; // theoretical ≈ 0.1667
+    let ewma_alpha = 0.05;
+    let theta_default = 0.15;
+
+    let mut probs = vec![0.0f64; size];
+
+    for star_idx in 0..size {
+        let star_num = (star_idx + 1) as u8;
+
+        // Build slow EWMA frequency series (chronological)
+        let mut ewma = mu;
+        for d in draws.iter().rev() {
+            let val = if d.stars.contains(&star_num) { 1.0 } else { 0.0 };
+            ewma = ewma_alpha * val + (1.0 - ewma_alpha) * ewma;
+        }
+        let f_current = ewma;
+
+        // Estimate θ by OLS on EWMA series
+        let mut freq_series: Vec<f64> = Vec::with_capacity(draws.len());
+        let mut e = mu;
+        for d in draws.iter().rev() {
+            let val = if d.stars.contains(&star_num) { 1.0 } else { 0.0 };
+            e = ewma_alpha * val + (1.0 - ewma_alpha) * e;
+            freq_series.push(e);
+        }
+
+        let theta = if freq_series.len() > 10 {
+            let mut sum_xy = 0.0f64;
+            let mut sum_xx = 0.0f64;
+            for t in 0..freq_series.len() - 1 {
+                let x = mu - freq_series[t];
+                let y = freq_series[t + 1] - freq_series[t];
+                sum_xy += x * y;
+                sum_xx += x * x;
+            }
+            if sum_xx > 1e-15 {
+                (sum_xy / sum_xx).clamp(0.01, 0.50)
+            } else {
+                theta_default
+            }
+        } else {
+            theta_default
+        };
+
+        // OU prediction
+        probs[star_idx] = (f_current + theta * (mu - f_current)).max(1e-6);
+    }
+
+    // Normalize
+    let sum: f64 = probs.iter().sum();
+    if sum > 0.0 {
+        for p in &mut probs {
+            *p /= sum;
+        }
+    } else {
+        return uniform;
+    }
+    probs
+}
+
 impl ForecastModel for StarSpecialistModel {
     fn name(&self) -> &str {
         "StarSpecialist"
@@ -312,12 +384,13 @@ impl ForecastModel for StarSpecialistModel {
             return uniform;
         }
 
-        // 4 experts
+        // 5 experts (v19 B3: added OU mean-reversion)
         let expert_preds = [
             gap_hazard_stars(draws),
             conditional_ball_star(draws),
             balance_high_low_stars(draws),
             mod4_transition_stars(draws),
+            ou_mean_reversion_stars(draws),
         ];
         let n_experts = expert_preds.len();
 
@@ -338,6 +411,7 @@ impl ForecastModel for StarSpecialistModel {
                 conditional_ball_star(train_data),
                 balance_high_low_stars(train_data),
                 mod4_transition_stars(train_data),
+                ou_mean_reversion_stars(train_data),
             ];
 
             // Loss = -log(prob de l'étoile observée)

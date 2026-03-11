@@ -372,6 +372,44 @@ pub fn compute_bayesian_score(
     ball_score * star_score
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// v19 G2: Exponential Tilting Unifié
+// ═══════════════════════════════════════════════════════════════════
+
+/// Multi-tilt scoring: P_tilted(x) ∝ P(x) × exp(λ₁·h_coherence + λ₂·h_joint + λ₃·h_anti_pop)
+/// The λ weights can be learned from backtest (future work H8 BayesOpt).
+pub struct ExponentialTilt {
+    pub lambda_coherence: f64,
+    pub lambda_joint: f64,
+    pub lambda_anti_pop: f64,
+}
+
+impl Default for ExponentialTilt {
+    fn default() -> Self {
+        Self {
+            lambda_coherence: 1.0,
+            lambda_joint: 0.5,
+            lambda_anti_pop: 0.3,
+        }
+    }
+}
+
+impl ExponentialTilt {
+    /// Apply exponential tilting to a base score.
+    pub fn tilt_score(
+        &self,
+        base_log_score: f64,
+        coherence_score: f64,     // [0, 1]
+        joint_log_score: f64,     // log P(joint)
+        anti_popularity: f64,      // [0, 1]
+    ) -> f64 {
+        base_log_score
+            + self.lambda_coherence * (coherence_score - 0.5)
+            + self.lambda_joint * joint_log_score
+            + self.lambda_anti_pop * anti_popularity
+    }
+}
+
 // ════════════════════════════════════════════════════════════════
 // Conditioning ball→star
 // ════════════════════════════════════════════════════════════════
@@ -697,6 +735,126 @@ impl CoherenceScorer {
 
         // Combinaison pondérée
         0.35 * sum_score + 0.25 * spread_score + 0.25 * pair_score + 0.15 * triplet_score
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v19 F1: StarBallConditioner — conditionneur inverse star→ball
+// ═══════════════════════════════════════════════════════════════════
+
+/// Models P(ball | star_context) — inverse of BallStarConditioner.
+/// If certain star pairs are predicted with high confidence, this adjusts
+/// ball probabilities based on historical co-occurrence.
+pub struct StarBallConditioner {
+    /// table[ctx][ball_idx] = probability of ball given star context
+    table: Vec<Vec<f64>>,
+    /// Star sum thresholds for 3 bins (adaptive terciles)
+    sum_thresholds: [u32; 2],
+    /// Star spread thresholds for 3 bins
+    spread_thresholds: [u8; 2],
+}
+
+impl StarBallConditioner {
+    const N_CONTEXTS: usize = 9; // 3 star_sum × 3 star_spread
+
+    pub fn from_history(draws: &[Draw]) -> Self {
+        let n_balls = 50;
+
+        // Compute adaptive tercile thresholds for star features
+        let mut star_sums: Vec<u32> = draws.iter()
+            .map(|d| d.stars[0] as u32 + d.stars[1] as u32)
+            .collect();
+        star_sums.sort();
+        let sum_thresholds = if star_sums.len() >= 3 {
+            [star_sums[star_sums.len() / 3], star_sums[2 * star_sums.len() / 3]]
+        } else {
+            [8, 16]
+        };
+
+        let mut star_spreads: Vec<u8> = draws.iter()
+            .map(|d| d.stars[1].saturating_sub(d.stars[0]))
+            .collect();
+        star_spreads.sort();
+        let spread_thresholds = if star_spreads.len() >= 3 {
+            [star_spreads[star_spreads.len() / 3], star_spreads[2 * star_spreads.len() / 3]]
+        } else {
+            [3, 7]
+        };
+
+        let mut counts = vec![vec![0.5f64; n_balls]; Self::N_CONTEXTS]; // Laplace prior
+        let mut global_counts = vec![0.5f64; n_balls];
+
+        for (t, draw) in draws.iter().enumerate() {
+            let weight = (-0.02 * t as f64).exp();
+            let star_sum = draw.stars[0] as u32 + draw.stars[1] as u32;
+            let star_spread = draw.stars[1].saturating_sub(draw.stars[0]);
+
+            let sum_bin = if star_sum <= sum_thresholds[0] { 0 }
+                else if star_sum <= sum_thresholds[1] { 1 }
+                else { 2 };
+            let spread_bin = if star_spread <= spread_thresholds[0] { 0 }
+                else if star_spread <= spread_thresholds[1] { 1 }
+                else { 2 };
+            let ctx = sum_bin * 3 + spread_bin;
+
+            for &b in &draw.balls {
+                let idx = (b - 1) as usize;
+                if idx < n_balls {
+                    counts[ctx][idx] += weight;
+                    global_counts[idx] += weight;
+                }
+            }
+        }
+
+        // Normalize and smooth blend
+        let global_total: f64 = global_counts.iter().sum();
+        let global_probs: Vec<f64> = global_counts.iter().map(|&c| c / global_total).collect();
+
+        let mut table = vec![vec![0.0f64; n_balls]; Self::N_CONTEXTS];
+        for ctx in 0..Self::N_CONTEXTS {
+            let ctx_total: f64 = counts[ctx].iter().sum();
+            let local_weight = ctx_total / (ctx_total + 10.0);
+            let local_probs: Vec<f64> = counts[ctx].iter().map(|&c| c / ctx_total).collect();
+            // Blend
+            for i in 0..n_balls {
+                table[ctx][i] = local_weight * local_probs[i] + (1.0 - local_weight) * global_probs[i];
+            }
+            // Normalize
+            let total: f64 = table[ctx].iter().sum();
+            if total > 0.0 {
+                for p in &mut table[ctx] { *p /= total; }
+            }
+        }
+
+        Self { table, sum_thresholds, spread_thresholds }
+    }
+
+    /// Given expected stars, return adjusted ball probabilities.
+    pub fn adjust_balls(&self, stars: &[u8; 2], ball_probs: &[f64]) -> Vec<f64> {
+        let star_sum = stars[0] as u32 + stars[1] as u32;
+        let star_spread = stars[1].saturating_sub(stars[0]);
+
+        let sum_bin = if star_sum <= self.sum_thresholds[0] { 0 }
+            else if star_sum <= self.sum_thresholds[1] { 1 }
+            else { 2 };
+        let spread_bin = if star_spread <= self.spread_thresholds[0] { 0 }
+            else if star_spread <= self.spread_thresholds[1] { 1 }
+            else { 2 };
+        let ctx = sum_bin * 3 + spread_bin;
+
+        let cond = &self.table[ctx];
+        // Blend 70% original + 30% conditional
+        let n = ball_probs.len().min(cond.len());
+        let mut adjusted = vec![0.0f64; n];
+        for i in 0..n {
+            adjusted[i] = 0.70 * ball_probs[i] + 0.30 * cond[i];
+        }
+        // Normalize
+        let sum: f64 = adjusted.iter().sum();
+        if sum > 0.0 {
+            for p in &mut adjusted { *p /= sum; }
+        }
+        adjusted
     }
 }
 
@@ -1157,8 +1315,41 @@ pub struct JackpotResult {
     pub enumeration_size: u64,
     /// Nombre de combinaisons passant le filtre structurel.
     pub filtered_size: u64,
-    /// Facteur d'amélioration vs N tickets uniformes.
+    /// Facteur d'amélioration vs N tickets uniformes (raw).
     pub improvement_factor: f64,
+    /// v19 D2: Facteur d'amélioration ajusté pour l'overlap entre grilles.
+    pub adjusted_improvement_factor: f64,
+}
+
+/// v19 D2: Compute overlap-adjusted improvement factor.
+/// The raw improvement_factor assumes grids are independent.
+/// This adjusts for shared balls/stars between selected grids.
+fn compute_overlap_adjusted_factor(suggestions: &[Suggestion], raw_improvement: f64) -> f64 {
+    if suggestions.len() <= 1 {
+        return raw_improvement;
+    }
+
+    let n = suggestions.len();
+    let mut total_overlap = 0.0f64;
+    let mut pair_count = 0;
+
+    for i in 0..n.min(100) {  // Cap at 100 to avoid O(n²) for large sets
+        for j in (i + 1)..n.min(100) {
+            let common_balls = suggestions[i].balls.iter()
+                .filter(|b| suggestions[j].balls.contains(b))
+                .count();
+            let common_stars = suggestions[i].stars.iter()
+                .filter(|s| suggestions[j].stars.contains(s))
+                .count();
+            total_overlap += (common_balls + common_stars) as f64 / 7.0;
+            pair_count += 1;
+        }
+    }
+
+    let avg_overlap = if pair_count > 0 { total_overlap / pair_count as f64 } else { 0.0 };
+    // effective_n = n * (1 - avg_overlap) — fewer effective independent grids
+    let effective_ratio = (1.0 - avg_overlap).max(0.1);
+    raw_improvement * effective_ratio
 }
 
 /// Coefficient binomial C(n, k).
@@ -1492,12 +1683,16 @@ pub fn generate_suggestions_jackpot(
         let total_prob = mean_score * n_sugg / 139_838_160.0;
         let improvement = mean_score;
 
+        // v19 D2: Overlap-adjusted improvement factor
+        let adjusted = compute_overlap_adjusted_factor(&suggestions, improvement);
+
         Ok(JackpotResult {
             suggestions,
             total_jackpot_probability: total_prob,
             enumeration_size,
             filtered_size,
             improvement_factor: improvement,
+            adjusted_improvement_factor: adjusted,
         })
     } else {
         // Mode collecte : tout garder puis trier
@@ -1592,12 +1787,16 @@ pub fn generate_suggestions_jackpot(
         let total_prob = mean_score * n_sugg / 139_838_160.0;
         let improvement = mean_score;
 
+        // v19 D2: Overlap-adjusted improvement factor
+        let adjusted = compute_overlap_adjusted_factor(&all, improvement);
+
         Ok(JackpotResult {
             suggestions: all,
             total_jackpot_probability: total_prob,
             enumeration_size,
             filtered_size,
             improvement_factor: improvement,
+            adjusted_improvement_factor: adjusted,
         })
     }
 }
@@ -1873,12 +2072,16 @@ pub fn generate_suggestions_gibbs(
     let enumeration_size = (n_chains_eff * total_iter_per_chain) as u64;
     let filtered_size = all_samples.len() as u64;
 
+    // v19 D2: Overlap-adjusted improvement factor
+    let adjusted = compute_overlap_adjusted_factor(&suggestions, improvement);
+
     Ok(JackpotResult {
         suggestions,
         total_jackpot_probability: total_prob,
         enumeration_size,
         filtered_size,
         improvement_factor: improvement,
+        adjusted_improvement_factor: adjusted,
     })
 }
 
@@ -2600,6 +2803,62 @@ pub fn compute_conviction(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// v19 D3: Abstention sélective (Conformal Prediction Set)
+// ═══════════════════════════════════════════════════════════════════
+
+/// Abstention recommendation based on prediction set size.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AbstentionAdvice {
+    /// Model is confident — play
+    Play,
+    /// Medium confidence — play with caution
+    Cautious,
+    /// Low confidence — consider skipping this draw
+    Skip,
+}
+
+/// Compute the conformal prediction set size for the current prediction.
+/// The prediction set contains the smallest number of items that cover
+/// a probability mass of `alpha` (default 0.90).
+///
+/// Returns (ball_set_size, star_set_size, advice).
+pub fn compute_abstention(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    alpha: f64,
+) -> (usize, usize, AbstentionAdvice) {
+    let ball_set = prediction_set_size(ball_probs, alpha);
+    let star_set = prediction_set_size(star_probs, alpha);
+
+    let advice = if ball_set <= 35 && star_set <= 8 {
+        AbstentionAdvice::Play
+    } else if ball_set <= 42 && star_set <= 10 {
+        AbstentionAdvice::Cautious
+    } else {
+        AbstentionAdvice::Skip
+    };
+
+    (ball_set, star_set, advice)
+}
+
+/// Smallest set of items covering `alpha` probability mass.
+fn prediction_set_size(probs: &[f64], alpha: f64) -> usize {
+    let mut indexed: Vec<(usize, f64)> = probs.iter().enumerate().map(|(i, &p)| (i, p)).collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut cumul = 0.0;
+    let mut count = 0;
+    for &(_, p) in &indexed {
+        cumul += p;
+        count += 1;
+        if cumul >= alpha {
+            break;
+        }
+    }
+    count
+}
+
 /// RQA-Adaptive Temperature adjustment (v7, Phase 3.1).
 /// Quand DET élevé (système déterministe) : sharpen agressif justifié.
 /// Quand DET bas : relâcher. Retourne un facteur multiplicatif sur T.
@@ -2738,20 +2997,28 @@ pub fn select_optimal_n_grids(
                 continue;
             }
 
-            // v10: Score = P(5+2) × overlap_bonus géométrique (Liu-Teo 2024)
-            // 1 boule commune = optimal pour la couverture pairwise
+            // v19 F6: Marginal contribution to P(at least 1 win) with overlap bonus.
+            // P(no win before) = Π(1 - p_i) for selected grids
+            // Marginal contribution = P(no win before) × p_candidate
+            let p_no_win_before: f64 = selected.iter()
+                .map(|s| 1.0 - s.score / 139_838_160.0)
+                .product::<f64>()
+                .max(1e-30);
+            let marginal = p_no_win_before * (candidate.score / 139_838_160.0);
+
+            // v10: overlap_bonus géométrique (Liu-Teo 2024)
             let overlap_bonus: f64 = selected.iter().map(|s| {
                 let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
                 match common_b {
-                    0 => 0.70,  // trop divers, pas assez de couverture
-                    1 => 1.25,  // optimal (Liu-Teo 2024: pairwise overlap majorization)
-                    2 => 1.10,  // acceptable
-                    3 => 0.50,  // trop similaire
-                    _ => 0.20,  // quasi-doublon
+                    0 => 0.70,
+                    1 => 1.25,
+                    2 => 1.10,
+                    3 => 0.50,
+                    _ => 0.20,
                 }
-            }).product::<f64>().powf(1.0 / selected.len() as f64); // moyenne géométrique
+            }).product::<f64>().powf(1.0 / selected.len() as f64);
 
-            let score = candidate.score * overlap_bonus;
+            let score = marginal * overlap_bonus;
             if score > best_score {
                 best_score = score;
                 best_idx = Some(ci);
@@ -2771,6 +3038,53 @@ pub fn select_optimal_n_grids(
                 }
             }
             break;
+        }
+    }
+
+    selected
+}
+
+/// G7: Minimax grid selection — maximize worst-case P(5+2) under uncertainty.
+/// epsilon controls the perturbation budget (proportional to model disagreement).
+pub fn select_minimax_grids(
+    candidates: &[Suggestion],
+    n_grids: usize,
+    epsilon: f64,
+    max_common_balls: usize,
+    max_common_stars: usize,
+) -> Vec<Suggestion> {
+    if candidates.is_empty() || n_grids == 0 {
+        return Vec::new();
+    }
+
+    // Worst-case score: reduce each candidate's score proportionally to epsilon
+    // Grids with more diverse number spread are more robust to perturbations
+    let mut scored: Vec<(usize, f64)> = candidates.iter().enumerate().map(|(i, s)| {
+        // Diversity proxy: spread of balls (max - min) normalized
+        let ball_spread = (s.balls[4] - s.balls[0]) as f64 / 49.0;
+        // More spread = more robust to local probability shifts
+        let robustness = 0.5 + 0.5 * ball_spread;
+        let worst_case = s.score * (1.0 - epsilon * (1.0 - robustness));
+        (i, worst_case)
+    }).collect();
+
+    // Sort by worst-case score descending
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Greedy selection with diversity constraints (same as select_optimal_n_grids)
+    let mut selected: Vec<Suggestion> = Vec::with_capacity(n_grids);
+    for (idx, _worst_case_score) in scored {
+        let cand = &candidates[idx];
+        let diverse = selected.iter().all(|s| {
+            let common_balls = cand.balls.iter().filter(|b| s.balls.contains(b)).count();
+            let common_stars = cand.stars.iter().filter(|st| s.stars.contains(st)).count();
+            common_balls <= max_common_balls && common_stars <= max_common_stars
+        });
+        if diverse {
+            selected.push(cand.clone());
+            if selected.len() >= n_grids {
+                break;
+            }
         }
     }
 

@@ -57,6 +57,12 @@ pub mod paquerette;
 pub mod position_mod8;
 pub mod ou_reversion;
 pub mod star_volatility;
+pub mod cycle_model;
+pub mod crf_joint;
+pub mod mapper;
+pub mod tensor_model;
+pub mod definetti;
+pub mod gnn_cooccurrence;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -237,8 +243,14 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         // DayOfWeek retiré v19 (0% balls+stars)
         Box::new(paquerette::PaqueretteMod4Model::default()),     // v18
         Box::new(position_mod8::PositionMod8Model::default()),    // v18
-        Box::new(ou_reversion::OUReversionModel::default()),      // v19
-        Box::new(star_volatility::StarVolatilityModel::default()), // v19
+        Box::new(ou_reversion::OUReversionModel::default()),      // v19 B1
+        Box::new(star_volatility::StarVolatilityModel::default()), // v19 C2
+        Box::new(cycle_model::CycleModel::default()),             // v19 E5
+        Box::new(crf_joint::CrfJointModel::default()),             // v19 G1
+        Box::new(mapper::MapperTdaModel::default()),              // v19 E2
+        Box::new(tensor_model::TensorModel::default()),           // v19 H2
+        Box::new(definetti::DeFinettiModel::default()),           // v19 H6
+        Box::new(gnn_cooccurrence::GnnCooccurrenceModel::default()), // v19 H7
     ]
 }
 
