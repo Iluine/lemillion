@@ -14,13 +14,22 @@ pub fn online_offline_blend(
     pool: Pool,
     window: usize,
 ) -> Vec<f64> {
+    online_offline_blend_with_alpha(offline_dist, draws, pool, window, 0.15)
+}
+
+/// v17: Parametrized version with configurable EWMA alpha.
+pub fn online_offline_blend_with_alpha(
+    offline_dist: &[f64],
+    draws: &[Draw],
+    pool: Pool,
+    window: usize,
+    ewma_alpha: f64,
+) -> Vec<f64> {
     let size = pool.size();
 
     if draws.is_empty() || size == 0 {
         return offline_dist.to_vec();
     }
-
-    let ewma_alpha = 0.15;
     let actual_window = window.min(draws.len());
 
     // EWMA sur les tirages récents (itération chronologique = inversé)

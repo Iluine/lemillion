@@ -60,6 +60,36 @@ pub struct EnsembleWeights {
     /// Matrice de corrélation étoiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub star_correlation_matrix: Vec<(String, String, f64)>,
+    /// v16: Beta-transform parameters for balls (alpha, beta). Identity = (1.0, 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta_balls: Option<(f64, f64)>,
+    /// v16: Beta-transform parameters for stars (alpha, beta). Identity = (1.0, 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub beta_stars: Option<(f64, f64)>,
+    /// v16: Optimal temperature for balls learned by NLL grid-search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimal_t_balls: Option<f64>,
+    /// v16: Optimal temperature for stars learned by NLL grid-search.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimal_t_stars: Option<f64>,
+    /// v17: Learned coherence weight for balls (jackpot scoring). Default: 30.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence_ball_weight: Option<f64>,
+    /// v17: Learned coherence weight for stars (jackpot scoring). Default: 15.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence_star_weight: Option<f64>,
+    /// v17: Learned stacking blend factor for balls. Default: 0.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacking_blend_balls: Option<f64>,
+    /// v17: Learned stacking blend factor for stars. Default: 0.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stacking_blend_stars: Option<f64>,
+    /// v17: Learned online blend EWMA alpha. Default: 0.15.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_ewma_alpha: Option<f64>,
+    /// v17: Learned online blend window size. Default: 8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_window: Option<usize>,
 }
 
 /// Calcule le nombre réel de test points après stride.
@@ -805,6 +835,336 @@ fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
     }
 }
 
+/// v16: Joint optimization of beta-transform + temperature on walk-forward test data.
+/// Returns (beta_balls, beta_stars, optimal_t_balls, optimal_t_stars).
+/// Uses cached ensemble distributions to avoid recomputing model predictions for each grid point.
+pub fn optimize_post_pooling(
+    combiner: &super::EnsembleCombiner,
+    draws: &[Draw],
+    n_test: usize,
+) -> (Option<(f64, f64)>, Option<(f64, f64)>, Option<f64>, Option<f64>) {
+    let n_test = n_test.min(draws.len().saturating_sub(30));
+    if n_test < 5 {
+        return (None, None, None, None);
+    }
+
+    // Collect ensemble distributions for test draws (expensive, done once)
+    let mut ball_dists: Vec<(Vec<f64>, [u8; 5])> = Vec::with_capacity(n_test);
+    let mut star_dists: Vec<(Vec<f64>, [u8; 2])> = Vec::with_capacity(n_test);
+
+    for t in 0..n_test {
+        let context = &draws[t + 1..];
+        if context.len() < 30 {
+            continue;
+        }
+        let ball_pred = combiner.predict(context, Pool::Balls);
+        let star_pred = combiner.predict(context, Pool::Stars);
+        ball_dists.push((ball_pred.distribution, draws[t].balls));
+        star_dists.push((star_pred.distribution, draws[t].stars));
+    }
+
+    if ball_dists.is_empty() {
+        return (None, None, None, None);
+    }
+
+    // v16b: constrain alpha >= 1 (only sharpening, never flattening).
+    // NLL optimization with alpha<1 flattens distributions, which hurts jackpot mode.
+    let alphas: &[f64] = &[1.0, 1.1, 1.25, 1.5, 2.0, 2.5, 3.0];
+    let betas: &[f64] = &[0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0];
+    let temps: &[f64] = &[0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.50, 0.70, 1.0];
+
+    // Optimize balls
+    let (beta_b, t_b) = {
+        let mut best_nll = f64::INFINITY;
+        let mut best_ab = (1.0, 1.0);
+        let mut best_t = 1.0;
+        for &alpha in alphas {
+            for &beta in betas {
+                for &temp in temps {
+                    let nll = score_for_params(&ball_dists, alpha, beta, temp, |actual| actual.as_slice());
+                    if nll < best_nll {
+                        best_nll = nll;
+                        best_ab = (alpha, beta);
+                        best_t = temp;
+                    }
+                }
+            }
+        }
+        (best_ab, best_t)
+    };
+
+    // Optimize stars
+    let (beta_s, t_s) = {
+        let mut best_nll = f64::INFINITY;
+        let mut best_ab = (1.0, 1.0);
+        let mut best_t = 1.0;
+        for &alpha in alphas {
+            for &beta in betas {
+                for &temp in temps {
+                    let nll = score_for_params(&star_dists, alpha, beta, temp, |actual| actual.as_slice());
+                    if nll < best_nll {
+                        best_nll = nll;
+                        best_ab = (alpha, beta);
+                        best_t = temp;
+                    }
+                }
+            }
+        }
+        (best_ab, best_t)
+    };
+
+    // Only return non-identity transforms
+    let beta_balls = if (beta_b.0 - 1.0).abs() > 0.01 || (beta_b.1 - 1.0).abs() > 0.01 {
+        Some(beta_b)
+    } else {
+        None
+    };
+    let beta_stars = if (beta_s.0 - 1.0).abs() > 0.01 || (beta_s.1 - 1.0).abs() > 0.01 {
+        Some(beta_s)
+    } else {
+        None
+    };
+    let optimal_t_balls = if (t_b - 1.0).abs() > 0.01 { Some(t_b) } else { None };
+    let optimal_t_stars = if (t_s - 1.0).abs() > 0.01 { Some(t_s) } else { None };
+
+    (beta_balls, beta_stars, optimal_t_balls, optimal_t_stars)
+}
+
+/// Compute score for a given (alpha, beta, temperature) on cached distributions.
+/// Uses a blend of NLL and Bayesian score (product of probabilities assigned to correct numbers).
+/// The Bayesian score rewards concentration while NLL prevents catastrophic misses.
+fn score_for_params<T, F>(dists: &[(Vec<f64>, T)], alpha: f64, beta: f64, temp: f64, numbers_fn: F) -> f64
+where F: Fn(&T) -> &[u8] {
+    let inv_t = 1.0 / temp;
+    let mut total_log_score = 0.0f64;
+    let n_dists = dists.len();
+    for (raw_dist, actual) in dists {
+        let mut dist = raw_dist.clone();
+        super::beta_transform(&mut dist, alpha, beta);
+        let scaled: Vec<f64> = dist.iter().map(|&p| p.max(1e-15).powf(inv_t)).collect();
+        let total: f64 = scaled.iter().sum();
+        if total <= 0.0 { continue; }
+        let norm: Vec<f64> = scaled.iter().map(|s| s / total).collect();
+        let uniform_p = 1.0 / norm.len() as f64;
+        // Bayesian score: product of (prob / uniform) for correct numbers
+        // In log space: sum of log(prob / uniform)
+        for &n in numbers_fn(actual) {
+            let idx = (n as usize).saturating_sub(1);
+            if idx < norm.len() {
+                let ratio = norm[idx] / uniform_p;
+                total_log_score += ratio.max(1e-15).ln();
+            }
+        }
+    }
+    // Return negative (we minimize, so negate the score we want to maximize)
+    // Average per draw for stability
+    -(total_log_score / n_dists.max(1) as f64)
+}
+
+/// v17: Optimize coherence weights by walk-forward scoring.
+/// Evaluates different (CW, SCW) pairs by scoring actual draws.
+pub fn optimize_coherence_weights(
+    combiner: &super::EnsembleCombiner,
+    draws: &[Draw],
+    n_test: usize,
+) -> (f64, f64) {
+    let n_test = n_test.min(draws.len().saturating_sub(30));
+    if n_test < 10 {
+        return (30.0, 15.0);
+    }
+
+    // Collect test draw data: (ball_bayes, ball_coherence, star_bayes, star_coherence)
+    let mut data: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(n_test);
+
+    for t in 0..n_test {
+        let context = &draws[t + 1..];
+        if context.len() < 30 { continue; }
+
+        let ball_dist = combiner.predict(context, Pool::Balls).distribution;
+        let star_dist = combiner.predict(context, Pool::Stars).distribution;
+
+        let uniform_ball = 1.0 / 50.0;
+        let uniform_star = 1.0 / 12.0;
+        let ball_score: f64 = draws[t].balls.iter()
+            .map(|&b| (ball_dist[(b - 1) as usize] / uniform_ball).max(1e-30).ln())
+            .sum();
+        let star_score: f64 = draws[t].stars.iter()
+            .map(|&s| (star_dist[(s - 1) as usize] / uniform_star).max(1e-30).ln())
+            .sum();
+
+        let coherence = crate::sampler::CoherenceScorer::from_history(context, Pool::Balls);
+        let ball_coh = (coherence.score_balls(&draws[t].balls) - 0.5).clamp(-0.5, 0.5);
+        let star_coh_scorer = crate::sampler::StarCoherenceScorer::from_history(context);
+        let star_coh = (star_coh_scorer.score_star_pair(&draws[t].stars) - 0.5).clamp(-0.5, 0.5);
+
+        data.push((ball_score, ball_coh, star_score, star_coh));
+    }
+
+    if data.len() < 5 {
+        return (30.0, 15.0);
+    }
+
+    // Grid-search: maximize penalized mean of total scores (Sharpe-like)
+    let cw_candidates = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 75.0];
+    let mut best_cw = 30.0;
+    let mut best_metric = f64::NEG_INFINITY;
+    let n = data.len() as f64;
+
+    for &cw in &cw_candidates {
+        let scores: Vec<f64> = data.iter().map(|(b, c, _, _)| b + cw * c).collect();
+        let mean = scores.iter().sum::<f64>() / n;
+        let var = scores.iter().map(|&s| (s - mean).powi(2)).sum::<f64>() / n;
+        let metric = mean - 0.3 * var.sqrt();
+        if metric > best_metric {
+            best_metric = metric;
+            best_cw = cw;
+        }
+    }
+
+    let scw_candidates = [0.0, 5.0, 10.0, 15.0, 20.0, 30.0];
+    let mut best_scw = 15.0;
+    let mut best_metric_s = f64::NEG_INFINITY;
+
+    for &scw in &scw_candidates {
+        let scores: Vec<f64> = data.iter().map(|(_, _, s, c)| s + scw * c).collect();
+        let mean = scores.iter().sum::<f64>() / n;
+        let var = scores.iter().map(|&s| (s - mean).powi(2)).sum::<f64>() / n;
+        let metric = mean - 0.3 * var.sqrt();
+        if metric > best_metric_s {
+            best_metric_s = metric;
+            best_scw = scw;
+        }
+    }
+
+    (best_cw, best_scw)
+}
+
+/// v17: Optimize stacking blend factors by walk-forward log-likelihood.
+pub fn optimize_stacking_blend(
+    combiner: &super::EnsembleCombiner,
+    draws: &[Draw],
+    stacking_balls: Option<&crate::ensemble::stacking::StackingWeights>,
+    stacking_stars: Option<&crate::ensemble::stacking::StackingWeights>,
+    n_test: usize,
+) -> (f64, f64) {
+    let n_test = n_test.min(draws.len().saturating_sub(30));
+    if n_test < 5 || (stacking_balls.is_none() && stacking_stars.is_none()) {
+        return (0.6, 0.6);
+    }
+
+    // Cache standard and full-stacked predictions
+    let mut ball_data: Vec<(Vec<f64>, Vec<f64>, [u8; 5])> = Vec::new();
+    let mut star_data: Vec<(Vec<f64>, Vec<f64>, [u8; 2])> = Vec::new();
+
+    for t in 0..n_test {
+        let context = &draws[t + 1..];
+        if context.len() < 30 { continue; }
+
+        if let Some(sw) = stacking_balls {
+            let standard = combiner.predict(context, Pool::Balls).distribution;
+            let stacked = combiner.predict_stacked(context, Pool::Balls, sw, 1.0).distribution;
+            ball_data.push((standard, stacked, draws[t].balls));
+        }
+        if let Some(sw) = stacking_stars {
+            let standard = combiner.predict(context, Pool::Stars).distribution;
+            let stacked = combiner.predict_stacked(context, Pool::Stars, sw, 1.0).distribution;
+            star_data.push((standard, stacked, draws[t].stars));
+        }
+    }
+
+    let blends = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+
+    let best_ball_blend = if !ball_data.is_empty() {
+        let mut best = 0.6;
+        let mut best_ll = f64::NEG_INFINITY;
+        for &blend in &blends {
+            let ll: f64 = ball_data.iter().map(|(standard, stacked, actual)| {
+                actual.iter().map(|&b| {
+                    let idx = (b - 1) as usize;
+                    let p = blend * stacked[idx] + (1.0 - blend) * standard[idx];
+                    p.max(1e-15).ln()
+                }).sum::<f64>()
+            }).sum();
+            if ll > best_ll { best_ll = ll; best = blend; }
+        }
+        best
+    } else {
+        0.6
+    };
+
+    let best_star_blend = if !star_data.is_empty() {
+        let mut best = 0.6;
+        let mut best_ll = f64::NEG_INFINITY;
+        for &blend in &blends {
+            let ll: f64 = star_data.iter().map(|(standard, stacked, actual)| {
+                actual.iter().map(|&s| {
+                    let idx = (s - 1) as usize;
+                    let p = blend * stacked[idx] + (1.0 - blend) * standard[idx];
+                    p.max(1e-15).ln()
+                }).sum::<f64>()
+            }).sum();
+            if ll > best_ll { best_ll = ll; best = blend; }
+        }
+        best
+    } else {
+        0.6
+    };
+
+    (best_ball_blend, best_star_blend)
+}
+
+/// v17: Optimize online blend parameters (EWMA alpha and window) by walk-forward LL.
+pub fn optimize_online_blend(
+    combiner: &super::EnsembleCombiner,
+    draws: &[Draw],
+    n_test: usize,
+) -> (f64, usize) {
+    let n_test = n_test.min(draws.len().saturating_sub(30));
+    if n_test < 5 {
+        return (0.15, 8);
+    }
+
+    // Cache offline predictions
+    let mut ball_data: Vec<(Vec<f64>, usize, [u8; 5])> = Vec::new();
+    for t in 0..n_test {
+        let context = &draws[t + 1..];
+        if context.len() < 30 { continue; }
+        let offline = combiner.predict(context, Pool::Balls).distribution;
+        ball_data.push((offline, t + 1, draws[t].balls));
+    }
+
+    if ball_data.is_empty() {
+        return (0.15, 8);
+    }
+
+    let alphas = [0.05, 0.10, 0.15, 0.20, 0.30];
+    let windows = [5, 8, 10, 15, 20];
+    let mut best_alpha = 0.15;
+    let mut best_window = 8usize;
+    let mut best_ll = f64::NEG_INFINITY;
+
+    for &alpha in &alphas {
+        for &window in &windows {
+            let ll: f64 = ball_data.iter().map(|(offline, start_idx, actual)| {
+                let context = &draws[*start_idx..];
+                let blended = super::online::online_offline_blend_with_alpha(
+                    offline, context, Pool::Balls, window, alpha,
+                );
+                actual.iter().map(|&b| {
+                    blended[(b - 1) as usize].max(1e-15).ln()
+                }).sum::<f64>()
+            }).sum();
+            if ll > best_ll {
+                best_ll = ll;
+                best_alpha = alpha;
+                best_window = window;
+            }
+        }
+    }
+
+    (best_alpha, best_window)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1285,6 +1645,16 @@ mod tests {
             stacking_stars: None,
             correlation_matrix: Vec::new(),
             star_correlation_matrix: Vec::new(),
+            beta_balls: None,
+            beta_stars: None,
+            optimal_t_balls: None,
+            optimal_t_stars: None,
+            coherence_ball_weight: None,
+            coherence_star_weight: None,
+            stacking_blend_balls: None,
+            stacking_blend_stars: None,
+            online_ewma_alpha: None,
+            online_window: None,
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

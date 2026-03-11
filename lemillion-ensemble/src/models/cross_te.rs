@@ -77,6 +77,42 @@ fn transfer_entropy_lagged(source: &[bool], target: &[bool], lag: usize) -> f64 
 }
 
 
+/// Find optimal lag via cross-correlation (delay-sensitive TE, v17).
+fn find_optimal_lag(source: &[bool], target: &[bool], max_lag: usize) -> (usize, f64) {
+    let n = source.len().min(target.len());
+    let mut best_lag = 1usize;
+    let mut best_xcorr = 0.0f64;
+
+    for lag in 1..=max_lag.min(n.saturating_sub(3)) {
+        let len = n - lag;
+        if len < 5 { continue; }
+
+        let src_mean: f64 = source[..len].iter().map(|&b| b as u8 as f64).sum::<f64>() / len as f64;
+        let tgt_mean: f64 = target[lag..n].iter().map(|&b| b as u8 as f64).sum::<f64>() / len as f64;
+
+        let mut cov = 0.0f64;
+        let mut var_s = 0.0f64;
+        let mut var_t = 0.0f64;
+        for i in 0..len {
+            let s = source[i] as u8 as f64 - src_mean;
+            let t = target[i + lag] as u8 as f64 - tgt_mean;
+            cov += s * t;
+            var_s += s * s;
+            var_t += t * t;
+        }
+
+        let denom = (var_s * var_t).sqrt();
+        let xcorr = if denom > 1e-15 { (cov / denom).abs() } else { 0.0 };
+
+        if xcorr > best_xcorr {
+            best_xcorr = xcorr;
+            best_lag = lag;
+        }
+    }
+
+    (best_lag, best_xcorr)
+}
+
 /// Baseline TE lagué via permutation (5 shuffles).
 fn baseline_te_lagged(source: &[bool], target: &[bool], lag: usize, seed: u64) -> f64 {
     let n_shuffles = 5;
@@ -133,15 +169,22 @@ impl ForecastModel for CrossTEModel {
             }
         }
 
-        // v15: True lagged TE — compute at lags [1,2,3], keep best
+        // v17: Variable-lag TE — find optimal lag via cross-correlation
         let mut significant_pairs: Vec<CausalPair> = Vec::new();
-        let test_lags: [usize; 3] = [1, 2, 3];
 
         match pool {
             Pool::Balls => {
                 for target_num in 1..=50u8 {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_star, ref src_series) in &star_series {
+                        // v17: Variable-lag TE — find optimal lag via cross-correlation
+                        let (optimal_lag, xcorr_strength) = find_optimal_lag(src_series, target_series, 10);
+                        let test_lags: Vec<usize> = {
+                            let mut lags = vec![optimal_lag];
+                            if optimal_lag > 1 { lags.push(optimal_lag - 1); }
+                            if optimal_lag < 10 { lags.push(optimal_lag + 1); }
+                            lags
+                        };
                         let mut best_te = 0.0f64;
                         let mut best_lag = 1usize;
                         for &lag in &test_lags {
@@ -150,7 +193,9 @@ impl ForecastModel for CrossTEModel {
                         }
                         let seed = source_star as u64 * 1000 + target_num as u64;
                         let baseline = baseline_te_lagged(src_series, target_series, best_lag, seed);
-                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
+                        // v17: Cross-correlation-weighted threshold (stronger xcorr → easier detection)
+                        let effective_threshold = self.te_threshold_factor / (1.0 + xcorr_strength);
+                        if best_te > effective_threshold * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
                                 source: source_star, target: target_num,
                                 te_value: best_te, best_lag,
@@ -164,6 +209,14 @@ impl ForecastModel for CrossTEModel {
                     let target_series = &all_target_series[(target_num - 1) as usize];
                     for &(source_star, ref src_series) in &star_series {
                         if source_star == target_num { continue; }
+                        // v17: Variable-lag TE — find optimal lag via cross-correlation
+                        let (optimal_lag, xcorr_strength) = find_optimal_lag(src_series, target_series, 10);
+                        let test_lags: Vec<usize> = {
+                            let mut lags = vec![optimal_lag];
+                            if optimal_lag > 1 { lags.push(optimal_lag - 1); }
+                            if optimal_lag < 10 { lags.push(optimal_lag + 1); }
+                            lags
+                        };
                         let mut best_te = 0.0f64;
                         let mut best_lag = 1usize;
                         for &lag in &test_lags {
@@ -172,7 +225,9 @@ impl ForecastModel for CrossTEModel {
                         }
                         let seed = source_star as u64 * 1000 + target_num as u64;
                         let baseline = baseline_te_lagged(src_series, target_series, best_lag, seed);
-                        if best_te > self.te_threshold_factor * baseline.max(1e-6) {
+                        // v17: Cross-correlation-weighted threshold (stronger xcorr → easier detection)
+                        let effective_threshold = self.te_threshold_factor / (1.0 + xcorr_strength);
+                        if best_te > effective_threshold * baseline.max(1e-6) {
                             significant_pairs.push(CausalPair {
                                 source: source_star, target: target_num,
                                 te_value: best_te, best_lag,

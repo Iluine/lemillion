@@ -3,6 +3,7 @@ use std::cmp::Ordering as CmpOrdering;
 
 use anyhow::Result;
 use rand::SeedableRng;
+use rand::RngExt;
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::StdRng;
@@ -1215,6 +1216,23 @@ pub fn optimal_subset_k(ball_probs: &[f64], n_grids: usize) -> usize {
     best_k
 }
 
+/// v17: Conformal-adaptive K selection.
+/// Falls back to optimal_subset_k when no calibration scores are available.
+pub fn conformal_subset_k(
+    ball_probs: &[f64],
+    n_grids: usize,
+    calibration_scores: Option<&[f64]>,
+) -> usize {
+    if let Some(scores) = calibration_scores {
+        if !scores.is_empty() {
+            let k = crate::conformal::conformal_k(ball_probs, scores, Pool::Balls);
+            // Never go below the original optimal_subset_k
+            return k.max(optimal_subset_k(ball_probs, n_grids).min(k + 10));
+        }
+    }
+    optimal_subset_k(ball_probs, n_grids)
+}
+
 /// Calcule K_balls et K_stars adaptatifs pour que C(K_b,5)×C(K_s,2) >= 3×count.
 fn compute_adaptive_k(count: usize) -> (usize, usize) {
     let target = 3 * count as u64;
@@ -1275,7 +1293,11 @@ pub fn generate_suggestions_jackpot(
     conditioner: Option<&BallStarConditioner>,
     _neural_scorer: Option<&crate::models::neural_scorer::NeuralScorer>,
     star_coherence: Option<&StarCoherenceScorer>,
+    coherence_ball_w: Option<f64>,
+    coherence_star_w: Option<f64>,
 ) -> Result<JackpotResult> {
+    let cw = coherence_ball_w.unwrap_or(COHERENCE_WEIGHT);
+    let scw = coherence_star_w.unwrap_or(STAR_COHERENCE_WEIGHT);
     let uniform_ball = 1.0 / ball_probs.len() as f64;
     let uniform_star = 1.0 / star_probs.len() as f64;
 
@@ -1402,7 +1424,7 @@ pub fn generate_suggestions_jackpot(
                             // Coherence ne dépend que des boules → hors boucle étoiles
                             let coherence_bonus = if let Some(cs) = coherence {
                                 let c = cs.score_balls(&balls);
-                                COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+                                cw * (c - 0.5).clamp(-0.5, 0.5)
                             } else {
                                 0.0
                             };
@@ -1419,7 +1441,7 @@ pub fn generate_suggestions_jackpot(
                                 };
                                 let star_coherence_bonus = if let Some(scs) = star_coherence {
                                     let sc = scs.score_star_pair(&stars);
-                                    STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+                                    scw * (sc - 0.5).clamp(-0.5, 0.5)
                                 } else {
                                     0.0
                                 };
@@ -1458,6 +1480,11 @@ pub fn generate_suggestions_jackpot(
         suggestions.sort_by(|a, b| {
             b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
         });
+
+        // Recalculer le score bayésien pur (sans coherence bonus) pour les métriques
+        for s in &mut suggestions {
+            s.score = compute_bayesian_score(&s.balls, &s.stars, ball_probs, star_probs);
+        }
 
         // score = prod(prob/uniform) = facteur d'amélioration vs uniforme par grille
         // P(5+2) par grille sous le modèle = score / 139_838_160
@@ -1516,7 +1543,7 @@ pub fn generate_suggestions_jackpot(
 
                             let coherence_bonus = if let Some(cs) = coherence {
                                 let c = cs.score_balls(&balls);
-                                COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+                                cw * (c - 0.5).clamp(-0.5, 0.5)
                             } else {
                                 0.0
                             };
@@ -1554,6 +1581,11 @@ pub fn generate_suggestions_jackpot(
         });
         all.truncate(count);
 
+        // Recalculer le score bayésien pur (sans coherence bonus) pour les métriques
+        for s in &mut all {
+            s.score = compute_bayesian_score(&s.balls, &s.stars, ball_probs, star_probs);
+        }
+
         // score = prod(prob/uniform) = facteur d'amélioration vs uniforme par grille
         // P(5+2) par grille sous le modèle = score / 139_838_160
         let n_sugg = all.len() as f64;
@@ -1569,6 +1601,355 @@ pub fn generate_suggestions_jackpot(
             improvement_factor: improvement,
         })
     }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Mode Gibbs : exploration MCMC de la distribution jointe P(b1,...,b5,s1,s2)
+// ═══════════════════════════════════════════════════════════════
+
+/// Generates top-N grids via Gibbs sampling of the joint distribution P(b1,...,b5,s1,s2).
+///
+/// Complements `generate_suggestions_jackpot` (exhaustive enumeration) by exploring the
+/// joint distribution more fluidly via MCMC. Each chain starts from the optimal grid
+/// (perturbed for diversity), then performs component-wise Gibbs sweeps.
+///
+/// Scoring matches `generate_suggestions_jackpot`:
+/// `log_ball_score + log_star_score + coherence_bonus + star_coherence_bonus`
+/// with joint model blending (marginal/joint adaptive weight).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_suggestions_gibbs(
+    ball_probs: &[f64],
+    star_probs: &[f64],
+    count: usize,
+    filter: Option<&StructuralFilter>,
+    coherence: Option<&CoherenceScorer>,
+    joint_model: Option<&crate::models::joint::JointConditionalModel>,
+    star_pair_probs: Option<&[f64; 66]>,
+    conditioner: Option<&BallStarConditioner>,
+    star_coherence: Option<&StarCoherenceScorer>,
+    n_chains: usize,
+    temperature: f64,
+    seed: u64,
+) -> Result<JackpotResult> {
+    let uniform_ball = 1.0 / ball_probs.len() as f64;
+    let uniform_star = 1.0 / star_probs.len() as f64;
+    let uniform_pair = 1.0 / 66.0;
+
+    let burn_in: usize = 200;
+    let thin: usize = 10;
+    let n_chains_eff = n_chains.max(1);
+    let samples_per_chain = (count / n_chains_eff).max(1);
+    let total_iter_per_chain = burn_in + samples_per_chain * thin;
+
+    // Compute optimal starting grid: top-5 balls, top-2 stars by probability
+    let mut ball_indices_sorted: Vec<usize> = (0..ball_probs.len()).collect();
+    ball_indices_sorted.sort_by(|&a, &b| {
+        ball_probs[b].partial_cmp(&ball_probs[a]).unwrap_or(CmpOrdering::Equal)
+    });
+    let mut star_indices_sorted: Vec<usize> = (0..star_probs.len()).collect();
+    star_indices_sorted.sort_by(|&a, &b| {
+        star_probs[b].partial_cmp(&star_probs[a]).unwrap_or(CmpOrdering::Equal)
+    });
+
+    let mut optimal_balls = [0u8; 5];
+    for (i, &idx) in ball_indices_sorted.iter().take(5).enumerate() {
+        optimal_balls[i] = (idx + 1) as u8;
+    }
+    optimal_balls.sort();
+
+    let mut optimal_stars = [0u8; 2];
+    for (i, &idx) in star_indices_sorted.iter().take(2).enumerate() {
+        optimal_stars[i] = (idx + 1) as u8;
+    }
+    optimal_stars.sort();
+
+    // Pre-compute log ball probabilities (ratio vs uniform)
+    let log_ball_probs: Vec<f64> = (0..ball_probs.len())
+        .map(|i| (ball_probs[i] / uniform_ball).max(1e-30).ln())
+        .collect();
+
+    // Collect all samples from all chains
+    let mut all_samples: Vec<([u8; 5], [u8; 2], f64)> =
+        Vec::with_capacity(n_chains_eff * samples_per_chain);
+
+    for chain_idx in 0..n_chains_eff {
+        let mut rng = StdRng::seed_from_u64(seed.wrapping_add(chain_idx as u64));
+
+        // Initialize chain state: start from optimal, perturb for chain_idx > 0
+        let mut balls = optimal_balls;
+        let mut stars = optimal_stars;
+
+        if chain_idx > 0 {
+            // Perturb 1-2 balls for starting diversity
+            let n_perturb = if chain_idx % 2 == 0 { 1 } else { 2 };
+            for _ in 0..n_perturb {
+                let slot = rng.random_range(0usize..5);
+                // Pick a new ball not already in the set, weighted by ball_probs
+                let mut candidate_weights: Vec<f64> = Vec::with_capacity(50);
+                let mut candidate_nums: Vec<u8> = Vec::with_capacity(50);
+                for num in 1u8..=50 {
+                    if !balls.contains(&num) {
+                        candidate_weights.push(ball_probs[(num - 1) as usize].max(1e-30));
+                        candidate_nums.push(num);
+                    }
+                }
+                if let Ok(dist) = WeightedIndex::new(&candidate_weights) {
+                    let chosen = candidate_nums[dist.sample(&mut rng)];
+                    balls[slot] = chosen;
+                    balls.sort();
+                }
+            }
+        }
+
+        // Run Gibbs sampling chain
+        for iter in 0..total_iter_per_chain {
+            // Choose a random position: 0-4 = ball slot, 5-6 = star slot
+            let pos = rng.random_range(0usize..7);
+
+            if pos < 5 {
+                // Ball slot: compute conditional for each candidate ball (1-50)
+                // excluding the other 4 selected balls
+                let other_balls: Vec<u8> = balls
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != pos)
+                    .map(|(_, &b)| b)
+                    .collect();
+
+                let mut cand_weights: Vec<f64> = Vec::with_capacity(50);
+                let mut cand_nums: Vec<u8> = Vec::with_capacity(50);
+
+                for num in 1u8..=50 {
+                    if other_balls.contains(&num) {
+                        continue;
+                    }
+
+                    // Marginal probability component
+                    let marginal_log = log_ball_probs[(num - 1) as usize];
+
+                    // Joint model bonus if available
+                    let joint_bonus = if let Some(jm) = joint_model {
+                        let mut test_balls = [0u8; 5];
+                        for (i, &b) in other_balls.iter().enumerate() {
+                            test_balls[i] = b;
+                        }
+                        test_balls[4] = num;
+                        test_balls.sort();
+
+                        let (joint_log, joint_conf) =
+                            jm.score_balls_with_confidence(&test_balls);
+                        if joint_log.is_finite() && joint_log > -100.0 {
+                            let joint_weight = 0.15 + 0.25 * joint_conf;
+                            joint_weight * joint_log
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+
+                    let log_weight = marginal_log + joint_bonus;
+                    // Apply temperature: weight = exp(log_weight / temperature)
+                    let weight = (log_weight / temperature).exp().max(1e-30);
+                    cand_weights.push(weight);
+                    cand_nums.push(num);
+                }
+
+                // Sample from conditional distribution
+                if let Ok(dist) = WeightedIndex::new(&cand_weights) {
+                    let chosen = cand_nums[dist.sample(&mut rng)];
+                    balls[pos] = chosen;
+                    balls.sort();
+                }
+            } else {
+                // Star slot (pos - 5 = 0 or 1)
+                let star_slot = pos - 5;
+                let other_star = stars[1 - star_slot];
+
+                let mut cand_weights: Vec<f64> = Vec::with_capacity(12);
+                let mut cand_nums: Vec<u8> = Vec::with_capacity(12);
+
+                for num in 1u8..=12 {
+                    if num == other_star {
+                        continue;
+                    }
+
+                    let log_weight = if let Some(pp) = star_pair_probs {
+                        // Use pair probabilities for star scoring
+                        let (s1, s2) = if num < other_star {
+                            (num, other_star)
+                        } else {
+                            (other_star, num)
+                        };
+                        let pidx = crate::models::star_pair::pair_index(s1, s2);
+                        (pp[pidx] / uniform_pair).max(1e-30).ln()
+                    } else {
+                        // Marginal star probability
+                        (star_probs[(num - 1) as usize] / uniform_star).max(1e-30).ln()
+                    };
+
+                    let weight = (log_weight / temperature).exp().max(1e-30);
+                    cand_weights.push(weight);
+                    cand_nums.push(num);
+                }
+
+                if let Ok(dist) = WeightedIndex::new(&cand_weights) {
+                    let chosen = cand_nums[dist.sample(&mut rng)];
+                    stars[star_slot] = chosen;
+                    stars.sort();
+                }
+            }
+
+            // After burn-in, collect a sample every `thin` iterations
+            if iter >= burn_in && (iter - burn_in) % thin == 0 {
+                // Apply structural filter
+                if let Some(f) = filter {
+                    if !f.accept_balls(&balls) {
+                        continue;
+                    }
+                }
+
+                // Score the current state using the full scoring formula
+                let score = gibbs_score_grid(
+                    &balls,
+                    &stars,
+                    &log_ball_probs,
+                    uniform_star,
+                    uniform_pair,
+                    coherence,
+                    joint_model,
+                    star_pair_probs,
+                    conditioner,
+                    star_coherence,
+                    star_probs,
+                );
+
+                all_samples.push((balls, stars, score));
+            }
+        }
+    }
+
+    // Deduplicate: same balls+stars -> keep highest score
+    let mut dedup_map: HashMap<([u8; 5], [u8; 2]), f64> = HashMap::new();
+    for &(balls, stars, score) in &all_samples {
+        let entry = dedup_map.entry((balls, stars)).or_insert(f64::NEG_INFINITY);
+        if score > *entry {
+            *entry = score;
+        }
+    }
+
+    // Convert to suggestions (score stored as log, convert to linear for output)
+    let mut suggestions: Vec<Suggestion> = dedup_map
+        .into_iter()
+        .map(|((balls, stars), log_score)| Suggestion {
+            balls,
+            stars,
+            score: log_score.exp(),
+        })
+        .collect();
+
+    // Sort by score descending, take top count
+    suggestions.sort_by(|a, b| {
+        b.score.partial_cmp(&a.score).unwrap_or(CmpOrdering::Equal)
+    });
+    suggestions.truncate(count);
+
+    // Recalculer le score bayésien pur (sans coherence bonus) pour les métriques
+    for s in &mut suggestions {
+        s.score = compute_bayesian_score(&s.balls, &s.stars, ball_probs, star_probs);
+    }
+
+    // Compute JackpotResult stats (same formula as generate_suggestions_jackpot)
+    let n_sugg = suggestions.len().max(1) as f64;
+    let mean_score = suggestions.iter().map(|s| s.score).sum::<f64>() / n_sugg;
+    let total_prob = mean_score * n_sugg / 139_838_160.0;
+    let improvement = mean_score;
+
+    let enumeration_size = (n_chains_eff * total_iter_per_chain) as u64;
+    let filtered_size = all_samples.len() as u64;
+
+    Ok(JackpotResult {
+        suggestions,
+        total_jackpot_probability: total_prob,
+        enumeration_size,
+        filtered_size,
+        improvement_factor: improvement,
+    })
+}
+
+/// Score a grid using the same formula as `generate_suggestions_jackpot`.
+/// Returns log-space score: log_ball_score + log_star_score + coherence_bonus + star_coherence_bonus.
+#[allow(clippy::too_many_arguments)]
+fn gibbs_score_grid(
+    balls: &[u8; 5],
+    stars: &[u8; 2],
+    log_ball_probs: &[f64],
+    uniform_star: f64,
+    uniform_pair: f64,
+    coherence: Option<&CoherenceScorer>,
+    joint_model: Option<&crate::models::joint::JointConditionalModel>,
+    star_pair_probs: Option<&[f64; 66]>,
+    conditioner: Option<&BallStarConditioner>,
+    star_coherence: Option<&StarCoherenceScorer>,
+    star_probs: &[f64],
+) -> f64 {
+    // Ball score: sum of log(prob/uniform) for each ball
+    let marginal_log_ball_score: f64 = balls
+        .iter()
+        .map(|&b| log_ball_probs[(b - 1) as usize])
+        .sum();
+
+    // Joint model blend (same as generate_suggestions_jackpot)
+    let log_ball_score = if let Some(jm) = joint_model {
+        let (joint_log, joint_conf) = jm.score_balls_with_confidence(balls);
+        if joint_log.is_finite() && joint_log > -100.0 {
+            let joint_weight = 0.15 + 0.25 * joint_conf; // [0.15, 0.40]
+            let marginal_weight = 1.0 - joint_weight;
+            marginal_weight * marginal_log_ball_score + joint_weight * joint_log
+        } else {
+            marginal_log_ball_score
+        }
+    } else {
+        marginal_log_ball_score
+    };
+
+    // Star score
+    let base_star_score = if let Some(pp) = star_pair_probs {
+        let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+        pp[pidx] / uniform_pair
+    } else {
+        (star_probs[(stars[0] - 1) as usize] / uniform_star)
+            * (star_probs[(stars[1] - 1) as usize] / uniform_star)
+    };
+
+    let log_star_score = if let Some(cond) = conditioner {
+        let cond_probs = cond.conditioned_pair_probs(balls);
+        let cond_blend = cond.adaptive_blend(balls);
+        let pidx = crate::models::star_pair::pair_index(stars[0], stars[1]);
+        let conditioned = cond_probs[pidx] / uniform_pair;
+        let blended = cond_blend * conditioned + (1.0 - cond_blend) * base_star_score;
+        blended.max(1e-30).ln()
+    } else {
+        base_star_score.max(1e-30).ln()
+    };
+
+    // Coherence bonus (balls only)
+    let coherence_bonus = if let Some(cs) = coherence {
+        let c = cs.score_balls(balls);
+        COHERENCE_WEIGHT * (c - 0.5).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+
+    // Star coherence bonus
+    let star_coherence_bonus = if let Some(scs) = star_coherence {
+        let sc = scs.score_star_pair(stars);
+        STAR_COHERENCE_WEIGHT * (sc - 0.5).clamp(-0.5, 0.5)
+    } else {
+        0.0
+    };
+
+    log_ball_score + log_star_score + coherence_bonus + star_coherence_bonus
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2389,6 +2770,123 @@ pub fn select_optimal_n_grids(
     selected
 }
 
+/// v17: Simulated annealing refinement for grid selection.
+///
+/// Starts from the greedy selection and improves via random swaps.
+/// Objective: maximize P(at least one 5+2) = 1 - Π(1 - score_i/139_838_160)
+pub fn select_optimal_n_grids_sa(
+    candidates: &[Suggestion],
+    n_grids: usize,
+    max_common_balls: usize,
+    max_common_stars: usize,
+    seed: u64,
+) -> Vec<Suggestion> {
+    if candidates.len() <= n_grids || n_grids <= 1 {
+        return select_optimal_n_grids(candidates, n_grids, max_common_balls, max_common_stars);
+    }
+
+    // Start with greedy solution
+    let mut best = select_optimal_n_grids(candidates, n_grids, max_common_balls, max_common_stars);
+    if best.is_empty() {
+        return best;
+    }
+
+    let mut rng = StdRng::seed_from_u64(seed);
+
+    // Objective: P(at least one hit) = 1 - Π(1 - p_i)
+    // where p_i = score_i / 139_838_160
+    let objective = |selection: &[Suggestion]| -> f64 {
+        let log_miss: f64 = selection
+            .iter()
+            .map(|s| (1.0 - s.score / 139_838_160.0).max(1e-30).ln())
+            .sum();
+        1.0 - log_miss.exp()
+    };
+
+    // Overlap constraint check: does candidates[new_idx] fit in selection at position `slot`?
+    let check_constraints =
+        |selection: &[Suggestion], new_idx: usize, slot: usize| -> bool {
+            let candidate = &candidates[new_idx];
+            for (j, s) in selection.iter().enumerate() {
+                if j == slot {
+                    continue;
+                }
+                let common_b = candidate
+                    .balls
+                    .iter()
+                    .filter(|b| s.balls.contains(b))
+                    .count();
+                let common_s = candidate
+                    .stars
+                    .iter()
+                    .filter(|st| s.stars.contains(st))
+                    .count();
+                if common_b > max_common_balls || common_s > max_common_stars {
+                    return false;
+                }
+            }
+            true
+        };
+
+    let mut current = best.clone();
+    let mut current_obj = objective(&current);
+    let mut best_obj = current_obj;
+
+    // SA parameters — temperatures are very small because P(5+2) per grid is ~10^-8
+    let t_max: f64 = 1e-10;
+    let t_min: f64 = 1e-14;
+    let n_iterations: usize = 5000;
+    let cooling_rate: f64 = (t_min / t_max).powf(1.0 / n_iterations as f64);
+
+    let mut temp = t_max;
+
+    for _ in 0..n_iterations {
+        // Choose a random slot to swap
+        let slot = rng.random_range(0..n_grids);
+
+        // Choose a random candidate to swap in
+        let new_idx = rng.random_range(0..candidates.len());
+
+        // Skip if same grid already in selection
+        if current
+            .iter()
+            .any(|s| s.balls == candidates[new_idx].balls && s.stars == candidates[new_idx].stars)
+        {
+            temp *= cooling_rate;
+            continue;
+        }
+
+        // Check overlap constraints
+        if !check_constraints(&current, new_idx, slot) {
+            temp *= cooling_rate;
+            continue;
+        }
+
+        // Try the swap
+        let old = current[slot].clone();
+        current[slot] = candidates[new_idx].clone();
+        let new_obj = objective(&current);
+
+        let delta = new_obj - current_obj;
+
+        if delta > 0.0 || rng.random::<f64>() < (delta / temp).exp() {
+            // Accept
+            current_obj = new_obj;
+            if current_obj > best_obj {
+                best = current.clone();
+                best_obj = current_obj;
+            }
+        } else {
+            // Reject — restore
+            current[slot] = old;
+        }
+
+        temp *= cooling_rate;
+    }
+
+    best
+}
+
 /// - LowConviction → T=1.0 (pas de sharpening)
 pub fn conviction_temperature(verdict: &ConvictionVerdict) -> f64 {
     match verdict {
@@ -2797,7 +3295,7 @@ mod tests {
         let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 5);
         assert!(result.total_jackpot_probability > 0.0);
         assert!(result.enumeration_size > 0);
@@ -2823,7 +3321,7 @@ mod tests {
         let total: f64 = star_probs.iter().sum();
         let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 100);
         assert!(result.improvement_factor > 1.0,
             "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
@@ -2836,7 +3334,7 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None, None, None, None).unwrap();
         for w in result.suggestions.windows(2) {
             assert!(w[0].score >= w[1].score,
                 "Suggestions non triées : {} < {}", w[0].score, w[1].score);
@@ -2850,8 +3348,8 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None).unwrap();
-        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None).unwrap();
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None).unwrap();
         for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
@@ -2869,7 +3367,7 @@ mod tests {
             spread_range: (10, 45),
         };
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None, None, None, None).unwrap();
         // Toutes les suggestions doivent passer le filtre
         for s in &result.suggestions {
             assert!(filter.accept_balls(&s.balls),

@@ -256,6 +256,24 @@ impl EnsembleCombiner {
     }
 }
 
+/// Beta-transform: recalibrates a pooled distribution using p^alpha * (1-p)^(beta-1).
+/// alpha=1, beta=1 is identity. alpha>1 sharpens high-probability entries.
+/// beta>1 suppresses low-probability entries. Asymmetric unlike temperature.
+/// Based on Ranjan & Gneiting (JRSSB 2010).
+pub fn beta_transform(probs: &mut [f64], alpha: f64, beta: f64) {
+    if (alpha - 1.0).abs() < 1e-9 && (beta - 1.0).abs() < 1e-9 {
+        return; // identity
+    }
+    for p in probs.iter_mut() {
+        let clamped = p.clamp(1e-15, 1.0 - 1e-15);
+        *p = clamped.powf(alpha) * (1.0 - clamped).powf(beta - 1.0);
+    }
+    let total: f64 = probs.iter().sum();
+    if total > 0.0 {
+        probs.iter_mut().for_each(|p| *p /= total);
+    }
+}
+
 pub fn compute_spread(model_dists: &[(String, Vec<f64>)], size: usize) -> Vec<f64> {
     let n = model_dists.len() as f64;
     (0..size)
@@ -336,6 +354,10 @@ pub fn compute_hedge_weights(
     let mut ball_weights = base_ball_weights.to_vec();
     let mut star_weights = base_star_weights.to_vec();
 
+    // v17: threshold for skipping predict() in Hedge loop AND for floor allocation
+    let min_weight = 0.005;
+    let floor_threshold = 0.02;
+
     // Rejouer les n derniers tirages (draws[0..n])
     for t in (0..n).rev() {
         let test_draw = &draws[t];
@@ -346,9 +368,9 @@ pub fn compute_hedge_weights(
         }
 
         for (m, model) in models.iter().enumerate() {
-            // Skip predict() pour les modèles à poids zéro — résultat identique après floor
-            let need_ball = ball_weights[m] > 1e-30;
-            let need_star = star_weights[m] > 1e-30;
+            // v17: Skip predict() pour les modèles à poids < floor_threshold (perf: ~12 modèles skippés)
+            let need_ball = ball_weights[m] > floor_threshold;
+            let need_star = star_weights[m] > floor_threshold;
 
             if need_ball {
                 // Loss boules (pure log-likelihood)
@@ -393,10 +415,6 @@ pub fn compute_hedge_weights(
     }
 
     // Floor différencié: only models with meaningful base weight (>2%) get a floor.
-    // v11: raised threshold from 1e-10 to 0.02 to prevent marginal models from
-    // diluting the top models' concentration via floor allocation.
-    let min_weight = 0.005;
-    let floor_threshold = 0.02;
     for (i, w) in ball_weights.iter_mut().enumerate() {
         if base_ball_weights[i] > floor_threshold {
             *w = w.max(min_weight);
@@ -475,6 +493,38 @@ mod tests {
         let ss: f64 = sw.iter().sum();
         assert!((bs - 1.0).abs() < 1e-9, "Ball weights sum = {}", bs);
         assert!((ss - 1.0).abs() < 1e-9, "Star weights sum = {}", ss);
+    }
+
+    #[test]
+    fn test_beta_transform_identity() {
+        let mut probs = vec![0.1, 0.2, 0.3, 0.15, 0.25];
+        let orig = probs.clone();
+        beta_transform(&mut probs, 1.0, 1.0);
+        for (a, b) in probs.iter().zip(orig.iter()) {
+            assert!((a - b).abs() < 1e-10, "Identity beta should not change distribution");
+        }
+    }
+
+    #[test]
+    fn test_beta_transform_sums_to_one() {
+        let mut probs = vec![1.0 / 50.0; 50];
+        probs[0] = 0.1;
+        let sum: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= sum);
+        beta_transform(&mut probs, 2.0, 1.5);
+        let total: f64 = probs.iter().sum();
+        assert!((total - 1.0).abs() < 1e-10, "Beta-transform should normalize, sum={}", total);
+    }
+
+    #[test]
+    fn test_beta_transform_sharpens() {
+        let mut probs = vec![0.1, 0.2, 0.3, 0.15, 0.25];
+        let orig = probs.clone();
+        beta_transform(&mut probs, 2.0, 1.0);
+        // alpha > 1 should sharpen: the largest probability should become even more dominant
+        let max_orig = orig.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let max_new = probs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(max_new > max_orig, "Sharpening should increase max: {} > {}", max_new, max_orig);
     }
 
     #[test]

@@ -8,8 +8,8 @@ use crate::models::ForecastModel;
 pub struct StackingWeights {
     /// Poids par numéro par modèle: [pool_size][n_models]
     pub model_weights: Vec<Vec<f64>>,
-    /// Poids contextuels par numéro: [pool_size][7]
-    pub context_weights: Vec<[f64; 7]>,
+    /// Poids contextuels par numéro: [pool_size][n_ctx_features]
+    pub context_weights: Vec<Vec<f64>>,
     /// Biais par numéro: [pool_size]
     pub bias: Vec<f64>,
     pub model_names: Vec<String>,
@@ -87,7 +87,8 @@ pub fn train_stacking(
 
     let pool_size = pool.size();
     let n_models = data[0].model_distributions.len();
-    let n_features = n_models + 7; // model probs + 7 context features
+    let n_ctx = data[0].context.as_vec().len();
+    let n_features = n_models + n_ctx; // model probs + context features
     let n_samples = data.len();
 
     let model_names: Vec<String> = (0..n_models).map(|i| format!("model_{}", i)).collect();
@@ -125,10 +126,7 @@ pub fn train_stacking(
         for b in &beta[..n_models] {
             mw.push(*b);
         }
-        let mut cw = [0.0f64; 7];
-        for (i, b) in beta[n_models..].iter().enumerate() {
-            cw[i] = *b;
-        }
+        let cw: Vec<f64> = beta[n_models..].to_vec();
 
         all_model_weights.push(mw);
         all_context_weights.push(cw);
@@ -161,8 +159,9 @@ pub fn predict_stacked(
                 val += w * model_distributions[m][k];
             }
         }
-        for (i, &cw) in weights.context_weights[k].iter().enumerate() {
-            val += cw * ctx[i];
+        let n_cw = weights.context_weights[k].len().min(ctx.len());
+        for i in 0..n_cw {
+            val += weights.context_weights[k][i] * ctx[i];
         }
         // Clamp to positive
         probs.push(val.max(1e-10));
@@ -391,7 +390,7 @@ mod tests {
     fn test_predict_stacked_normalizes() {
         let weights = StackingWeights {
             model_weights: vec![vec![0.5, 0.5]; 50],
-            context_weights: vec![[0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]; 50],
+            context_weights: vec![vec![0.1; 12]; 50],
             bias: vec![0.02; 50],
             model_names: vec!["A".into(), "B".into()],
             pool_size: 50,
@@ -400,10 +399,40 @@ mod tests {
             vec![1.0 / 50.0; 50],
             vec![1.0 / 50.0; 50],
         ];
-        let ctx = RegimeFeatures { sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5, recent_entropy: 0.5, day_of_week: 0.5, gap_compression: 1.0, hurst_exponent: 0.5 };
+        let ctx = RegimeFeatures {
+            sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5,
+            recent_entropy: 0.5, day_of_week: 0.5, gap_compression: 1.0,
+            hurst_exponent: 0.5, perm_entropy_ratio: 1.0, runs_ratio: 1.0,
+            ami_ratio: 1.0, lz_ratio: 1.0, signal_fraction: 0.0,
+        };
         let result = predict_stacked(&weights, &dists, &ctx);
         let sum: f64 = result.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "Stacked prediction should sum to 1, got {}", sum);
+    }
+
+    #[test]
+    fn test_predict_stacked_backward_compat() {
+        // Old 7-element context weights should still work (min of ctx/cw lengths used)
+        let weights = StackingWeights {
+            model_weights: vec![vec![0.5, 0.5]; 50],
+            context_weights: vec![vec![0.1; 7]; 50],
+            bias: vec![0.02; 50],
+            model_names: vec!["A".into(), "B".into()],
+            pool_size: 50,
+        };
+        let dists = vec![
+            vec![1.0 / 50.0; 50],
+            vec![1.0 / 50.0; 50],
+        ];
+        let ctx = RegimeFeatures {
+            sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5,
+            recent_entropy: 0.5, day_of_week: 0.5, gap_compression: 1.0,
+            hurst_exponent: 0.5, perm_entropy_ratio: 1.0, runs_ratio: 1.0,
+            ami_ratio: 1.0, lz_ratio: 1.0, signal_fraction: 0.0,
+        };
+        let result = predict_stacked(&weights, &dists, &ctx);
+        let sum: f64 = result.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "Should still normalize with old 7D weights, got {}", sum);
     }
 
     #[test]

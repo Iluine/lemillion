@@ -20,9 +20,10 @@ use lemillion_ensemble::sampler::{
     apply_temperature, compute_bayesian_score, compute_conviction,
     conviction_temperature_split, conviction_temperature_split_with_skill,
     few_grid_temperature, rqa_temperature_factor, select_optimal_n_grids,
-    generate_suggestions_filtered,
+    select_optimal_n_grids_sa, generate_suggestions_filtered,
     generate_diverse_grids_with_strategy, generate_suggestions_ev,
-    generate_suggestions_jackpot, optimal_grid, BallStarConditioner, CoherenceScorer,
+    generate_suggestions_jackpot, generate_suggestions_gibbs,
+    optimal_grid, BallStarConditioner, CoherenceScorer,
     StarStrategy, StarCoherenceScorer, StructuralFilter,
 };
 use lemillion_ensemble::expected_value::{
@@ -589,6 +590,63 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         Vec::new()
     };
 
+    // v16: Optimize beta-transform and temperature by NLL grid-search
+    println!("\nOptimisation post-pooling (beta-transform + température)...");
+    let (beta_balls, beta_stars, optimal_t_balls, optimal_t_stars) = {
+        let opt_combiner = EnsembleCombiner::with_weights(
+            all_models(),
+            ball_weights.iter().map(|(_, w)| *w).collect(),
+            star_weights.iter().map(|(_, w)| *w).collect(),
+        );
+        lemillion_ensemble::ensemble::calibration::optimize_post_pooling(
+            &opt_combiner, &draws, 50,
+        )
+    };
+    if let Some((a, b)) = beta_balls {
+        println!("  Beta boules : alpha={:.2}, beta={:.2}", a, b);
+    } else {
+        println!("  Beta boules : identité (1.0, 1.0)");
+    }
+    if let Some((a, b)) = beta_stars {
+        println!("  Beta étoiles : alpha={:.2}, beta={:.2}", a, b);
+    } else {
+        println!("  Beta étoiles : identité (1.0, 1.0)");
+    }
+    if let Some(t) = optimal_t_balls {
+        println!("  Température boules optimale : {:.2}", t);
+    }
+    if let Some(t) = optimal_t_stars {
+        println!("  Température étoiles optimale : {:.2}", t);
+    }
+
+    // v17: Optimize coherence weights, stacking blend, and online blend
+    println!("\nOptimisation v17 (cohérence, stacking blend, online blend)...");
+    let (coherence_ball_weight, coherence_star_weight, stacking_blend_balls, stacking_blend_stars, online_ewma_alpha, online_window) = {
+        let opt_combiner = EnsembleCombiner::with_weights(
+            all_models(),
+            ball_weights.iter().map(|(_, w)| *w).collect(),
+            star_weights.iter().map(|(_, w)| *w).collect(),
+        );
+
+        let (cw_b, cw_s) = lemillion_ensemble::ensemble::calibration::optimize_coherence_weights(
+            &opt_combiner, &draws, 30,
+        );
+        println!("  Coherence balls: {:.0}, stars: {:.0}", cw_b, cw_s);
+
+        let (sb_b, sb_s) = lemillion_ensemble::ensemble::calibration::optimize_stacking_blend(
+            &opt_combiner, &draws,
+            stacking_balls.as_ref(), stacking_stars.as_ref(), 30,
+        );
+        println!("  Stacking blend balls: {:.1}, stars: {:.1}", sb_b, sb_s);
+
+        let (oa, ow) = lemillion_ensemble::ensemble::calibration::optimize_online_blend(
+            &opt_combiner, &draws, 30,
+        );
+        println!("  Online blend alpha: {:.2}, window: {}", oa, ow);
+
+        (Some(cw_b), Some(cw_s), Some(sb_b), Some(sb_s), Some(oa), Some(ow))
+    };
+
     let ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
@@ -599,6 +657,16 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         stacking_stars,
         correlation_matrix,
         star_correlation_matrix,
+        beta_balls,
+        beta_stars,
+        optimal_t_balls,
+        optimal_t_stars,
+        coherence_ball_weight,
+        coherence_star_weight,
+        stacking_blend_balls,
+        stacking_blend_stars,
+        online_ewma_alpha,
+        online_window,
     };
 
     display::display_weights(&ensemble_weights);
@@ -883,18 +951,19 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         }
     };
 
-    let (mut ball_pred, star_pred) = if use_stacking {
+    let (mut ball_pred, mut star_pred) = if use_stacking {
         let w = weights.as_ref().unwrap();
-        let blend = 0.6;
+        let blend_b = w.stacking_blend_balls.unwrap_or(0.6);
         let bp = if let Some(ref sw) = w.stacking_balls {
-            println!("(Stacking boules : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
-            combiner.predict_stacked(&draws, Pool::Balls, sw, blend)
+            println!("(Stacking boules : blend {:.0}% stacked + {:.0}% weighted)", blend_b * 100.0, (1.0 - blend_b) * 100.0);
+            combiner.predict_stacked(&draws, Pool::Balls, sw, blend_b)
         } else {
             predict_pool(Pool::Balls)
         };
+        let blend_s = w.stacking_blend_stars.unwrap_or(0.6);
         let sp = if let Some(ref sw) = w.stacking_stars {
-            println!("(Stacking étoiles : blend {:.0}% stacked + {:.0}% weighted)", blend * 100.0, (1.0 - blend) * 100.0);
-            combiner.predict_stacked(&draws, Pool::Stars, sw, blend)
+            println!("(Stacking étoiles : blend {:.0}% stacked + {:.0}% weighted)", blend_s * 100.0, (1.0 - blend_s) * 100.0);
+            combiner.predict_stacked(&draws, Pool::Stars, sw, blend_s)
         } else {
             predict_pool(Pool::Stars)
         };
@@ -909,12 +978,26 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         (predict_pool(Pool::Balls), predict_pool(Pool::Stars))
     };
 
-    // v15: Online/offline blend — adaptation rapide aux changements récents
+    // v15/v17: Online/offline blend — adaptation rapide aux changements récents
     {
-        use lemillion_ensemble::ensemble::online::online_offline_blend;
-        let blended_balls = online_offline_blend(&ball_pred.distribution, &draws, Pool::Balls, 8);
-        // Stars: skip online blend (v15b — 12 values too few for stable EWMA, keep v14b star behavior)
+        use lemillion_ensemble::ensemble::online::online_offline_blend_with_alpha;
+        let online_alpha = weights.as_ref().ok().and_then(|w| w.online_ewma_alpha).unwrap_or(0.15);
+        let online_window = weights.as_ref().ok().and_then(|w| w.online_window).unwrap_or(8);
+        let blended_balls = online_offline_blend_with_alpha(&ball_pred.distribution, &draws, Pool::Balls, online_window, online_alpha);
+        // Stars: skip online blend (v15b — 12 values too few for stable EWMA)
         ball_pred.distribution = blended_balls;
+    }
+
+    // v16: Beta-transform post-pooling (Ranjan & Gneiting 2010)
+    if let Ok(ref w) = weights {
+        if let Some((alpha, beta)) = w.beta_balls {
+            lemillion_ensemble::ensemble::beta_transform(&mut ball_pred.distribution, alpha, beta);
+            println!("(Beta-transform boules : α={:.2}, β={:.2})", alpha, beta);
+        }
+        if let Some((alpha, beta)) = w.beta_stars {
+            lemillion_ensemble::ensemble::beta_transform(&mut star_pred.distribution, alpha, beta);
+            println!("(Beta-transform étoiles : α={:.2}, β={:.2})", alpha, beta);
+        }
     }
 
     // Afficher les distributions
@@ -969,8 +1052,15 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             if rqa_factor < 1.0 { "système prédictible → sharpen" } else { "système chaotique → relax" });
     }
 
-    // Température adaptative : few-grid override > explicit > skill-based > conviction
-    // v7: RQA factor applied post-hoc (except few-grid override)
+    // v16: Extraire les températures optimales calibrées
+    let (calibrated_opt_t_balls, calibrated_opt_t_stars) = if let Ok(ref w) = weights {
+        (w.optimal_t_balls, w.optimal_t_stars)
+    } else {
+        (None, None)
+    };
+
+    // Température adaptative : few-grid override > explicit > v16 calibrated > skill-based > conviction
+    // v7: RQA factor applied post-hoc (except few-grid override and calibrated)
     let (eff_bt, eff_st) = if let Some(ng) = n_grids {
         // Mode few-grid : température forcée, overrides tout (y compris RQA)
         let (bt, st) = few_grid_temperature(ng);
@@ -982,6 +1072,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         let st = (t * rqa_factor).clamp(0.1, 2.0);
         (bt, st)
     } else if jackpot_mode {
+        // v17: Jackpot mode skips NLL temperature (conservative) — use conviction (aggressive)
+        // NLL optimizes log-loss, conviction optimizes P(5+2) concentration
         let (mut bt, st) = conviction_temperature_split_with_skill(
             &conviction, calibrated_ball_skill, calibrated_star_skill);
         // Gros jackpot (>100M) : T_balls=1.0 pour ne pas sur-concentrer les boules
@@ -991,11 +1083,23 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         let method = if calibrated_ball_skill.is_some() { "skill+RQA" } else { "conviction+RQA" };
         println!("\n(Temp split [{method}] — balls: {:.2}{}, stars: {:.2})", bt, if jackpot > 100_000_000.0 { " [no-sharpen >100M]" } else { "" }, st);
         (bt, st)
+    } else if calibrated_opt_t_balls.is_some() || calibrated_opt_t_stars.is_some() {
+        // v16: NLL-optimized temperatures for EV mode (calibration quality)
+        let mut bt = calibrated_opt_t_balls.unwrap_or_else(|| {
+            conviction_temperature_split_with_skill(
+                &conviction, calibrated_ball_skill, calibrated_star_skill).0
+        });
+        let st = calibrated_opt_t_stars.unwrap_or_else(|| {
+            conviction_temperature_split_with_skill(
+                &conviction, calibrated_ball_skill, calibrated_star_skill).1
+        });
+        bt = (bt * rqa_factor).clamp(0.05, 2.0);
+        println!("\n(Temp calibrée NLL — balls: {:.2}, stars: {:.2})", bt, st);
+        (bt, st)
     } else {
-        // Mode EV : skill-based quand disponible
+        // Fallback : skill-based or conviction
         let (bt, st) = conviction_temperature_split_with_skill(
             &conviction, calibrated_ball_skill, calibrated_star_skill);
-        // v7: RQA modulation
         let bt = (bt * rqa_factor).clamp(0.1, 2.0);
         let method = if calibrated_ball_skill.is_some() { "skill+RQA" } else { "conviction+RQA" };
         println!("\n(Temp split [{method}] EV — balls: {:.2}, stars: {:.2})", bt, st);
@@ -1094,22 +1198,41 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
             let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
-            let bp = prof_combiner.predict(&draws, Pool::Balls);
+            let mut bp = prof_combiner.predict(&draws, Pool::Balls);
             let sp = prof_combiner.predict(&draws, Pool::Stars);
+
+            // v16: Beta-transform post-pooling (skip in few-grid mode — temperatures are already tuned)
+            if n_grids.is_none() {
+                if let Ok(ref w) = weights {
+                    if let Some((alpha, beta)) = w.beta_balls {
+                        lemillion_ensemble::ensemble::beta_transform(&mut bp.distribution, alpha, beta);
+                    }
+                }
+            }
 
             let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
                 apply_temperature(&bp.distribution, *prof_bt)
             } else {
                 bp.distribution.clone()
             };
+            let mut star_d = sp.distribution.clone();
+            if n_grids.is_none() {
+                if let Ok(ref w) = weights {
+                    if let Some((alpha, beta)) = w.beta_stars {
+                        lemillion_ensemble::ensemble::beta_transform(&mut star_d, alpha, beta);
+                    }
+                }
+            }
             let sd = if (*prof_st - 1.0).abs() > 1e-9 {
-                apply_temperature(&sp.distribution, *prof_st)
+                apply_temperature(&star_d, *prof_st)
             } else {
-                sp.distribution.clone()
+                star_d
             };
 
             let neural_scorer_ref = if neural_rerank { neural_scorer_opt.as_ref() } else { None };
 
+            let cw_ball = weights.as_ref().ok().and_then(|w| w.coherence_ball_weight);
+            let cw_star = weights.as_ref().ok().and_then(|w| w.coherence_star_weight);
             let result = generate_suggestions_jackpot(
                 &bd, &sd, n_per_profile, filter.as_ref(),
                 Some(&coherence), Some(&joint_model),
@@ -1117,6 +1240,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 Some(&conditioner),
                 neural_scorer_ref,
                 Some(&star_coherence),
+                cw_ball, cw_star,
             )?;
 
             for s in &result.suggestions {
@@ -1124,6 +1248,26 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             }
 
             last_result = Some(result);
+        }
+
+        // v17: Gibbs sampling for additional candidates
+        {
+            let gibbs_count = n_per_profile / 2; // 50% of one profile's size
+            let gibbs_seed = seed.unwrap_or_else(|| lemillion_ensemble::sampler::date_seed());
+            match generate_suggestions_gibbs(
+                &ball_dist, &star_dist, gibbs_count,
+                filter.as_ref(), Some(&coherence), Some(&joint_model),
+                star_pair_probs.as_ref(), Some(&conditioner), Some(&star_coherence),
+                8, eff_bt.max(0.3), gibbs_seed,
+            ) {
+                Ok(gibbs_result) => {
+                    println!("(Gibbs sampling: {} candidats supplémentaires)", gibbs_result.suggestions.len());
+                    for s in &gibbs_result.suggestions {
+                        all_candidates.push(("Gibbs".to_string(), s.clone(), ball_dist.clone(), star_dist.clone()));
+                    }
+                }
+                Err(_) => {} // Silently skip if Gibbs fails
+            }
         }
 
         // Sort all candidates by score descending (P(5+2) proxy)
@@ -1138,8 +1282,10 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         } else {
             (2, 2) // legacy mode
         };
-        let optimal_selection = select_optimal_n_grids(
+        // v17: SA refinement over greedy selection
+        let optimal_selection = select_optimal_n_grids_sa(
             &candidate_suggestions, target_grids, max_common_balls, max_common_stars,
+            seed.unwrap_or_else(|| lemillion_ensemble::sampler::date_seed()),
         );
 
         // Map back to labeled grids with their distributions
@@ -1938,10 +2084,63 @@ fn cmd_backtest_jackpot(
                     combiner.star_weights = hedged_star;
                 }
 
-                let ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
-                let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+                // v17: Production-aligned pipeline
+                // 1. Decorrelation / Stacking / Agreement boost
+                let has_corr_matrix = weights.map(|w| !w.correlation_matrix.is_empty()).unwrap_or(false);
+                let use_stacking = weights.map(|w| w.stacking_balls.is_some() || w.stacking_stars.is_some()).unwrap_or(false);
 
-                // Conviction calculée sur la distribution BRUTE (avant température)
+                let predict_pool_bt = |pool: Pool| -> lemillion_ensemble::ensemble::EnsemblePrediction {
+                    if has_corr_matrix {
+                        let w = weights.unwrap();
+                        let corr = match pool {
+                            Pool::Balls => &w.correlation_matrix,
+                            Pool::Stars => if w.star_correlation_matrix.is_empty() { &w.correlation_matrix } else { &w.star_correlation_matrix },
+                        };
+                        combiner.predict_decorrelated(training_draws, pool, corr, 0.60)
+                    } else {
+                        combiner.predict_with_agreement_boost(training_draws, pool, 0.20)
+                    }
+                };
+
+                let (mut ball_pred, mut star_pred) = if use_stacking {
+                    let w = weights.unwrap();
+                    let blend_b = w.stacking_blend_balls.unwrap_or(0.6);
+                    let bp = if let Some(ref sw) = w.stacking_balls {
+                        combiner.predict_stacked(training_draws, Pool::Balls, sw, blend_b)
+                    } else {
+                        predict_pool_bt(Pool::Balls)
+                    };
+                    let blend_s = w.stacking_blend_stars.unwrap_or(0.6);
+                    let sp = if let Some(ref sw) = w.stacking_stars {
+                        combiner.predict_stacked(training_draws, Pool::Stars, sw, blend_s)
+                    } else {
+                        predict_pool_bt(Pool::Stars)
+                    };
+                    (bp, sp)
+                } else {
+                    (predict_pool_bt(Pool::Balls), predict_pool_bt(Pool::Stars))
+                };
+
+                // 2. Online/offline blend (balls only, v15/v17)
+                {
+                    use lemillion_ensemble::ensemble::online::online_offline_blend_with_alpha;
+                    let oa = weights.and_then(|w| w.online_ewma_alpha).unwrap_or(0.15);
+                    let ow = weights.and_then(|w| w.online_window).unwrap_or(8);
+                    let blended = online_offline_blend_with_alpha(&ball_pred.distribution, training_draws, Pool::Balls, ow, oa);
+                    ball_pred.distribution = blended;
+                }
+
+                // 3. Beta-transform post-pooling (v16)
+                if let Some(w) = weights {
+                    if let Some((alpha, beta)) = w.beta_balls {
+                        lemillion_ensemble::ensemble::beta_transform(&mut ball_pred.distribution, alpha, beta);
+                    }
+                    if let Some((alpha, beta)) = w.beta_stars {
+                        lemillion_ensemble::ensemble::beta_transform(&mut star_pred.distribution, alpha, beta);
+                    }
+                }
+
+                // 4. Conviction (on raw distributions before temperature)
                 let conviction = compute_conviction(
                     &ball_pred.distribution,
                     &star_pred.distribution,
@@ -1949,11 +2148,40 @@ fn cmd_backtest_jackpot(
                     &star_pred.spread,
                 );
 
-                // Température adaptative split par conviction si pas de --temperature explicite
-                let (eff_bt, eff_st) = if let Some(t) = temperature {
-                    (t, t)
+                // 5. RQA temperature factor
+                let rqa_factor = rqa_temperature_factor(training_draws);
+
+                // 6. Temperature: jackpot mode uses conviction (aggressive), skip NLL (conservative)
+                let (calibrated_ball_skill, calibrated_star_skill) = if let Some(w) = weights {
+                    let uniform_ball_ll = 5.0 * (1.0_f64 / 50.0).ln();
+                    let uniform_star_ll = 2.0 * (1.0_f64 / 12.0).ln();
+                    let ball_skill: f64 = w.calibrations.iter()
+                        .filter_map(|c| {
+                            let wt = w.ball_weights.iter().find(|(n,_)| *n == c.model_name).map(|(_,w)| *w).unwrap_or(0.0);
+                            if wt > 0.0 { Some(wt * (c.best_ll - uniform_ball_ll).max(0.0)) } else { None }
+                        })
+                        .sum();
+                    let star_skill: f64 = w.calibrations.iter()
+                        .filter_map(|c| {
+                            let wt = w.star_weights.iter().find(|(n,_)| *n == c.model_name).map(|(_,w)| *w).unwrap_or(0.0);
+                            if wt > 0.0 { Some(wt * (c.best_ll - uniform_star_ll).max(0.0)) } else { None }
+                        })
+                        .sum();
+                    (Some(ball_skill), Some(star_skill))
                 } else {
-                    conviction_temperature_split(&conviction)
+                    (None, None)
+                };
+
+                // Jackpot mode: skip NLL temperature (conservative, optimized for log-loss)
+                // Use conviction temperatures (aggressive, optimized for P(5+2) concentration)
+                let (eff_bt, eff_st) = if let Some(t) = temperature {
+                    let bt = (t * rqa_factor).clamp(0.1, 2.0);
+                    (bt, bt)
+                } else {
+                    let (mut bt, st) = conviction_temperature_split_with_skill(
+                        &conviction, calibrated_ball_skill, calibrated_star_skill);
+                    bt = (bt * rqa_factor).clamp(0.05, 2.0);
+                    (bt, st)
                 };
 
                 let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
@@ -1980,6 +2208,8 @@ fn cmd_backtest_jackpot(
                 let conditioner = BallStarConditioner::from_history(training_draws);
                 let star_coherence = StarCoherenceScorer::from_history(training_draws);
 
+                let bt_cw_ball = weights.and_then(|w| w.coherence_ball_weight);
+                let bt_cw_star = weights.and_then(|w| w.coherence_star_weight);
                 let result = generate_suggestions_jackpot(
                     &ball_dist, &star_dist, n_suggestions, Some(&filter),
                     Some(&coherence), Some(&joint_model),
@@ -1987,6 +2217,7 @@ fn cmd_backtest_jackpot(
                     Some(&conditioner),
                     None,
                     Some(&star_coherence),
+                    bt_cw_ball, bt_cw_star,
                 )?;
 
                 // Vérifier si le tirage réel est dans le top-N
@@ -2241,18 +2472,31 @@ fn cmd_backtest_jackpot_top3(
         for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
             let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
-            let bp = prof_combiner.predict(training_draws, Pool::Balls);
+            let mut bp = prof_combiner.predict(training_draws, Pool::Balls);
             let sp = prof_combiner.predict(training_draws, Pool::Stars);
+
+            // v16: Beta-transform post-pooling
+            if let Some(w) = weights {
+                if let Some((alpha, beta)) = w.beta_balls {
+                    lemillion_ensemble::ensemble::beta_transform(&mut bp.distribution, alpha, beta);
+                }
+            }
 
             let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
                 apply_temperature(&bp.distribution, *prof_bt)
             } else {
                 bp.distribution.clone()
             };
+            let mut star_dist = sp.distribution.clone();
+            if let Some(w) = weights {
+                if let Some((alpha, beta)) = w.beta_stars {
+                    lemillion_ensemble::ensemble::beta_transform(&mut star_dist, alpha, beta);
+                }
+            }
             let sd = if (*prof_st - 1.0).abs() > 1e-9 {
-                apply_temperature(&sp.distribution, *prof_st)
+                apply_temperature(&star_dist, *prof_st)
             } else {
-                sp.distribution.clone()
+                star_dist
             };
 
             let result = generate_suggestions_jackpot(
@@ -2262,6 +2506,7 @@ fn cmd_backtest_jackpot_top3(
                 Some(&bt_conditioner),
                 None,
                 Some(&bt_star_coherence),
+                None, None,
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid
@@ -2643,6 +2888,9 @@ fn cmd_backtest_few_grids(
                 // Stars: skip online blend (v15b)
             }
 
+            // Note: skip beta-transform in few-grid mode — few_grid_temperature() already provides
+            // the right sharpening, and beta-transform interferes with it.
+
             let bd = if (*prof_bt - 1.0).abs() > 1e-9 {
                 apply_temperature(&bp.distribution, *prof_bt)
             } else {
@@ -2660,6 +2908,7 @@ fn cmd_backtest_few_grids(
                 star_pair_probs.as_ref(), None,
                 Some(&conditioner), None,
                 Some(&star_coherence),
+                None, None,
             )?;
 
             for s in &result.suggestions {
@@ -2897,13 +3146,23 @@ fn cmd_backtest_realistic(
         }
 
         let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
-        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+        let mut star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
 
         // v15: online/offline blend
         {
             use lemillion_ensemble::ensemble::online::online_offline_blend;
             ball_pred.distribution = online_offline_blend(&ball_pred.distribution, training_draws, Pool::Balls, 8);
             // Stars: skip online blend (v15b)
+        }
+
+        // v16: Beta-transform post-pooling (aligned with production)
+        if let Some(w) = weights {
+            if let Some((alpha, beta)) = w.beta_balls {
+                lemillion_ensemble::ensemble::beta_transform(&mut ball_pred.distribution, alpha, beta);
+            }
+            if let Some((alpha, beta)) = w.beta_stars {
+                lemillion_ensemble::ensemble::beta_transform(&mut star_pred.distribution, alpha, beta);
+            }
         }
 
         // Conviction → nombre de grilles
@@ -3178,13 +3437,23 @@ fn cmd_backtest_3grids(
         }
 
         let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
-        let star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+        let mut star_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
 
         // v15: online/offline blend
         {
             use lemillion_ensemble::ensemble::online::online_offline_blend;
             ball_pred.distribution = online_offline_blend(&ball_pred.distribution, training_draws, Pool::Balls, 8);
             // Stars: skip online blend (v15b)
+        }
+
+        // v16: Beta-transform post-pooling (aligned with production)
+        if let Some(w) = weights {
+            if let Some((alpha, beta)) = w.beta_balls {
+                lemillion_ensemble::ensemble::beta_transform(&mut ball_pred.distribution, alpha, beta);
+            }
+            if let Some((alpha, beta)) = w.beta_stars {
+                lemillion_ensemble::ensemble::beta_transform(&mut star_pred.distribution, alpha, beta);
+            }
         }
 
         let conviction = compute_conviction(

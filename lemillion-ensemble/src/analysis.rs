@@ -51,7 +51,7 @@ pub fn run_all_tests(draws: &[Draw]) -> Vec<AnalysisResult> {
 }
 
 /// Pour chaque numéro du pool, extrait une série binaire (true = présent) en ordre chronologique.
-fn extract_binary_sequences(draws: &[Draw], pool: Pool) -> Vec<Vec<bool>> {
+pub(crate) fn extract_binary_sequences(draws: &[Draw], pool: Pool) -> Vec<Vec<bool>> {
     let size = pool.size();
     (1..=size as u8)
         .map(|num| {
@@ -554,6 +554,61 @@ fn lempel_ziv_test(ball_binary: &[Vec<bool>], star_binary: &[Vec<bool>]) -> Anal
     }
 }
 
+/// Fast analysis verdicts for real-time use (skips expensive correlation dimension).
+/// Returns [perm_entropy_ratio, runs_ratio, ami_ratio, lz_ratio, signal_fraction] where each
+/// ratio is value/expected_random (>1 = more signal than expected).
+/// signal_fraction is the fraction of tests returning Verdict::Signal [0, 1].
+pub fn quick_verdicts(draws: &[Draw]) -> [f64; 5] {
+    if draws.len() < 30 {
+        return [1.0, 1.0, 1.0, 1.0, 0.0]; // neutral ratios, no signal
+    }
+
+    let ball_sums: Vec<f64> = draws
+        .iter()
+        .rev()
+        .map(|d| d.balls.iter().map(|&b| b as f64).sum())
+        .collect();
+
+    let ball_binary = extract_binary_sequences(draws, Pool::Balls);
+    let star_binary = extract_binary_sequences(draws, Pool::Stars);
+
+    let pe = permutation_entropy_test(&ball_sums);
+    let runs = runs_test_aggregate(&ball_binary, &star_binary);
+    let ami = ami_test(&ball_sums);
+    let lz = lempel_ziv_test(&ball_binary, &star_binary);
+
+    // Compute ratios value/expected (normalized so 1.0 = perfectly random)
+    let pe_ratio = if pe.expected_random.abs() > 1e-10 {
+        pe.value / pe.expected_random
+    } else {
+        1.0
+    };
+    let runs_ratio = if runs.expected_random.abs() > 1e-10 {
+        runs.value / runs.expected_random
+    } else {
+        1.0
+    };
+    let ami_ratio = if ami.expected_random.abs() > 1e-10 {
+        ami.value / ami.expected_random
+    } else {
+        1.0
+    };
+    let lz_ratio = if lz.expected_random.abs() > 1e-10 {
+        lz.value / lz.expected_random
+    } else {
+        1.0
+    };
+
+    // Count signals
+    let n_signals = [&pe, &runs, &ami, &lz]
+        .iter()
+        .filter(|r| r.verdict == Verdict::Signal)
+        .count() as f64
+        / 4.0;
+
+    [pe_ratio, runs_ratio, ami_ratio, lz_ratio, n_signals]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,5 +704,34 @@ mod tests {
         let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
         let slope = linear_regression_slope(&x, &y);
         assert!((slope - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_quick_verdicts_short_draws() {
+        let draws = make_test_draws(10);
+        let v = quick_verdicts(&draws);
+        // Short series → neutral defaults
+        assert_eq!(v, [1.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_quick_verdicts_no_panic() {
+        let draws = make_test_draws(100);
+        let v = quick_verdicts(&draws);
+        assert_eq!(v.len(), 5);
+        for &val in &v[..4] {
+            assert!(val.is_finite(), "Ratio should be finite, got {}", val);
+            assert!(val >= 0.0, "Ratio should be non-negative, got {}", val);
+        }
+        assert!(v[4] >= 0.0 && v[4] <= 1.0, "Signal fraction should be in [0,1], got {}", v[4]);
+    }
+
+    #[test]
+    fn test_quick_verdicts_ratios_positive() {
+        let draws = make_test_draws(200);
+        let v = quick_verdicts(&draws);
+        for &val in &v[..4] {
+            assert!(val > 0.0, "Ratio should be positive, got {}", val);
+        }
     }
 }

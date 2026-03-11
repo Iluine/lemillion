@@ -1,8 +1,8 @@
 use lemillion_db::models::Draw;
 
-const N_FEATURES: usize = 7;
+const N_FEATURES: usize = 12;
 
-/// Features du contexte courant pour le méta-prédicteur (7D).
+/// Features du contexte courant pour le méta-prédicteur (12D).
 #[derive(Debug, Clone)]
 pub struct RegimeFeatures {
     /// Somme des boules du dernier tirage (normalisée 0-1)
@@ -20,6 +20,16 @@ pub struct RegimeFeatures {
     /// Hurst exponent (DFA) moyen sur les 50 séries de présence des boules.
     /// H > 0.5 = persistence (momentum), H < 0.5 = mean-reversion, H = 0.5 = random.
     pub hurst_exponent: f64,
+    /// Permutation entropy ratio (value/expected). < 1.0 = more structured than random.
+    pub perm_entropy_ratio: f64,
+    /// Runs test ratio (value/expected).
+    pub runs_ratio: f64,
+    /// Auto-mutual information ratio (value/expected). > 1.0 = more predictable.
+    pub ami_ratio: f64,
+    /// Lempel-Ziv complexity ratio (value/expected). < 1.0 = more compressible.
+    pub lz_ratio: f64,
+    /// Fraction of tests showing Signal verdict [0, 1].
+    pub signal_fraction: f64,
 }
 
 impl RegimeFeatures {
@@ -34,6 +44,11 @@ impl RegimeFeatures {
                 day_of_week: 0.5,
                 gap_compression: 1.0,
                 hurst_exponent: 0.5,
+                perm_entropy_ratio: 1.0,
+                runs_ratio: 1.0,
+                ami_ratio: 1.0,
+                lz_ratio: 1.0,
+                signal_fraction: 0.0,
             };
         }
 
@@ -95,6 +110,9 @@ impl RegimeFeatures {
         // Hurst exponent via DFA sur les séries de présence des 50 boules
         let hurst_exponent = compute_hurst_dfa(draws);
 
+        // v17: Analysis verdicts (fast tests only, skips O(N²) correlation dimension)
+        let verdicts = crate::analysis::quick_verdicts(draws);
+
         Self {
             sum_norm: sum_norm.clamp(0.0, 1.0),
             spread_norm: spread_norm.clamp(0.0, 1.0),
@@ -103,12 +121,30 @@ impl RegimeFeatures {
             day_of_week,
             gap_compression: gap_compression.clamp(0.0, 2.0),
             hurst_exponent: hurst_exponent.clamp(0.0, 1.0),
+            perm_entropy_ratio: verdicts[0].clamp(0.0, 2.0),
+            runs_ratio: verdicts[1].clamp(0.0, 2.0),
+            ami_ratio: verdicts[2].clamp(0.0, 2.0),
+            lz_ratio: verdicts[3].clamp(0.0, 2.0),
+            signal_fraction: verdicts[4].clamp(0.0, 1.0),
         }
     }
 
-    /// Retourne le vecteur de features (7D).
+    /// Retourne le vecteur de features (12D).
     pub fn as_vec(&self) -> [f64; N_FEATURES] {
-        [self.sum_norm, self.spread_norm, self.mod4_cosine, self.recent_entropy, self.day_of_week, self.gap_compression, self.hurst_exponent]
+        [
+            self.sum_norm,
+            self.spread_norm,
+            self.mod4_cosine,
+            self.recent_entropy,
+            self.day_of_week,
+            self.gap_compression,
+            self.hurst_exponent,
+            self.perm_entropy_ratio,
+            self.runs_ratio,
+            self.ami_ratio,
+            self.lz_ratio,
+            self.signal_fraction,
+        ]
     }
 }
 
@@ -508,21 +544,26 @@ mod tests {
         assert!(f.day_of_week >= 0.0 && f.day_of_week <= 1.0);
         assert!(f.gap_compression >= 0.0 && f.gap_compression <= 2.0);
         assert!(f.hurst_exponent >= 0.0 && f.hurst_exponent <= 1.0);
+        assert!(f.perm_entropy_ratio >= 0.0 && f.perm_entropy_ratio <= 2.0);
+        assert!(f.runs_ratio >= 0.0 && f.runs_ratio <= 2.0);
+        assert!(f.ami_ratio >= 0.0 && f.ami_ratio <= 2.0);
+        assert!(f.lz_ratio >= 0.0 && f.lz_ratio <= 2.0);
+        assert!(f.signal_fraction >= 0.0 && f.signal_fraction <= 1.0);
     }
 
     #[test]
-    fn test_regime_features_7d() {
+    fn test_regime_features_12d() {
         let draws = make_test_draws(20);
         let f = RegimeFeatures::from_draws(&draws);
         let v = f.as_vec();
-        assert_eq!(v.len(), 7);
+        assert_eq!(v.len(), 12);
     }
 
     #[test]
     fn test_ridge_regression_nd_constant() {
         // Si tous les targets sont identiques, les coefficients doivent être ~0
         let features: Vec<[f64; N_FEATURES]> = (0..20)
-            .map(|i| [i as f64 / 20.0, 0.5, 0.3, 0.7, 0.0, 1.0, 0.5])
+            .map(|i| [i as f64 / 20.0, 0.5, 0.3, 0.7, 0.0, 1.0, 0.5, 1.0, 1.0, 1.0, 1.0, 0.0])
             .collect();
         let targets = vec![1.0; 20];
         let (intercept, coeff) = ridge_regression_nd(&features, &targets, 1.0);
@@ -549,8 +590,8 @@ mod tests {
     fn test_weight_adjustments_positive() {
         let mp = MetaPredictor {
             coefficients: vec![
-                (0.0, [0.1, 0.2, 0.3, 0.4, 0.0, 0.1, 0.05]),
-                (0.0, [-0.1, 0.0, 0.1, 0.2, 0.0, -0.1, 0.0]),
+                (0.0, [0.1, 0.2, 0.3, 0.4, 0.0, 0.1, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                (0.0, [-0.1, 0.0, 0.1, 0.2, 0.0, -0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             ],
             model_names: vec!["A".into(), "B".into()],
         };
@@ -558,6 +599,8 @@ mod tests {
             sum_norm: 0.5, spread_norm: 0.5, mod4_cosine: 0.5,
             recent_entropy: 0.5, day_of_week: 0.0, gap_compression: 1.0,
             hurst_exponent: 0.5,
+            perm_entropy_ratio: 1.0, runs_ratio: 1.0, ami_ratio: 1.0,
+            lz_ratio: 1.0, signal_fraction: 0.0,
         };
         let adj = mp.weight_adjustments(&f);
         assert_eq!(adj.len(), 2);

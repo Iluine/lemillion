@@ -7,3 +7,4 @@ pub mod display;
 pub mod expected_value;
 pub mod coverage;
 pub mod research;
+pub mod conformal;
