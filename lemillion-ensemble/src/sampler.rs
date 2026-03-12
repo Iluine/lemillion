@@ -8,9 +8,94 @@ use rand::distr::weighted::WeightedIndex;
 use rand::prelude::Distribution;
 use rand::rngs::StdRng;
 
+use serde::{Serialize, Deserialize};
+
 use lemillion_db::models::{Draw, Pool, Suggestion};
 use crate::expected_value::{PopularityModel, anti_popularity, compute_ev};
 use crate::models::summary_predictor::SummaryPredictor;
+
+fn default_joint_blend() -> f64 { 0.30 }
+fn default_k_balls() -> usize { 15 }
+
+/// Hyperparamètres optimisables pour le pipeline de prédiction.
+/// Sauvegardés/chargés depuis `hyperparams.json` via BayesOpt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HyperParams {
+    /// Température boules en mode few-grid [0.05, 1.0]
+    pub t_balls: f64,
+    /// Température étoiles en mode few-grid [0.10, 0.50]
+    pub t_stars: f64,
+    /// Poids cohérence boules dans le scoring jackpot [5.0, 60.0]
+    pub coherence_weight: f64,
+    /// Poids cohérence étoiles dans le scoring jackpot [3.0, 40.0]
+    pub star_coherence_weight: f64,
+    /// Learning rate Hedge [0.01, 0.50]
+    pub hedge_eta: f64,
+    /// Blend marginal vs joint conditional [0.0, 0.6] — v21
+    #[serde(default = "default_joint_blend")]
+    pub joint_blend: f64,
+    /// K balls subset for jackpot enumeration [12, 35] — v21
+    #[serde(default = "default_k_balls")]
+    pub k_balls: usize,
+}
+
+impl Default for HyperParams {
+    fn default() -> Self {
+        Self {
+            t_balls: 0.55,
+            t_stars: 0.25,
+            coherence_weight: 30.0,
+            star_coherence_weight: 15.0,
+            hedge_eta: 0.10,
+            joint_blend: 0.30,
+            k_balls: 15,
+        }
+    }
+}
+
+impl HyperParams {
+    /// Load from JSON file, or return default if not found.
+    pub fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Save to JSON file.
+    pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Create from a parameter vector (for BayesOpt).
+    /// Order: [t_balls, t_stars, coherence_weight, star_coherence_weight, hedge_eta, joint_blend, k_balls]
+    pub fn from_vec(params: &[f64]) -> Self {
+        Self {
+            t_balls: params.get(0).copied().unwrap_or(0.55),
+            t_stars: params.get(1).copied().unwrap_or(0.25),
+            coherence_weight: params.get(2).copied().unwrap_or(30.0),
+            star_coherence_weight: params.get(3).copied().unwrap_or(15.0),
+            hedge_eta: params.get(4).copied().unwrap_or(0.10),
+            joint_blend: params.get(5).copied().unwrap_or(0.30),
+            k_balls: params.get(6).map(|v| (*v as usize).clamp(12, 35)).unwrap_or(15),
+        }
+    }
+
+    /// Convert to parameter vector (for BayesOpt).
+    pub fn to_vec(&self) -> Vec<f64> {
+        vec![
+            self.t_balls,
+            self.t_stars,
+            self.coherence_weight,
+            self.star_coherence_weight,
+            self.hedge_eta,
+            self.joint_blend,
+            self.k_balls as f64,
+        ]
+    }
+}
 
 /// Filtre structurel rejetant les candidats implausibles avant scoring.
 pub struct StructuralFilter {
@@ -420,16 +505,16 @@ impl ExponentialTilt {
 pub struct BallStarConditioner {
     table: Vec<[f64; 66]>,
     context_counts: Vec<f64>,
-    /// Seuils adaptatifs calculés par terciles (v9)
-    sum_thresholds: [u32; 2],
+    /// v21: Seuils adaptatifs calculés par quintiles (was terciles v9)
+    sum_thresholds: [u32; 4],
     spread_thresholds: [u8; 2],
 }
 
 impl BallStarConditioner {
-    /// v12: 9 contextes (3 sum × 3 spread) — was 27 (3×3×3 with odd_count).
-    /// Removing odd_bin triples observations per context (~70 obs instead of ~23),
-    /// giving blend ratio 0.78 instead of 0.43.
-    const N_CONTEXTS: usize = 9; // 3 sum_bins × 3 spread_bins
+    /// v21: 15 contextes (5 sum × 3 spread) — was 9 (3×3, v12).
+    /// Quintile sum bins give finer conditioning (~42 obs/ctx with 630 draws),
+    /// blend ratio ~42/47 = 0.89. Kernel smoothing compensates for data dilution.
+    const N_CONTEXTS: usize = 15; // 5 sum_bins × 3 spread_bins
     const LAPLACE_ALPHA: f64 = 0.3;
 
     pub fn from_history(draws: &[Draw]) -> Self {
@@ -513,10 +598,10 @@ impl BallStarConditioner {
         Self { table, context_counts, sum_thresholds, spread_thresholds }
     }
 
-    /// Calcule les terciles adaptatifs pour sum et spread depuis l'historique.
-    fn compute_adaptive_bins(draws: &[Draw]) -> ([u32; 2], [u8; 2]) {
+    /// v21: Calcule les quintiles adaptatifs pour sum et terciles pour spread depuis l'historique.
+    fn compute_adaptive_bins(draws: &[Draw]) -> ([u32; 4], [u8; 2]) {
         if draws.is_empty() {
-            return ([115, 140], [20, 35]); // fallback hardcodé
+            return ([105, 120, 135, 150], [20, 35]); // fallback hardcodé
         }
         let mut sums: Vec<u32> = draws.iter()
             .map(|d| d.balls.iter().map(|&b| b as u32).sum())
@@ -531,7 +616,14 @@ impl BallStarConditioner {
             .collect();
         spreads.sort();
 
-        let sum_t = [sums[sums.len() / 3], sums[2 * sums.len() / 3]];
+        // v21: 4 thresholds for 5 quintile bins (was 2 for 3 tercile bins)
+        let n = sums.len();
+        let sum_t = [
+            sums[n / 5],
+            sums[2 * n / 5],
+            sums[3 * n / 5],
+            sums[4 * n / 5],
+        ];
         let spread_t = [spreads[spreads.len() / 3], spreads[2 * spreads.len() / 3]];
         (sum_t, spread_t)
     }
@@ -540,15 +632,48 @@ impl BallStarConditioner {
     pub fn ball_context(&self, balls: &[u8; 5]) -> usize {
         let sum: u32 = balls.iter().map(|&b| b as u32).sum();
         let spread = balls[4] - balls[0];
-        // v12: removed odd_bin — 9 contexts (3×3) instead of 27 (3×3×3)
-        let sum_bin = if sum < self.sum_thresholds[0] { 0 } else if sum <= self.sum_thresholds[1] { 1 } else { 2 };
+        // v21: 5 sum bins (quintiles) × 3 spread bins = 15 contexts
+        let sum_bin = if sum < self.sum_thresholds[0] { 0 }
+            else if sum < self.sum_thresholds[1] { 1 }
+            else if sum < self.sum_thresholds[2] { 2 }
+            else if sum < self.sum_thresholds[3] { 3 }
+            else { 4 };
         let spread_bin = if spread < self.spread_thresholds[0] { 0 } else if spread <= self.spread_thresholds[1] { 1 } else { 2 };
         sum_bin * 3 + spread_bin
     }
 
-    #[inline]
-    pub fn conditioned_pair_probs(&self, balls: &[u8; 5]) -> &[f64; 66] {
-        &self.table[self.ball_context(balls)]
+    /// v21: Kernel-smoothed conditioned pair probabilities.
+    /// Blends adjacent sum contexts with Gaussian kernel (sigma=0.5)
+    /// to reduce noise from context boundary effects.
+    pub fn conditioned_pair_probs(&self, balls: &[u8; 5]) -> [f64; 66] {
+        let primary_ctx = self.ball_context(balls);
+        let primary_sum_bin = primary_ctx / 3;
+        let spread_bin = primary_ctx % 3;
+
+        let mut blended = [0.0_f64; 66];
+        let mut total_weight = 0.0_f64;
+
+        for sum_offset in -1i32..=1 {
+            let neighbor_sum_bin = primary_sum_bin as i32 + sum_offset;
+            if neighbor_sum_bin < 0 || neighbor_sum_bin >= 5 { continue; }
+            let neighbor_ctx = neighbor_sum_bin as usize * 3 + spread_bin;
+            let kernel_weight = (-0.5 * (sum_offset as f64).powi(2) / (0.5_f64).powi(2)).exp();
+            let ctx_blend = self.context_counts[neighbor_ctx] / (self.context_counts[neighbor_ctx] + 5.0);
+            for pair_idx in 0..66 {
+                blended[pair_idx] += kernel_weight * ctx_blend * self.table[neighbor_ctx][pair_idx];
+            }
+            total_weight += kernel_weight * ctx_blend;
+        }
+
+        // Normalize
+        if total_weight > 0.0 {
+            for p in blended.iter_mut() { *p /= total_weight; }
+        } else {
+            // Fallback to primary context
+            return self.table[primary_ctx];
+        }
+
+        blended
     }
 
     /// Adaptive blend ratio: 0 when few observations, ~0.78 with many.
@@ -3044,6 +3169,133 @@ pub fn select_optimal_n_grids(
     selected
 }
 
+/// v21: Sélection exacte pour N≤5 grilles.
+/// Énumère C(top_k, N) combinaisons et retourne celle maximisant P(≥1 hit).
+pub fn select_optimal_n_grids_exact(
+    candidates: &[Suggestion],
+    n_grids: usize,
+    max_common_balls: usize,
+) -> Vec<Suggestion> {
+    let top_k = candidates.len().min(100); // cap for tractability
+    let top = &candidates[..top_k];
+
+    if n_grids > 5 || top_k < n_grids || n_grids < 2 {
+        // Fall back to greedy for large N
+        return select_optimal_n_grids(candidates, n_grids, 4, 1);
+    }
+
+    let total = 139_838_160.0_f64;
+
+    // Check overlap constraint between two grids
+    let check_overlap = |a: &Suggestion, b: &Suggestion| -> bool {
+        let common = a.balls.iter().filter(|x| b.balls.contains(x)).count();
+        common <= max_common_balls
+    };
+
+    let mut best_p_any: f64 = 0.0;
+    let mut best_indices: Vec<usize> = Vec::new();
+
+    match n_grids {
+        2 => {
+            for i in 0..top_k {
+                for j in (i + 1)..top_k {
+                    if !check_overlap(&top[i], &top[j]) { continue; }
+                    let p_none = (1.0 - top[i].score / total) * (1.0 - top[j].score / total);
+                    let p_any = 1.0 - p_none;
+                    if p_any > best_p_any {
+                        best_p_any = p_any;
+                        best_indices = vec![i, j];
+                    }
+                }
+            }
+        },
+        3 => {
+            for i in 0..top_k {
+                for j in (i + 1)..top_k {
+                    if !check_overlap(&top[i], &top[j]) { continue; }
+                    for k in (j + 1)..top_k {
+                        if !check_overlap(&top[i], &top[k]) { continue; }
+                        if !check_overlap(&top[j], &top[k]) { continue; }
+                        let p_none = (1.0 - top[i].score / total)
+                            * (1.0 - top[j].score / total)
+                            * (1.0 - top[k].score / total);
+                        let p_any = 1.0 - p_none;
+                        if p_any > best_p_any {
+                            best_p_any = p_any;
+                            best_indices = vec![i, j, k];
+                        }
+                    }
+                }
+            }
+        },
+        4 => {
+            for i in 0..top_k {
+                for j in (i + 1)..top_k {
+                    if !check_overlap(&top[i], &top[j]) { continue; }
+                    for k in (j + 1)..top_k {
+                        if !check_overlap(&top[i], &top[k]) { continue; }
+                        if !check_overlap(&top[j], &top[k]) { continue; }
+                        for l in (k + 1)..top_k {
+                            if !check_overlap(&top[i], &top[l]) { continue; }
+                            if !check_overlap(&top[j], &top[l]) { continue; }
+                            if !check_overlap(&top[k], &top[l]) { continue; }
+                            let p_none = (1.0 - top[i].score / total)
+                                * (1.0 - top[j].score / total)
+                                * (1.0 - top[k].score / total)
+                                * (1.0 - top[l].score / total);
+                            let p_any = 1.0 - p_none;
+                            if p_any > best_p_any {
+                                best_p_any = p_any;
+                                best_indices = vec![i, j, k, l];
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        5 => {
+            for i in 0..top_k {
+                for j in (i + 1)..top_k {
+                    if !check_overlap(&top[i], &top[j]) { continue; }
+                    for k in (j + 1)..top_k {
+                        if !check_overlap(&top[i], &top[k]) { continue; }
+                        if !check_overlap(&top[j], &top[k]) { continue; }
+                        for l in (k + 1)..top_k {
+                            if !check_overlap(&top[i], &top[l]) { continue; }
+                            if !check_overlap(&top[j], &top[l]) { continue; }
+                            if !check_overlap(&top[k], &top[l]) { continue; }
+                            for m in (l + 1)..top_k {
+                                if !check_overlap(&top[i], &top[m]) { continue; }
+                                if !check_overlap(&top[j], &top[m]) { continue; }
+                                if !check_overlap(&top[k], &top[m]) { continue; }
+                                if !check_overlap(&top[l], &top[m]) { continue; }
+                                let p_none = (1.0 - top[i].score / total)
+                                    * (1.0 - top[j].score / total)
+                                    * (1.0 - top[k].score / total)
+                                    * (1.0 - top[l].score / total)
+                                    * (1.0 - top[m].score / total);
+                                let p_any = 1.0 - p_none;
+                                if p_any > best_p_any {
+                                    best_p_any = p_any;
+                                    best_indices = vec![i, j, k, l, m];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        _ => unreachable!(),
+    }
+
+    if best_indices.is_empty() {
+        // No valid combination found with overlap constraint, relax and use greedy
+        return select_optimal_n_grids(candidates, n_grids, 4, 1);
+    }
+
+    best_indices.iter().map(|&i| top[i].clone()).collect()
+}
+
 /// G7: Minimax grid selection — maximize worst-case P(5+2) under uncertainty.
 /// epsilon controls the perturbation budget (proportional to model disagreement).
 pub fn select_minimax_grids(
@@ -3741,21 +3993,21 @@ mod tests {
 
     #[test]
     fn test_ball_context_bins() {
-        // v12: 9 contextes (3 sum × 3 spread)
+        // v21: 15 contextes (5 sum × 3 spread)
         let draws = crate::models::make_test_draws(100);
         let conditioner = BallStarConditioner::from_history(&draws);
         // Low sum + low spread
         let ctx_low = conditioner.ball_context(&[1, 3, 5, 7, 9]);
-        assert!(ctx_low < 9, "Context should be valid: {}", ctx_low);
+        assert!(ctx_low < 15, "Context should be valid: {}", ctx_low);
         // High sum + high spread
         let ctx_high = conditioner.ball_context(&[2, 20, 30, 40, 50]);
-        assert!(ctx_high < 9, "Context should be valid: {}", ctx_high);
+        assert!(ctx_high < 15, "Context should be valid: {}", ctx_high);
         // Different contexts for different balls
         assert_ne!(ctx_low, ctx_high, "Low and high contexts should differ");
     }
 
     #[test]
-    fn test_conditioner_9_contexts_valid() {
+    fn test_conditioner_15_contexts_valid() {
         let draws = crate::models::make_test_draws(100);
         let conditioner = BallStarConditioner::from_history(&draws);
         // Test a variety of ball combinations
@@ -3765,7 +4017,7 @@ mod tests {
         ];
         for balls in &test_balls {
             let ctx = conditioner.ball_context(balls);
-            assert!(ctx < 9, "Context {} out of range for balls {:?}", ctx, balls);
+            assert!(ctx < 15, "Context {} out of range for balls {:?}", ctx, balls);
         }
     }
 

@@ -10,8 +10,8 @@ use lemillion_db::models::{Draw, Pool};
 use lemillion_ensemble::display;
 use lemillion_ensemble::ensemble::{EnsembleCombiner, compute_hedge_weights};
 use lemillion_ensemble::ensemble::calibration::{
-    EnsembleWeights, STAR_DEFAULT_TEMPERATURE, apply_decorrelation_penalty, calibrate_model,
-    collect_detailed_ll, compute_correlation_matrix, compute_weights_with_params,
+    EnsembleWeights, STAR_DEFAULT_TEMPERATURE, apply_decorrelation_penalty, apply_family_cap, apply_family_cap_vecs,
+    calibrate_model, collect_detailed_ll, compute_correlation_matrix, compute_weights_with_params,
     compute_weights_with_threshold, detect_redundancy, load_weights, save_weights,
 };
 use lemillion_ensemble::ensemble::consensus::{build_consensus_map, compute_exclusion_set, consensus_score};
@@ -20,7 +20,7 @@ use lemillion_ensemble::sampler::{
     apply_temperature, compute_bayesian_score, compute_conviction,
     conviction_temperature_split, conviction_temperature_split_with_skill,
     few_grid_temperature, rqa_temperature_factor, select_optimal_n_grids,
-    select_optimal_n_grids_sa, generate_suggestions_filtered,
+    select_optimal_n_grids_exact, select_optimal_n_grids_sa, generate_suggestions_filtered,
     generate_diverse_grids_with_strategy, generate_suggestions_ev,
     generate_suggestions_jackpot, generate_suggestions_gibbs,
     optimal_grid, BallStarConditioner, CoherenceScorer,
@@ -274,6 +274,37 @@ enum Command {
         seed: u64,
     },
 
+    /// Optimiser les hyperparamètres via BayesOpt
+    Optimize {
+        /// Nombre de grilles à optimiser
+        #[arg(long, default_value = "3")]
+        n_grids: usize,
+
+        /// Nombre de tirages récents pour le backtest
+        #[arg(short, long, default_value = "20")]
+        last: usize,
+
+        /// Nombre de suggestions par tirage
+        #[arg(short, long, default_value = "5000")]
+        suggestions: usize,
+
+        /// Nombre d'itérations BayesOpt
+        #[arg(short, long, default_value = "50")]
+        iterations: usize,
+
+        /// Fichier de calibration
+        #[arg(short, long, default_value = "calibration.json")]
+        calibration: String,
+
+        /// Fichier de sortie pour les hyperparamètres optimisés
+        #[arg(short, long, default_value = "hyperparams.json")]
+        output: String,
+
+        /// Seed pour la reproductibilité
+        #[arg(long, default_value = "42")]
+        seed: u64,
+    },
+
     /// Mode interactif (REPL)
     Interactive,
 }
@@ -298,6 +329,7 @@ fn main() -> Result<()> {
         Command::Coverage { tickets, jackpot, seed } => cmd_coverage(&conn, tickets, jackpot, seed),
         Command::Research { tests, window } => cmd_research(&conn, &tests, window),
         Command::Benchmark { train, seed } => cmd_benchmark(&conn, train, seed),
+        Command::Optimize { n_grids, last, suggestions, iterations, calibration, output, seed } => cmd_optimize(&conn, n_grids, last, suggestions, iterations, &calibration, &output, seed),
         Command::Interactive => interactive::run_interactive(&conn),
     }
 }
@@ -529,8 +561,18 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     };
 
     // Décorrélation continue : pénaliser les modèles corrélés
-    apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.70, 0.5, 0.10);
-    apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.70, 0.5, 0.10);
+    apply_decorrelation_penalty(&mut ball_weights, &redundancies, 0.60, 0.6, 0.10);
+    apply_decorrelation_penalty(&mut star_weights, &star_redundancies, 0.60, 0.6, 0.10);
+
+    // Cap familial : éviter la monopolisation par groupes corrélés
+    let te_family: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+    let stresa_family: &[&str] = &["StresaSGD", "StresaChaos"];
+    let families: Vec<(&[&str], f64)> = vec![
+        (te_family, 0.20),
+        (stresa_family, 0.15),
+    ];
+    apply_family_cap(&mut ball_weights, &families);
+    apply_family_cap(&mut star_weights, &families);
 
     // Stacking : collecter données + entraîner
     println!("\nEntraînement du stacking...");
@@ -742,6 +784,29 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         }
     }
 
+    // Diagnostic entropie pour modèles à 0% poids boules
+    {
+        let test_draws = &draws[..draws.len().min(200)];
+        println!("\n--- Diagnostic entropie (modèles 0% boules) ---");
+        for model in &models {
+            let ball_w = ensemble_weights.ball_weights.iter()
+                .find(|(n, _)| n == model.name())
+                .map(|(_, w)| *w)
+                .unwrap_or(0.0);
+            if ball_w > 0.001 { continue; }
+            let dist = model.predict(test_draws, Pool::Balls);
+            let h: f64 = dist.iter()
+                .filter(|&&p| p > 1e-15)
+                .map(|&p| -p * p.ln())
+                .sum();
+            let h_max = (50.0_f64).ln();
+            let h_ratio = h / h_max;
+            if h_ratio > 0.95 {
+                println!("  {} : H/H_max = {:.4} (quasi-uniforme, smoothing trop élevé ?)", model.name(), h_ratio);
+            }
+        }
+    }
+
     // Sauvegarder
     let output_path = PathBuf::from(output);
     save_weights(&ensemble_weights, &output_path)?;
@@ -828,6 +893,14 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     }
 
     let draws = fetch_last_draws(conn, n)?;
+
+    // v20: Load optimized hyperparams if available
+    let hyper = lemillion_ensemble::sampler::HyperParams::load(std::path::Path::new("hyperparams.json"));
+    let has_optimized = std::path::Path::new("hyperparams.json").exists();
+    if has_optimized {
+        println!("(Hyperparams optimisés chargés : T=({:.2},{:.2}) CW=({:.1},{:.1}) η={:.3})",
+            hyper.t_balls, hyper.t_stars, hyper.coherence_weight, hyper.star_coherence_weight, hyper.hedge_eta);
+    }
 
     // Modele de popularite
     let popularity = PopularityModel::from_history(&draws);
@@ -921,18 +994,31 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     // Hedge weights : ajustement multiplicatif réactif
     // Boules seulement si signal, étoiles toujours
     if !no_hedge {
+        let hedge_eta = hyper.hedge_eta;
         let (hedged_ball, hedged_star) = compute_hedge_weights(
             &combiner.models, &draws,
             &combiner.ball_weights, &combiner.star_weights,
-            100,   // n_recent : 100 derniers tirages
-            0.10,  // eta : learning rate réactif
+            100,       // n_recent : 100 derniers tirages
+            hedge_eta, // eta : learning rate réactif (from hyperparams)
         );
         if balls_have_signal {
             combiner.ball_weights = hedged_ball;
         }
         combiner.star_weights = hedged_star;
-        println!("(Hedge weights appliqués sur les 100 derniers tirages, η=0.10{})",
-            if !balls_have_signal { " [étoiles seulement]" } else { "" });
+        println!("(Hedge weights appliqués sur les 100 derniers tirages, η={:.2}{})",
+            hedge_eta, if !balls_have_signal { " [étoiles seulement]" } else { "" });
+
+        // Re-apply family cap after hedge to prevent TE/Stresa monopolization
+        let te_family: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+        let stresa_family: &[&str] = &["StresaSGD", "StresaChaos"];
+        let families: Vec<(&[&str], f64)> = vec![(te_family, 0.20), (stresa_family, 0.15)];
+        let model_names: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+        let mut ball_w: Vec<(String, f64)> = model_names.iter().zip(combiner.ball_weights.iter()).map(|(n, w)| (n.clone(), *w)).collect();
+        let mut star_w: Vec<(String, f64)> = model_names.iter().zip(combiner.star_weights.iter()).map(|(n, w)| (n.clone(), *w)).collect();
+        apply_family_cap(&mut ball_w, &families);
+        apply_family_cap(&mut star_w, &families);
+        combiner.ball_weights = ball_w.iter().map(|(_, w)| *w).collect();
+        combiner.star_weights = star_w.iter().map(|(_, w)| *w).collect();
     }
 
     // Filtrer les top modèles si demandé
@@ -1090,9 +1176,14 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     // Température adaptative : few-grid override > explicit > v16 calibrated > skill-based > conviction
     // v7: RQA factor applied post-hoc (except few-grid override and calibrated)
     let (eff_bt, eff_st) = if let Some(ng) = n_grids {
-        // Mode few-grid : température forcée, overrides tout (y compris RQA)
-        let (bt, st) = few_grid_temperature(ng);
-        println!("\n(Temp few-grid [{} grilles] — balls: {:.2}, stars: {:.2})", ng, bt, st);
+        // Mode few-grid : use optimized hyperparams if available, else default
+        let (bt, st) = if has_optimized {
+            (hyper.t_balls, hyper.t_stars)
+        } else {
+            few_grid_temperature(ng)
+        };
+        println!("\n(Temp few-grid [{} grilles{}] — balls: {:.2}, stars: {:.2})", ng,
+            if has_optimized { " optimisé" } else { "" }, bt, st);
         (bt, st)
     } else if let Some(t) = temperature {
         // RQA modulation on explicit temperature
@@ -1222,8 +1313,17 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         // Collect all candidates from all profiles
         let mut all_candidates: Vec<(String, lemillion_db::models::Suggestion, Vec<f64>, Vec<f64>)> = Vec::new();
         let mut last_result = None;
-        let cw_ball = weights.as_ref().ok().and_then(|w| w.coherence_ball_weight);
-        let cw_star = weights.as_ref().ok().and_then(|w| w.coherence_star_weight);
+        // v20: Use optimized coherence weights if available, else calibration, else default
+        let cw_ball = if has_optimized {
+            Some(hyper.coherence_weight)
+        } else {
+            weights.as_ref().ok().and_then(|w| w.coherence_ball_weight)
+        };
+        let cw_star = if has_optimized {
+            Some(hyper.star_coherence_weight)
+        } else {
+            weights.as_ref().ok().and_then(|w| w.coherence_star_weight)
+        };
 
         for (label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
@@ -1311,11 +1411,15 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         } else {
             (2, 2) // legacy mode
         };
-        // v17: SA refinement over greedy selection
-        let optimal_selection = select_optimal_n_grids_sa(
-            &candidate_suggestions, target_grids, max_common_balls, max_common_stars,
-            seed.unwrap_or_else(|| lemillion_ensemble::sampler::date_seed()),
-        );
+        // v21: Exact exhaustive selection for N≤5, SA refinement for larger N
+        let optimal_selection = if target_grids <= 5 {
+            select_optimal_n_grids_exact(&candidate_suggestions, target_grids, 3)
+        } else {
+            select_optimal_n_grids_sa(
+                &candidate_suggestions, target_grids, max_common_balls, max_common_stars,
+                seed.unwrap_or_else(|| lemillion_ensemble::sampler::date_seed()),
+            )
+        };
 
         // Map back to labeled grids with their distributions
         let selected_grids: Vec<(String, lemillion_db::models::Suggestion, Vec<f64>, Vec<f64>)> = optimal_selection.iter()
@@ -1549,6 +1653,14 @@ pub(crate) fn cmd_compare(conn: &lemillion_db::rusqlite::Connection, numbers: &[
             combiner.ball_weights = hedged_ball;
         }
         combiner.star_weights = hedged_star;
+
+        // Re-apply family cap after hedge
+        let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+        let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+        let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+        let mn: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+        apply_family_cap_vecs(&mn, &mut combiner.ball_weights, &fams);
+        apply_family_cap_vecs(&mn, &mut combiner.star_weights, &fams);
     }
 
     // Prédiction avec décorrélation/stacking/agreement boost (comme cmd_predict)
@@ -2209,6 +2321,14 @@ fn cmd_backtest_jackpot(
                     );
                     combiner.ball_weights = hedged_ball;
                     combiner.star_weights = hedged_star;
+
+                    // Re-apply family cap after hedge
+                    let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+                    let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+                    let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+                    let mn: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+                    apply_family_cap_vecs(&mn, &mut combiner.ball_weights, &fams);
+                    apply_family_cap_vecs(&mn, &mut combiner.star_weights, &fams);
                 }
 
                 // v17: Production-aligned pipeline
@@ -2883,10 +3003,19 @@ fn cmd_backtest_few_grids(
     n_grids: usize,
     top_models: usize,
 ) -> Result<()> {
-    let (fg_bt, fg_st) = few_grid_temperature(n_grids);
+    // v21: Load optimized hyperparams if available, else fall back to default few-grid temperature
+    let hyper = lemillion_ensemble::sampler::HyperParams::load(std::path::Path::new("hyperparams.json"));
+    let has_optimized = std::path::Path::new("hyperparams.json").exists();
+    let (fg_bt, fg_st) = if has_optimized {
+        (hyper.t_balls, hyper.t_stars)
+    } else {
+        few_grid_temperature(n_grids)
+    };
     println!(
-        "Backtest few-grid — {} tirages, {} grilles, T_balls={:.2}, T_stars={:.2}, {} suggestions/profil\n",
-        last, n_grids, fg_bt, fg_st, n_suggestions,
+        "Backtest few-grid — {} tirages, {} grilles, T_balls={:.4}, T_stars={:.4}{}, {} suggestions/profil\n",
+        last, n_grids, fg_bt, fg_st,
+        if has_optimized { " [optimisé]" } else { "" },
+        n_suggestions,
     );
 
     let pb = ProgressBar::new(last as u64);
@@ -2980,6 +3109,13 @@ fn cmd_backtest_few_grids(
             );
             ball_w = hedged_ball;
             star_w = hedged_star;
+
+            // Re-apply family cap after hedge
+            let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+            let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+            let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+            apply_family_cap_vecs(&model_names, &mut ball_w, &fams);
+            apply_family_cap_vecs(&model_names, &mut star_w, &fams);
         }
 
         drop(models);
@@ -3004,9 +3140,22 @@ fn cmd_backtest_few_grids(
         for (_label, prof_bw, prof_sw, prof_bt, prof_st) in &profiles {
             let prof_models = all_models();
             let prof_combiner = EnsembleCombiner::with_weights(prof_models, prof_bw.clone(), prof_sw.clone());
-            // v15: agreement boost (aligné avec production)
-            let mut bp = prof_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
-            let sp = prof_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20);
+            // v21: use predict_decorrelated when correlation matrix available (aligned with production)
+            let has_corr = weights.map_or(false, |w| !w.correlation_matrix.is_empty());
+            let (mut bp, sp) = if has_corr {
+                let w = weights.unwrap();
+                let ball_corr = &w.correlation_matrix;
+                let star_corr = if w.star_correlation_matrix.is_empty() { &w.correlation_matrix } else { &w.star_correlation_matrix };
+                (
+                    prof_combiner.predict_decorrelated(training_draws, Pool::Balls, ball_corr, 0.60),
+                    prof_combiner.predict_decorrelated(training_draws, Pool::Stars, star_corr, 0.60),
+                )
+            } else {
+                (
+                    prof_combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20),
+                    prof_combiner.predict_with_agreement_boost(training_draws, Pool::Stars, 0.20),
+                )
+            };
 
             // v15: online/offline blend
             {
@@ -3046,7 +3195,12 @@ fn cmd_backtest_few_grids(
 
         // Sort by score descending, select optimal n grids
         all_candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-        let selected = select_optimal_n_grids(&all_candidates, n_grids, 3, 1);
+        // v21: Exact exhaustive selection for N≤5, greedy for larger N
+        let selected = if n_grids <= 5 {
+            select_optimal_n_grids_exact(&all_candidates, n_grids, 3)
+        } else {
+            select_optimal_n_grids(&all_candidates, n_grids, 3, 1)
+        };
 
         // Evaluate against actual draw
         let mut best_balls = 0u8;
@@ -3270,6 +3424,14 @@ fn cmd_backtest_realistic(
             );
             combiner.ball_weights = hedged_ball;
             combiner.star_weights = hedged_star;
+
+            // Re-apply family cap after hedge
+            let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+            let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+            let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+            let mn: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+            apply_family_cap_vecs(&mn, &mut combiner.ball_weights, &fams);
+            apply_family_cap_vecs(&mn, &mut combiner.star_weights, &fams);
         }
 
         let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
@@ -3561,6 +3723,14 @@ fn cmd_backtest_3grids(
             );
             combiner.ball_weights = hedged_ball;
             combiner.star_weights = hedged_star;
+
+            // Re-apply family cap after hedge
+            let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+            let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+            let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+            let mn: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+            apply_family_cap_vecs(&mn, &mut combiner.ball_weights, &fams);
+            apply_family_cap_vecs(&mn, &mut combiner.star_weights, &fams);
         }
 
         let mut ball_pred = combiner.predict_with_agreement_boost(training_draws, Pool::Balls, 0.20);
@@ -3953,6 +4123,92 @@ fn cmd_benchmark(conn: &lemillion_db::rusqlite::Connection, train_size: usize, s
     println!("{}", "-".repeat(58));
     println!("{:<20} {:>12.4} {:>12.4} {:>12.4}",
         "Uniform", uniform_ball_ll, uniform_star_ll, uniform_ball_ll + uniform_star_ll);
+
+    Ok(())
+}
+
+fn cmd_optimize(
+    conn: &lemillion_db::rusqlite::Connection,
+    n_grids: usize,
+    last: usize,
+    suggestions: usize,
+    iterations: usize,
+    calibration_path: &str,
+    output_path: &str,
+    seed: u64,
+) -> Result<()> {
+    use lemillion_ensemble::ensemble::bayesopt::{optimize, hyperparams_bounds, BacktestCache, fast_backtest_objective};
+    use lemillion_ensemble::sampler::HyperParams;
+
+    let n = count_draws(conn)?;
+    if n == 0 {
+        bail!("Base vide. Lancez d'abord : lemillion-cli import");
+    }
+
+    let draws = fetch_last_draws(conn, n)?;
+    let weights = load_weights(&PathBuf::from(calibration_path))?;
+
+    println!("== BayesOpt — Optimisation des hyperparamètres ==\n");
+    println!("  Grilles: {}  |  Tirages: {}  |  Suggestions: {}  |  Itérations: {}\n",
+        n_grids, last, suggestions, iterations);
+
+    // Build cache ONCE (expensive: all model predictions + hedge losses)
+    println!("  Construction du cache (prédictions modèles + hedge losses)...");
+    let cache = BacktestCache::build(&draws, &weights, last, suggestions);
+    println!("  Cache construit : {} points de backtest\n", cache.draw_caches.len());
+
+    // Baseline with default params (fast — uses cache)
+    let baseline_params = HyperParams::default();
+    let baseline_score = fast_backtest_objective(&cache, &baseline_params, n_grids);
+    println!("  Baseline (défaut) : P(5+2) moyen = {:.4e}", baseline_score);
+
+    let bounds = hyperparams_bounds();
+    let n_initial = (iterations / 3).max(5);
+
+    let pb = ProgressBar::new(iterations as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    // Wrap objective for BayesOpt (fast — hedge replay + pool + temperature + jackpot only)
+    let mut best_so_far = f64::NEG_INFINITY;
+    let mut objective = |params_vec: &[f64]| -> f64 {
+        let hp = HyperParams::from_vec(params_vec);
+        let score = fast_backtest_objective(&cache, &hp, n_grids);
+        pb.inc(1);
+        if score > best_so_far {
+            best_so_far = score;
+            pb.set_message(format!("best={:.4e} T=({:.2},{:.2}) CW=({:.1},{:.1}) η={:.3}",
+                score, hp.t_balls, hp.t_stars, hp.coherence_weight, hp.star_coherence_weight, hp.hedge_eta));
+        }
+        score
+    };
+
+    let (best_params_vec, best_value) = optimize(&bounds, &mut objective, iterations, n_initial, seed);
+    pb.finish_with_message("done");
+
+    let best_params = HyperParams::from_vec(&best_params_vec);
+
+    println!("\n== Résultats ==\n");
+    println!("  Meilleurs hyperparamètres :");
+    println!("    T_balls:              {:.4}", best_params.t_balls);
+    println!("    T_stars:              {:.4}", best_params.t_stars);
+    println!("    coherence_weight:     {:.2}", best_params.coherence_weight);
+    println!("    star_coherence_weight:{:.2}", best_params.star_coherence_weight);
+    println!("    hedge_eta:            {:.4}", best_params.hedge_eta);
+    println!();
+    println!("  P(5+2) moyen optimisé : {:.4e}", best_value);
+    println!("  P(5+2) moyen baseline : {:.4e}", baseline_score);
+    if baseline_score > 0.0 {
+        println!("  Gain : {:.1}%", (best_value / baseline_score - 1.0) * 100.0);
+    }
+
+    // Save
+    best_params.save(&PathBuf::from(output_path).as_path())?;
+    println!("\n  Sauvegardé dans : {}", output_path);
 
     Ok(())
 }

@@ -63,6 +63,11 @@ pub mod mapper;
 pub mod tensor_model;
 pub mod definetti;
 pub mod gnn_cooccurrence;
+pub mod position_affinity;
+pub mod sequential_transition;
+pub mod cross_pool_position;
+pub mod wear_drift;
+pub mod tail_copula;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -252,6 +257,11 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(definetti::DeFinettiModel::default()),           // v19 H6
         Box::new(gnn_cooccurrence::GnnCooccurrenceModel::default()), // v19 H7
         Box::new(esn::EsnModel::default()),                          // v19 G6: conditional reintegration
+        Box::new(position_affinity::PositionAffinityModel::default()), // v20 2A
+        Box::new(sequential_transition::SequentialTransitionModel::default()), // v20 3A
+        Box::new(cross_pool_position::CrossPoolPositionModel::default()), // v20 4A
+        Box::new(wear_drift::WearDriftModel::default()),  // v21 Phase 5
+        Box::new(tail_copula::TailCopulaModel::default()),  // v21 Phase 6
     ]
 }
 

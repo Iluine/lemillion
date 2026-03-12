@@ -30,7 +30,7 @@ pub struct CompressionModel {
 impl Default for CompressionModel {
     fn default() -> Self {
         Self {
-            smoothing: 0.25,
+            smoothing: 0.15,
             window: 50,
             min_draws: 30,
         }

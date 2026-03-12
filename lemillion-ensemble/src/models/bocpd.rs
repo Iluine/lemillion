@@ -29,7 +29,7 @@ impl Default for BocpdModel {
     fn default() -> Self {
         Self {
             expected_run_length: 200.0,
-            smoothing: 0.35,
+            smoothing: 0.22,
             min_draws: 20,
         }
     }

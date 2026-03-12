@@ -66,9 +66,19 @@ impl EnsembleCombiner {
         let size = pool.size();
 
         // Paralléliser les prédictions des modèles (indépendantes)
+        // v21: skip predict() for 0-weight models — return uniform
         let all_dists: Vec<(String, Vec<f64>)> = self.models
             .par_iter()
-            .map(|model| (model.name().to_string(), model.predict(draws, pool)))
+            .enumerate()
+            .map(|(i, model)| {
+                let w = weights.get(i).copied().unwrap_or(0.0);
+                if w < 1e-15 {
+                    let uniform = vec![1.0 / size as f64; size];
+                    (model.name().to_string(), uniform)
+                } else {
+                    (model.name().to_string(), model.predict(draws, pool))
+                }
+            })
             .collect();
 
         // v18: max weight for weight-modulated clamp
@@ -188,9 +198,19 @@ impl EnsembleCombiner {
             effective
         };
 
+        // v21: skip predict() for 0-weight models — return uniform
         let all_dists: Vec<(String, Vec<f64>)> = self.models
             .par_iter()
-            .map(|model| (model.name().to_string(), model.predict(draws, pool)))
+            .enumerate()
+            .map(|(i, model)| {
+                let w = weights.get(i).copied().unwrap_or(0.0);
+                if w < 1e-15 {
+                    let uniform = vec![1.0 / size as f64; size];
+                    (model.name().to_string(), uniform)
+                } else {
+                    (model.name().to_string(), model.predict(draws, pool))
+                }
+            })
             .collect();
 
         // v18: max weight for weight-modulated clamp (aligned with predict())
@@ -385,9 +405,29 @@ impl EnsembleCombiner {
     ) -> EnsemblePrediction {
         let base = self.predict(draws, pool);
 
+        // v21: Recompute spread using only models with weight > 0.01
+        let base_weights_vec = match pool {
+            Pool::Balls => &self.ball_weights,
+            Pool::Stars => &self.star_weights,
+        };
+        let filtered_spread = if base.model_distributions.len() == base_weights_vec.len() {
+            let filtered_dists: Vec<(String, Vec<f64>)> = base.model_distributions.iter()
+                .enumerate()
+                .filter(|(i, _)| base_weights_vec.get(*i).copied().unwrap_or(0.0) > 0.01)
+                .map(|(_, d)| d.clone())
+                .collect();
+            if filtered_dists.len() >= 2 {
+                compute_spread(&filtered_dists, pool.size())
+            } else {
+                base.spread.clone()
+            }
+        } else {
+            base.spread.clone()
+        };
+
         // v9: utiliser Q75 du spread comme référence au lieu du max
         // (le max est sensible aux outliers — un seul modèle en désaccord extrême rend le boost inutile)
-        let mut sorted_spreads: Vec<f64> = base.spread.clone();
+        let mut sorted_spreads: Vec<f64> = filtered_spread.clone();
         sorted_spreads.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let q75_idx = (sorted_spreads.len() * 3) / 4;
         let reference_spread = sorted_spreads[q75_idx].max(1e-15);
@@ -398,7 +438,7 @@ impl EnsembleCombiner {
             // Only boost numbers that are both FAVORED and UNANIMOUS
             // deviation > 0 = above uniform, < 0 = below uniform
             let deviation = (base.distribution[i] / uniform_val) - 1.0;
-            let spread_agreement = (1.0 - base.spread[i] / reference_spread).max(0.0);
+            let spread_agreement = (1.0 - filtered_spread[i] / reference_spread).max(0.0);
             let agreement = deviation * spread_agreement;
             *p *= 1.0 + strength * agreement;
             if *p < 0.0 { *p = 1e-15; }

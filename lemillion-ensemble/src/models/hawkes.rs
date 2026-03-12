@@ -32,7 +32,7 @@ impl Default for HawkesModel {
             decay_rate: 0.1,
             excitation: 0.5,
             n_top_pairs: 100,
-            smoothing: 0.20,
+            smoothing: 0.12,
             min_draws: 50,
         }
     }

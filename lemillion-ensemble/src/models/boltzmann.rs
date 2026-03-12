@@ -29,7 +29,7 @@ impl Default for BoltzmannModel {
     fn default() -> Self {
         Self {
             coupling_strength: 0.3,
-            smoothing: 0.20,
+            smoothing: 0.12,
             min_draws: 50,
         }
     }

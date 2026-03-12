@@ -978,6 +978,83 @@ pub fn apply_decorrelation_penalty(
     }
 }
 
+/// Cap familial : empêche un groupe de modèles corrélés de monopoliser les poids.
+/// Si la somme des poids d'une famille dépasse `max_share`, on réduit proportionnellement
+/// et redistribue le surplus aux modèles hors famille (hors TOUTES les familles pour éviter
+/// le rebond croisé). Itère jusqu'à convergence.
+pub fn apply_family_cap(
+    weights: &mut Vec<(String, f64)>,
+    families: &[(&[&str], f64)], // (member_names, max_share)
+) {
+    // Collect all family member names for redistribution exclusion
+    let all_family_members: Vec<&str> = families.iter()
+        .flat_map(|(members, _)| members.iter().copied())
+        .collect();
+
+    for _ in 0..5 { // iterate until convergence (max 5 rounds)
+        let mut any_capped = false;
+
+        for (members, max_share) in families {
+            let family_total: f64 = weights.iter()
+                .filter(|(n, _)| members.contains(&n.as_str()))
+                .map(|(_, w)| *w)
+                .sum();
+
+            if family_total <= *max_share + 1e-12 {
+                continue;
+            }
+
+            any_capped = true;
+            let ratio = max_share / family_total;
+            let surplus = family_total - max_share;
+
+            // Reduce family members proportionally
+            for (name, w) in weights.iter_mut() {
+                if members.contains(&name.as_str()) {
+                    *w *= ratio;
+                }
+            }
+
+            // Redistribute surplus to non-family members only (exclude ALL family members)
+            let non_family_total: f64 = weights.iter()
+                .filter(|(n, _)| !all_family_members.contains(&n.as_str()))
+                .map(|(_, w)| *w)
+                .sum();
+
+            if non_family_total > 0.0 {
+                for (name, w) in weights.iter_mut() {
+                    if !all_family_members.contains(&name.as_str()) {
+                        *w += surplus * (*w / non_family_total);
+                    }
+                }
+            }
+        }
+
+        if !any_capped { break; }
+    }
+
+    // Renormalize
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    if total > 0.0 {
+        for (_, w) in weights.iter_mut() {
+            *w /= total;
+        }
+    }
+}
+
+/// Variant of `apply_family_cap` that works with separate name/weight slices (for combiner pattern).
+pub fn apply_family_cap_vecs(
+    names: &[String],
+    weights: &mut Vec<f64>,
+    families: &[(&[&str], f64)],
+) {
+    let mut named: Vec<(String, f64)> = names.iter().zip(weights.iter()).map(|(n, w)| (n.clone(), *w)).collect();
+    apply_family_cap(&mut named, families);
+    for (i, (_, w)) in named.into_iter().enumerate() {
+        weights[i] = w;
+    }
+}
+
 /// Compute the full correlation matrix for all model pairs (v7).
 /// Returns all pairs with |correlation| > min_corr.
 pub fn compute_correlation_matrix(

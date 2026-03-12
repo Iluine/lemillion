@@ -285,7 +285,7 @@ impl Default for StresaSgdModel {
         Self {
             learning_rate: 0.02,
             regularization: 0.01,
-            smoothing: 0.30,
+            smoothing: 0.18,
             star_smoothing: 0.18,
             n_epochs: 10,
             modular_weight: 0.50,
@@ -871,7 +871,7 @@ impl Default for StresaChaosModel {
         Self {
             k_pilot: 20,
             modular_weight: 0.50,
-            smoothing: 0.25,
+            smoothing: 0.12,
             star_smoothing: 0.18,
             ewma_weight: 0.0,
             spatial_sigma: 0.0,

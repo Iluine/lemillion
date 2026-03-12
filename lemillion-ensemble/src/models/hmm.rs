@@ -25,7 +25,7 @@ impl Default for HmmModel {
         Self {
             n_states: 8, // 8 barres extérieures Stresa (ajusté par pool dans predict)
             max_iter: 20,
-            smoothing: 0.20,
+            smoothing: 0.12,
             min_draws: 30,
         }
     }
