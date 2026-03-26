@@ -1,9 +1,9 @@
 {
-  "t_balls": 0.1784136618437277,
-  "t_stars": 0.28656559358038136,
-  "coherence_weight": 23.51259957265868,
-  "star_coherence_weight": 15.807166617085963,
-  "hedge_eta": 0.24984415912065752,
-  "joint_blend": 0.1872872848034108,
+  "t_balls": 0.18,
+  "t_stars": 0.10,
+  "coherence_weight": 60.0,
+  "star_coherence_weight": 35.0,
+  "hedge_eta": 0.25,
+  "joint_blend": 0.30,
   "k_balls": 15
 }

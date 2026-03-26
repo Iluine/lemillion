@@ -268,6 +268,7 @@ mod tests {
                 ball_order: None,
                 star_order: None,
                 cycle_number: None,
+        prize_tiers: None,
             });
         }
         // Older draws: never have ball 1
@@ -284,6 +285,7 @@ mod tests {
                 ball_order: None,
                 star_order: None,
                 cycle_number: None,
+        prize_tiers: None,
             });
         }
         let dist = model.predict(&draws, Pool::Balls);

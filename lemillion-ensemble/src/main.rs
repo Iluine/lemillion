@@ -1883,6 +1883,7 @@ fn cmd_add_draw(conn: &lemillion_db::rusqlite::Connection, args: &[String]) -> R
         ball_order: None,
         star_order: None,
         cycle_number: None,
+        prize_tiers: None,
     };
     draw.normalize();
     lemillion_db::models::validate_draw(&draw.balls, &draw.stars)?;
@@ -1919,6 +1920,7 @@ fn cmd_fix_draw(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
         ball_order: None,
         star_order: None,
         cycle_number: None,
+        prize_tiers: None,
     };
 
     let inserted = insert_draw(conn, &corrected)?;

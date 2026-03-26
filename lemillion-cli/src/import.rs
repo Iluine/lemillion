@@ -64,6 +64,35 @@ fn parse_record(record: &csv::StringRecord) -> Result<Draw> {
 
     let my_million = get(73).unwrap_or_default();
 
+    // v23: Parse all 13 prize tiers
+    // CSV layout: rang k → col 14+3*(k-1) = winners_FR, col 15+3*(k-1) = winners_EU, col 16+3*(k-1) = prize
+    let prize_tiers: Option<Vec<lemillion_db::models::PrizeTier>> = {
+        let mut tiers = Vec::with_capacity(13);
+        let mut has_any = false;
+        for rank in 1..=13u8 {
+            let base = 14 + 3 * (rank as usize - 1);
+            let winners_fr: i32 = get(base).ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let winners_eu: i32 = get(base + 1).ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let prize = get(base + 2).ok()
+                .and_then(|s| parse_french_decimal(&s).ok())
+                .unwrap_or(0.0);
+            if winners_fr > 0 || winners_eu > 0 || prize > 0.0 {
+                has_any = true;
+            }
+            tiers.push(lemillion_db::models::PrizeTier {
+                rank,
+                winners_fr,
+                winners_eu,
+                prize,
+            });
+        }
+        if has_any { Some(tiers) } else { None }
+    };
+
     Ok(Draw {
         draw_id,
         day,
@@ -76,6 +105,7 @@ fn parse_record(record: &csv::StringRecord) -> Result<Draw> {
         ball_order: Some(ball_order),
         star_order: Some(star_order),
         cycle_number,
+        prize_tiers,
     })
 }
 

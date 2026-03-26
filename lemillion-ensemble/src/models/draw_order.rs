@@ -174,6 +174,7 @@ mod tests {
                 ball_order: Some([7, 1, 15, 30, 45]),
                 star_order: Some([3, 10]),
                 cycle_number: Some((base + 1).min(5)),
+                prize_tiers: None,
             }
         }).collect();
 
@@ -204,6 +205,7 @@ mod tests {
                 ball_order: Some([7, 1, 15, 30, 45]),
                 star_order: Some([3, 10]),
                 cycle_number: None,
+        prize_tiers: None,
             }
         }).collect();
 
@@ -231,6 +233,7 @@ mod tests {
                 ball_order: Some([1, 10, 20, 30, 40]),
                 star_order: Some([3, 10]),
                 cycle_number: None,
+        prize_tiers: None,
             }
         }).collect();
 
@@ -263,6 +266,7 @@ mod tests {
                 ball_order: Some([1, 10 + base, 20, 30, 40 + base]),
                 star_order: Some([3, 10]),
                 cycle_number: None,
+        prize_tiers: None,
             }
         }).collect();
 
@@ -291,6 +295,7 @@ mod tests {
                 ball_order: Some([7, 1, 15, 30, 45]),
                 star_order: Some([3, 10]),
                 cycle_number: None,
+        prize_tiers: None,
             }
         }).collect();
 
@@ -317,6 +322,7 @@ mod tests {
                 ball_order: Some([7, 1, 15, 30, 45]),
                 star_order: Some([10, 3]),  // star 10 always first
                 cycle_number: None,
+        prize_tiers: None,
             }
         }).collect();
 

@@ -234,6 +234,7 @@ mod tests {
                     ball_order: None,
                     star_order: None,
                     cycle_number: Some(cycle),
+                    prize_tiers: None,
                 }
             })
             .collect()
@@ -315,6 +316,7 @@ mod tests {
                 ball_order: None,
                 star_order: None,
                 cycle_number: Some(cycle),
+                prize_tiers: None,
             }
         }).collect();
 
@@ -398,6 +400,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: Some(1),
+            prize_tiers: None,
         }];
         let refs: Vec<&Draw> = draws.iter().collect();
         assert_eq!(model.infer_next_cycle(&refs), 2);
@@ -415,6 +418,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: Some(2),
+            prize_tiers: None,
         }];
         let refs2: Vec<&Draw> = draws2.iter().collect();
         assert_eq!(model.infer_next_cycle(&refs2), 3);
@@ -432,6 +436,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: Some(3),
+            prize_tiers: None,
         }];
         let refs3: Vec<&Draw> = draws3.iter().collect();
         assert_eq!(model.infer_next_cycle(&refs3), 1);

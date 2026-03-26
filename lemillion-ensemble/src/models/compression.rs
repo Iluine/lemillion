@@ -244,6 +244,7 @@ mod tests {
                 balls: [10, 20, 30, 40, 50], stars: [5, 10],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
                 ball_order: None, star_order: None, cycle_number: None,
+        prize_tiers: None,
             },
             Draw {
                 draw_id: "1".to_string(), day: "MARDI".to_string(),
@@ -251,6 +252,7 @@ mod tests {
                 balls: [1, 2, 3, 4, 5], stars: [1, 2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
                 ball_order: None, star_order: None, cycle_number: None,
+        prize_tiers: None,
             },
         ];
 

@@ -234,6 +234,7 @@ mod tests {
                     ]),
                     star_order: Some([((base % 6) + 1).min(12), ((base % 6) + 7).min(12)]),
                     cycle_number: None,
+        prize_tiers: None,
                 }
             })
             .collect()
@@ -326,6 +327,7 @@ mod tests {
                     ball_order: Some(order),
                     star_order: Some([3, 10]),
                     cycle_number: None,
+        prize_tiers: None,
                 }
             })
             .collect();

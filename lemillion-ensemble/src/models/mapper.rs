@@ -554,6 +554,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         };
         let enc = encode_draw_7d(&draw);
         for &v in &enc {

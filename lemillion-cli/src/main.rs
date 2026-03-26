@@ -217,6 +217,7 @@ fn cmd_add(conn: &lemillion_db::rusqlite::Connection) -> Result<()> {
         ball_order: None,
         star_order: None,
         cycle_number: None,
+        prize_tiers: None,
     };
 
     println!("\nTirage à insérer :");

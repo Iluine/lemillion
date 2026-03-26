@@ -60,14 +60,20 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         let _ = conn.execute_batch(&sql);
     }
 
+    // v23: prize_tiers_json column for full tier data
+    let _ = conn.execute_batch("ALTER TABLE draws ADD COLUMN prize_tiers_json TEXT");
+
     Ok(())
 }
 
 pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
+    let prize_tiers_json = draw.prize_tiers.as_ref()
+        .map(|tiers| serde_json::to_string(tiers).unwrap_or_default());
+
     let changed = conn.execute(
         "INSERT OR IGNORE INTO draws (draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million,
-         ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+         ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number, prize_tiers_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         rusqlite::params![
             draw.draw_id,
             draw.day,
@@ -90,6 +96,7 @@ pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
             draw.star_order.map(|o| o[0]),
             draw.star_order.map(|o| o[1]),
             draw.cycle_number,
+            prize_tiers_json,
         ],
     ).context("Échec de l'insertion")?;
 
@@ -113,6 +120,16 @@ pub fn insert_draw(conn: &Connection, draw: &Draw) -> Result<bool> {
         ).context("Échec de la mise à jour de l'ordre")?;
     }
 
+    // v23: Update prize_tiers_json for existing draws that lack it
+    if changed == 0 && draw.prize_tiers.is_some() {
+        let json = draw.prize_tiers.as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_default());
+        conn.execute(
+            "UPDATE draws SET prize_tiers_json=?2 WHERE draw_id=?1 AND prize_tiers_json IS NULL",
+            rusqlite::params![draw.draw_id, json],
+        ).context("Échec de la mise à jour des prize tiers")?;
+    }
+
     Ok(changed > 0)
 }
 
@@ -124,7 +141,7 @@ pub fn delete_draw(conn: &Connection, draw_id: &str) -> Result<bool> {
     Ok(changed > 0)
 }
 
-const SELECT_DRAW_COLS: &str = "draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million, ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number";
+const SELECT_DRAW_COLS: &str = "draw_id, day, date, ball_1, ball_2, ball_3, ball_4, ball_5, star_1, star_2, winner_count, winner_prize, my_million, ball_order_1, ball_order_2, ball_order_3, ball_order_4, ball_order_5, star_order_1, star_order_2, cycle_number, prize_tiers_json";
 
 fn draw_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Draw> {
     let bo1: Option<u8> = row.get(13)?;
@@ -143,6 +160,10 @@ fn draw_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Draw> {
         (Some(a), Some(b)) => Some([a, b]),
         _ => None,
     };
+
+    // v23: parse prize_tiers_json
+    let prize_tiers: Option<Vec<crate::models::PrizeTier>> = row.get::<_, Option<String>>(21)?
+        .and_then(|json| serde_json::from_str(&json).ok());
 
     Ok(Draw {
         draw_id: row.get(0)?,
@@ -165,6 +186,7 @@ fn draw_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Draw> {
         ball_order,
         star_order,
         cycle_number: row.get(20)?,
+        prize_tiers,
     })
 }
 
@@ -240,6 +262,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         }
     }
 

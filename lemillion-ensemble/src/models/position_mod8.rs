@@ -272,6 +272,7 @@ mod tests {
                     ball_order: Some(balls),
                     star_order: None,
                     cycle_number: None,
+        prize_tiers: None,
                 }
             })
             .collect()

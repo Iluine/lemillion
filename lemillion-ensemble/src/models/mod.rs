@@ -297,6 +297,7 @@ pub fn make_test_draws(n: usize) -> Vec<Draw> {
                 ball_order: None,
                 star_order: None,
                 cycle_number: None,
+                prize_tiers: None,
             }
         })
         .collect()
@@ -341,6 +342,7 @@ mod tests {
                 ball_order: None,
                 star_order: None,
                 cycle_number: None,
+                prize_tiers: None,
             })
             .collect();
         let filtered = filter_star_era(&draws);
@@ -356,35 +358,35 @@ mod tests {
                 date: "2024-01-04".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
             Draw {
                 draw_id: "3".to_string(), day: "MARDI".to_string(),
                 date: "2020-06-15".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
             Draw {
                 draw_id: "2".to_string(), day: "MARDI".to_string(),
                 date: "2016-09-27".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
             Draw {
                 draw_id: "1".to_string(), day: "MARDI".to_string(),
                 date: "2016-09-26".to_string(),  // one day before cutoff
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
             Draw {
                 draw_id: "0".to_string(), day: "MARDI".to_string(),
                 date: "2010-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
         ];
         let filtered = filter_star_era(&draws);
@@ -401,14 +403,14 @@ mod tests {
                 date: "2015-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
             Draw {
                 draw_id: "0".to_string(), day: "MARDI".to_string(),
                 date: "2010-01-01".to_string(),
                 balls: [1,2,3,4,5], stars: [1,2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
-                ball_order: None, star_order: None, cycle_number: None,
+                ball_order: None, star_order: None, cycle_number: None, prize_tiers: None,
             },
         ];
         let filtered = filter_star_era(&draws);

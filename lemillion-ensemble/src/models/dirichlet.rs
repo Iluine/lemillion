@@ -109,6 +109,7 @@ mod tests {
                 stars: [1, 2],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
                 ball_order: None, star_order: None, cycle_number: None,
+        prize_tiers: None,
             });
         }
         for i in 10..100 {
@@ -121,6 +122,7 @@ mod tests {
                 stars: [((i % 11) + 1) as u8, ((i % 11) + 2) as u8],
                 winner_count: 0, winner_prize: 0.0, my_million: String::new(),
                 ball_order: None, star_order: None, cycle_number: None,
+        prize_tiers: None,
             });
         }
 

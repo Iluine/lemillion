@@ -406,6 +406,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         };
         assert_eq!(count_matches(&[1, 2, 3, 4, 5], &[1, 2], &draw), (5, 2));
     }
@@ -424,6 +425,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         };
         assert_eq!(count_matches(&[1, 2, 10, 20, 30], &[1, 8], &draw), (2, 1));
     }
@@ -442,6 +444,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         };
         assert_eq!(count_matches(&[10, 20, 30, 40, 50], &[8, 9], &draw), (0, 0));
     }

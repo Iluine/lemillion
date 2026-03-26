@@ -63,6 +63,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         }
     }
 

@@ -1,4 +1,18 @@
 use anyhow::{bail, Result};
+use serde::{Deserialize, Serialize};
+
+/// Prize tier data for a single tier (rang) of EuroMillions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrizeTier {
+    /// Tier rank (1 = jackpot 5+2, 13 = lowest 2+0)
+    pub rank: u8,
+    /// Number of winners in France
+    pub winners_fr: i32,
+    /// Number of winners in Europe
+    pub winners_eu: i32,
+    /// Prize per winner (euros)
+    pub prize: f64,
+}
 
 #[derive(Debug, Clone)]
 pub struct Draw {
@@ -16,6 +30,8 @@ pub struct Draw {
     pub star_order: Option<[u8; 2]>,
     /// Numéro de tirage dans le cycle (colonne 3 du CSV FDJ).
     pub cycle_number: Option<u8>,
+    /// v23: Full prize tier data (13 tiers) — winners and prizes per tier.
+    pub prize_tiers: Option<Vec<PrizeTier>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +191,7 @@ mod tests {
             ball_order: None,
             star_order: None,
             cycle_number: None,
+        prize_tiers: None,
         };
         assert_eq!(Pool::Balls.numbers_from(&draw), &[1, 2, 3, 4, 5]);
         assert_eq!(Pool::Stars.numbers_from(&draw), &[6, 7]);
