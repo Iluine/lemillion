@@ -334,6 +334,69 @@ pub fn apply_temperature(probs: &[f64], temperature: f64) -> Vec<f64> {
     }
 }
 
+/// v23: Entropic tilting — concentrates distribution SELECTIVELY based on structural constraints.
+/// Unlike temperature scaling (which sharpens uniformly), entropic tilting amplifies numbers
+/// that have high PAIR co-occurrence with other high-probability numbers.
+/// Formula: q(i) ∝ p(i) × exp(λ × pair_affinity(i))
+/// where pair_affinity(i) = Σ_j p(j) × pair_bonus(i,j) for j≠i.
+pub fn entropic_tilt(
+    probs: &[f64],
+    pair_freq: &std::collections::HashMap<(u8, u8), f64>,
+    strength: f64, // tilting strength ∈ [0, 50], 0=no tilt, higher=more concentrated
+) -> Vec<f64> {
+    let n = probs.len();
+    if n == 0 || strength < 1e-6 {
+        return probs.to_vec();
+    }
+
+    let uniform = 1.0 / n as f64;
+    let expected_pair = if n == 50 { 5.0 * 4.0 / (50.0 * 49.0) } else { 2.0 * 1.0 / (12.0 * 11.0) };
+
+    // Compute pair affinity for each number:
+    // How well does number i "fit" with the other high-probability numbers?
+    let mut affinity = vec![0.0f64; n];
+    for i in 0..n {
+        let ni = (i + 1) as u8;
+        for j in 0..n {
+            if i == j { continue; }
+            let nj = (j + 1) as u8;
+            let (a, b) = if ni < nj { (ni, nj) } else { (nj, ni) };
+            let freq = pair_freq.get(&(a, b)).copied().unwrap_or(0.0);
+            // Pair bonus: log-ratio of observed to expected frequency
+            let bonus = if expected_pair > 0.0 && freq > 0.0 {
+                (freq / expected_pair).ln().clamp(-2.0, 2.0)
+            } else {
+                0.0
+            };
+            // Weight by partner's probability (focus on likely partners)
+            affinity[i] += probs[j] * bonus;
+        }
+    }
+
+    // Normalize affinity to [-1, 1] range
+    let max_aff = affinity.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_aff = affinity.iter().cloned().fold(f64::INFINITY, f64::min);
+    let range = (max_aff - min_aff).max(1e-10);
+    for a in &mut affinity {
+        *a = (*a - min_aff) / range * 2.0 - 1.0; // ∈ [-1, 1]
+    }
+
+    // Apply tilting: q(i) ∝ p(i) × exp(strength × affinity(i))
+    let mut tilted: Vec<f64> = probs.iter().enumerate()
+        .map(|(i, &p)| p * (strength * affinity[i]).exp())
+        .collect();
+
+    // Normalize
+    let total: f64 = tilted.iter().sum();
+    if total > 0.0 {
+        for t in &mut tilted { *t /= total; }
+    } else {
+        return probs.to_vec();
+    }
+
+    tilted
+}
+
 /// Grille déterministe : top 5 boules + top 2 étoiles par probabilité ensemble.
 pub fn optimal_grid(ball_probs: &[f64], star_probs: &[f64]) -> Suggestion {
     let mut ball_indices: Vec<usize> = (0..ball_probs.len()).collect();
@@ -700,6 +763,30 @@ pub struct CoherenceScorer {
 }
 
 impl CoherenceScorer {
+    /// v23: Construct from pre-computed stats (stored in calibration.json).
+    pub fn from_stats(stats: &crate::ensemble::calibration::CoherenceStats) -> Self {
+        Self {
+            mean_sum: stats.mean_sum,
+            std_sum: stats.std_sum,
+            mean_spread: stats.mean_spread,
+            std_spread: stats.std_spread,
+            pair_freq: stats.pair_freq.iter().cloned().collect(),
+            triplet_freq: stats.triplet_freq.iter().cloned().collect(),
+        }
+    }
+
+    /// v23: Export stats for serialization in calibration.json.
+    pub fn to_stats(&self) -> crate::ensemble::calibration::CoherenceStats {
+        crate::ensemble::calibration::CoherenceStats {
+            mean_sum: self.mean_sum,
+            std_sum: self.std_sum,
+            mean_spread: self.mean_spread,
+            std_spread: self.std_spread,
+            pair_freq: self.pair_freq.iter().map(|(&k, &v)| (k, v)).collect(),
+            triplet_freq: self.triplet_freq.iter().map(|(&k, &v)| (k, v)).collect(),
+        }
+    }
+
     /// Construit un scorer depuis l'historique des tirages.
     pub fn from_history(draws: &[Draw], pool: Pool) -> Self {
         let (sums, spreads) = Self::compute_sum_spread_stats(draws, pool);
@@ -3161,17 +3248,20 @@ pub fn select_optimal_n_grids(
                 .max(1e-30);
             let marginal = p_no_win_before * (candidate.score / 139_838_160.0);
 
-            // v10: overlap_bonus géométrique (Liu-Teo 2024)
-            let overlap_bonus: f64 = selected.iter().map(|s| {
-                let common_b = candidate.balls.iter().filter(|b| s.balls.contains(b)).count();
-                match common_b {
-                    0 => 0.70,
-                    1 => 1.25,
-                    2 => 1.10,
-                    3 => 0.50,
-                    _ => 0.20,
-                }
-            }).product::<f64>().powf(1.0 / selected.len() as f64);
+            // v23: Structured overlap (Liu-Teo 2024) — minimize overlap VARIANCE
+            // instead of using discrete bonuses. Overlaps should be UNIFORMLY distributed.
+            let overlaps: Vec<usize> = selected.iter().map(|s| {
+                candidate.balls.iter().filter(|b| s.balls.contains(b)).count()
+            }).collect();
+            let mean_overlap = overlaps.iter().sum::<usize>() as f64 / overlaps.len().max(1) as f64;
+            let overlap_variance = if overlaps.len() > 1 {
+                overlaps.iter().map(|&o| (o as f64 - mean_overlap).powi(2)).sum::<f64>() / overlaps.len() as f64
+            } else { 0.0 };
+
+            // Target: mean overlap ≈ 1.0-1.5, variance ≈ 0.0
+            let mean_penalty = (-(mean_overlap - 1.2).powi(2) / 2.0).exp(); // peak at 1.2 common
+            let variance_penalty = (-overlap_variance / 0.5).exp(); // penalize high variance
+            let overlap_bonus = mean_penalty * variance_penalty;
 
             let score = marginal * overlap_bonus;
             if score > best_score {

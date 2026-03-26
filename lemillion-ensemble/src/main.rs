@@ -771,6 +771,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         diagnostics,
         conformal_ball_max_ranks: Vec::new(),
         conformal_star_max_ranks: Vec::new(),
+        coherence_stats: None,
     };
 
     display::display_weights(&ensemble_weights);
@@ -900,6 +901,16 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
 
         ensemble_weights.conformal_ball_max_ranks = ball_max_ranks;
         ensemble_weights.conformal_star_max_ranks = star_max_ranks;
+    }
+
+    // v23: Pre-compute and store coherence statistics on full history
+    {
+        println!("Pré-calcul des statistiques de cohérence (stabilisation v23)...");
+        let coherence = CoherenceScorer::from_history(&draws, Pool::Balls);
+        let stats = coherence.to_stats();
+        println!("  Paires: {}, Triplets: {}", stats.pair_freq.len(), stats.triplet_freq.len());
+        println!("  Sum: {:.1} ± {:.1}, Spread: {:.1} ± {:.1}", stats.mean_sum, stats.std_sum, stats.mean_spread, stats.std_spread);
+        ensemble_weights.coherence_stats = Some(stats);
     }
 
     // Sauvegarder
@@ -1320,11 +1331,36 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         (bt, st)
     };
 
-    let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
-        println!("(Température boules : {:.2})", eff_bt);
-        apply_temperature(&ball_pred.distribution, eff_bt)
+    // v23: Bayesian adaptive star temperature from pair confidence
+    let eff_st = {
+        let star_pair_model_tmp = lemillion_ensemble::models::star_pair::StarPairModel::default();
+        if let Some((_, confidence)) = star_pair_model_tmp.predict_pair_distribution_with_confidence(&draws) {
+            let adapted = (eff_st * (1.5 - confidence)).clamp(0.08, 0.30);
+            println!("(Star pair confidence: {:.2} → T_stars adapted: {:.2} → {:.2})", confidence, eff_st, adapted);
+            adapted
+        } else {
+            eff_st
+        }
+    };
+
+    // v23: Build coherence scorer early (needed for entropic tilt + jackpot scoring)
+    let coherence = if let Ok(ref w) = weights {
+        w.coherence_stats.as_ref()
+            .map(|s| CoherenceScorer::from_stats(s))
+            .unwrap_or_else(|| CoherenceScorer::from_history(&draws, Pool::Balls))
     } else {
-        ball_pred.distribution.clone()
+        CoherenceScorer::from_history(&draws, Pool::Balls)
+    };
+
+    // v23: Entropic tilt for balls (structure-aware concentration)
+    let ball_tilted = {
+        lemillion_ensemble::sampler::entropic_tilt(&ball_pred.distribution, &coherence.pair_freq, 3.0)
+    };
+    let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
+        println!("(Température boules : {:.2}, après entropic tilt)", eff_bt);
+        apply_temperature(&ball_tilted, eff_bt)
+    } else {
+        ball_tilted
     };
     let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
         println!("(Température étoiles : {:.2})", eff_st);
@@ -1347,7 +1383,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             Some(StructuralFilter::adaptive(&draws))
         };
 
-        let coherence = CoherenceScorer::from_history(&draws, Pool::Balls);
+        // coherence already built above for entropic tilt
         let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
         joint_model.train(&draws);
 
@@ -2829,9 +2865,31 @@ fn cmd_holdout_eval(
                     (bt, st)
                 };
 
+                // v23: Bayesian adaptive star temperature from pair confidence
+                let eff_st = {
+                    let star_pair_model_tmp = lemillion_ensemble::models::star_pair::StarPairModel::default();
+                    if let Some((_, confidence)) = star_pair_model_tmp.predict_pair_distribution_with_confidence(training_draws) {
+                        // High confidence → sharper (lower T), low confidence → conservative
+                        (eff_st * (1.5 - confidence)).clamp(0.08, 0.30)
+                    } else {
+                        eff_st
+                    }
+                };
+
+                // v23: Build coherence scorer early (needed for entropic tilt)
+                let coherence = if let Some(ref stats) = weights.coherence_stats {
+                    CoherenceScorer::from_stats(stats)
+                } else {
+                    CoherenceScorer::from_history(training_draws, Pool::Balls)
+                };
+
+                // v23: Entropic tilt for balls (structure-aware concentration)
+                let ball_tilted = {
+                    lemillion_ensemble::sampler::entropic_tilt(&ball_pred.distribution, &coherence.pair_freq, 3.0)
+                };
                 let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
-                    apply_temperature(&ball_pred.distribution, eff_bt)
-                } else { ball_pred.distribution.clone() };
+                    apply_temperature(&ball_tilted, eff_bt)
+                } else { ball_tilted };
                 let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
                     apply_temperature(&star_pred.distribution, eff_st)
                 } else { star_pred.distribution.clone() };
@@ -2859,7 +2917,7 @@ fn cmd_holdout_eval(
 
                 // 10. Generate suggestions and compute improvement factor
                 let filter = StructuralFilter::adaptive(training_draws);
-                let coherence = CoherenceScorer::from_history(training_draws, Pool::Balls);
+                // coherence already built above for entropic tilt
                 let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
                 joint_model.train(training_draws);
                 let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();

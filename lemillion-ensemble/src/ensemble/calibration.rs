@@ -320,6 +320,21 @@ pub struct EnsembleWeights {
     /// v22: Same for stars.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conformal_star_max_ranks: Vec<usize>,
+    /// v23: Pre-computed coherence statistics for stable scoring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coherence_stats: Option<CoherenceStats>,
+}
+
+/// v23: Pre-computed coherence statistics from full historical data.
+/// Stored in calibration.json for stable, reproducible scoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoherenceStats {
+    pub mean_sum: f64,
+    pub std_sum: f64,
+    pub mean_spread: f64,
+    pub std_spread: f64,
+    pub pair_freq: Vec<((u8, u8), f64)>,
+    pub triplet_freq: Vec<((u8, u8, u8), f64)>,
 }
 
 /// Calcule le nombre réel de test points après stride.
@@ -2462,6 +2477,7 @@ mod tests {
             diagnostics: Vec::new(),
             conformal_ball_max_ranks: Vec::new(),
             conformal_star_max_ranks: Vec::new(),
+            coherence_stats: None,
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();
