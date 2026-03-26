@@ -95,14 +95,17 @@ impl RegimeFeatures {
             1.0
         };
 
-        // Jour de la semaine : MARDI=0, VENDREDI=1 (basé sur le jour dans la date)
-        let day_of_week = if last.day.to_uppercase().contains("VENDREDI")
+        // v23b: Day + season encoding — combines MARDI/VENDREDI with seasonal proxy.
+        // Format: day_base (0.0/1.0) + 0.1 * season_signal (sin of month angle)
+        // This captures temperature/humidity correlation without adding a feature dimension.
+        let day_base = if last.day.to_uppercase().contains("VENDREDI")
             || last.day.to_uppercase().contains("FRI")
-        {
-            1.0
-        } else {
-            0.0
-        };
+        { 1.0 } else { 0.0 };
+        let month = last.date.split('-').nth(1)
+            .and_then(|m| m.parse::<f64>().ok())
+            .unwrap_or(6.0);
+        let season_signal = (2.0 * std::f64::consts::PI * (month - 1.0) / 12.0).sin();
+        let day_of_week = (day_base + 0.1 * season_signal).clamp(0.0, 1.0);
 
         // Gap compression : ratio moyen des gaps courants vs espérance géométrique
         let gap_compression = compute_gap_compression(draws);

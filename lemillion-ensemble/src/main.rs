@@ -72,7 +72,7 @@ enum Command {
         holdout: usize,
 
         /// Blend recall@K dans le calcul des poids (0.0=LL pur, 1.0=recall pur, 0.3=hybride)
-        #[arg(long, default_value = "0.0")]
+        #[arg(long, default_value = "0.3")]
         recall_blend: f64,
     },
 
@@ -614,6 +614,21 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     ];
     apply_family_cap(&mut ball_weights, &families);
     apply_family_cap(&mut star_weights, &families);
+
+    // v23b: Markowitz mean-variance optimization for ball weights
+    if calibrate_balls && !detailed_ll.is_empty() {
+        use lemillion_ensemble::ensemble::calibration::compute_markowitz_weights;
+        let model_names: Vec<String> = models.iter().map(|m| m.name().to_string()).collect();
+        let base_w: Vec<f64> = ball_weights.iter().map(|(_, w)| *w).collect();
+        let markowitz_w = compute_markowitz_weights(&base_w, &model_names, &detailed_ll, 5.0);
+        println!("\n  Markowitz portfolio optimization appliqué (risk_aversion=5.0)");
+        for (i, (name, w)) in ball_weights.iter_mut().enumerate() {
+            *w = markowitz_w[i];
+        }
+        // Renormalize
+        let total: f64 = ball_weights.iter().map(|(_, w)| *w).sum();
+        if total > 0.0 { for (_, w) in ball_weights.iter_mut() { *w /= total; } }
+    }
 
     // Stacking : collecter données + entraîner
     println!("\nEntraînement du stacking...");
@@ -1352,13 +1367,15 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         CoherenceScorer::from_history(&draws, Pool::Balls)
     };
 
-    // v23: Entropic tilt disabled (strength=3.0 was too aggressive, collapsed scores to 0)
-    // TODO: tune strength parameter or use softer tilting
+    // v23b: Entropic tilt at low strength (0.2) — structure-aware but gentle
+    let ball_tilted = lemillion_ensemble::sampler::entropic_tilt(
+        &ball_pred.distribution, &coherence.pair_freq, 0.2,
+    );
     let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
-        println!("(Température boules : {:.2})", eff_bt);
-        apply_temperature(&ball_pred.distribution, eff_bt)
+        println!("(Température boules : {:.2}, entropic tilt=0.2)", eff_bt);
+        apply_temperature(&ball_tilted, eff_bt)
     } else {
-        ball_pred.distribution.clone()
+        ball_tilted
     };
     let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
         println!("(Température étoiles : {:.2})", eff_st);
@@ -2881,10 +2898,13 @@ fn cmd_holdout_eval(
                     CoherenceScorer::from_history(training_draws, Pool::Balls)
                 };
 
-                // v23: Entropic tilt disabled (too aggressive at strength=3.0)
+                // v23b: Entropic tilt at low strength
+                let ball_tilted = lemillion_ensemble::sampler::entropic_tilt(
+                    &ball_pred.distribution, &coherence.pair_freq, 0.2,
+                );
                 let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
-                    apply_temperature(&ball_pred.distribution, eff_bt)
-                } else { ball_pred.distribution.clone() };
+                    apply_temperature(&ball_tilted, eff_bt)
+                } else { ball_tilted };
                 let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
                     apply_temperature(&star_pred.distribution, eff_st)
                 } else { star_pred.distribution.clone() };
