@@ -741,20 +741,27 @@ pub fn display_temperature_sweep(rows: &[TemperatureSweepRow]) {
     println!("  Meilleure T (score) : {:.1}", rows[best_score_idx].temperature);
 }
 
-/// Affiche le resume EV : jackpot, seuil, recommendation jouer/ne pas jouer.
-pub fn display_ev_summary(popularity: &PopularityModel, jackpot: f64) {
+//// Affiche le resume EV : jackpot, seuil, recommendation jouer/ne pas jouer.
+/// v23d: Uses real ticket estimates from prize tier data when available.
+pub fn display_ev_summary(popularity: &PopularityModel, jackpot: f64, draws: &[lemillion_db::models::Draw]) {
+    use crate::expected_value::{estimate_tickets_from_tiers, compute_ev_real, ticket_volume_trend};
+
     println!("\n== Analyse Esperance de Gain ==\n");
 
     let threshold = jackpot_threshold();
 
-    // EV pour une grille moyenne et une grille impopulaire
+    // v23d: Real ticket volume estimate
+    let real_tickets = estimate_tickets_from_tiers(draws);
+    let (median_tickets, trend) = ticket_volume_trend(draws);
+
+    // EV pour une grille moyenne et une grille impopulaire (using real data)
     let avg_grid_balls = [10, 20, 25, 35, 45];
     let avg_grid_stars = [4, 9];
-    let ev_avg = compute_ev(&avg_grid_balls, &avg_grid_stars, popularity, jackpot);
+    let ev_avg = compute_ev_real(&avg_grid_balls, &avg_grid_stars, popularity, jackpot, draws);
 
     let unpop_grid_balls = [33, 38, 42, 47, 50];
     let unpop_grid_stars = [10, 12];
-    let ev_unpop = compute_ev(&unpop_grid_balls, &unpop_grid_stars, popularity, jackpot);
+    let ev_unpop = compute_ev_real(&unpop_grid_balls, &unpop_grid_stars, popularity, jackpot, draws);
 
     let mut table = Table::new();
     table
@@ -770,6 +777,15 @@ pub fn display_ev_summary(popularity: &PopularityModel, jackpot: f64) {
         Cell::new("Seuil EV positive"),
         Cell::new(format!("{:.0} EUR", threshold)),
     ]);
+
+    // v23d: Real ticket estimate
+    table.add_row(vec![
+        Cell::new("Tickets vendus (estimé)"),
+        Cell::new(format!("{:.1}M (tendance: {:.0}%)", real_tickets / 1_000_000.0,
+            (trend - 1.0) * 100.0))
+            .fg(if trend > 1.05 { Color::Yellow } else { Color::White }),
+    ]);
+
     table.add_row(vec![
         Cell::new("EV/EUR (grille moyenne)"),
         Cell::new(format!("{:.4}", ev_avg.ev_per_euro)).fg(

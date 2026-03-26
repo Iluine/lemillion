@@ -1026,8 +1026,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
     // Modele de popularite
     let popularity = PopularityModel::from_history(&draws);
 
-    // Afficher resume EV et carte de popularite
-    display::display_ev_summary(&popularity, jackpot);
+    // Afficher resume EV et carte de popularite (v23d: real ticket data)
+    display::display_ev_summary(&popularity, jackpot, &draws);
     display::display_popularity_map(&popularity);
 
     let models = all_models();
