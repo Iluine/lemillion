@@ -233,6 +233,9 @@ pub struct CalibrationResult {
     #[serde(deserialize_with = "deserialize_ll")]
     pub log_likelihood: f64,
     pub n_tests: usize,
+    /// v22: Average recall@K for this configuration.
+    #[serde(default)]
+    pub recall_at_k: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +249,9 @@ pub struct ModelCalibration {
     /// Number of test points for the best configuration.
     #[serde(default)]
     pub best_n_tests: usize,
+    /// v22: Best recall@K for this model (at best LL window).
+    #[serde(default)]
+    pub best_recall: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -455,6 +461,115 @@ pub fn walk_forward_evaluate_with_strategy(
     }
 }
 
+/// v22: Walk-forward evaluation returning both LL and recall@K.
+/// K defaults to 25 for balls, 6 for stars (typical enumeration sizes).
+/// recall@K = fraction of winning numbers that appear in the top-K by model probability.
+pub fn walk_forward_evaluate_with_recall(
+    model: &dyn ForecastModel,
+    draws: &[Draw],
+    window: usize,
+    pool: Pool,
+    strategy: SamplingStrategy,
+) -> (f64, f64) {
+    let draws = if pool == Pool::Stars {
+        filter_star_era(draws)
+    } else {
+        draws
+    };
+
+    let min_history = 10;
+    let k = if pool == Pool::Balls { 25 } else { 6 };
+    let pick_count = pool.pick_count();
+
+    let max_t = match strategy {
+        SamplingStrategy::Consecutive => draws.len().saturating_sub(window + 1),
+        SamplingStrategy::Sparse { span_multiplier } => draws.len().saturating_sub(window * span_multiplier + 1),
+        SamplingStrategy::FullHistory => draws.len().saturating_sub(min_history + 1),
+    };
+
+    if max_t == 0 {
+        return (f64::NEG_INFINITY, 0.0);
+    }
+
+    let max_tests = 500;
+    let stride = (max_t / max_tests).max(1);
+    let mut test_indices: Vec<usize> = (0..max_t).step_by(stride).collect();
+    for recent in 0..5.min(max_t) {
+        if !test_indices.contains(&recent) {
+            test_indices.push(recent);
+        }
+    }
+    test_indices.sort();
+    test_indices.dedup();
+
+    let results: Vec<(f64, f64)> = test_indices
+        .par_iter()
+        .filter_map(|&t| {
+            let dist = match strategy {
+                SamplingStrategy::Consecutive => {
+                    let train_end = (t + 1 + window).min(draws.len());
+                    let train_data = &draws[t + 1..train_end];
+                    if train_data.len() < 3 { return None; }
+                    model.predict(train_data, pool)
+                }
+                SamplingStrategy::Sparse { span_multiplier } => {
+                    let span = window * span_multiplier;
+                    let actual_span = span.min(draws.len() - t - 1);
+                    let full_range = &draws[t + 1..t + 1 + actual_span];
+                    if full_range.len() < 3 { return None; }
+                    let step = (actual_span / window).max(1);
+                    let train_data: Vec<Draw> = full_range.iter().step_by(step).take(window).cloned().collect();
+                    if train_data.len() < 3 { return None; }
+                    model.predict(&train_data, pool)
+                }
+                SamplingStrategy::FullHistory => {
+                    let train_data = &draws[t + 1..];
+                    if train_data.len() < min_history { return None; }
+                    model.predict(train_data, pool)
+                }
+            };
+
+            // LL computation (same as walk_forward_evaluate_with_strategy)
+            let test_draw = &draws[t];
+            let test_numbers = pool.numbers_from(test_draw);
+            let n_pool = pool.size() as f64;
+            let uniform_ll = (1.0 / n_pool).ln();
+            let ll_cap = 2.0 * uniform_ll;
+            let mut draw_ll = 0.0f64;
+            for &n in test_numbers {
+                let idx = (n - 1) as usize;
+                if idx < dist.len() {
+                    let raw_ll = dist[idx].max(1e-15).ln();
+                    let ll = if raw_ll < ll_cap { ll_cap + 0.5 * (raw_ll - ll_cap) } else { raw_ll };
+                    draw_ll += ll;
+                }
+            }
+
+            if draw_ll.is_nan() { return None; }
+
+            // Recall@K: sort by probability descending, check how many winning numbers are in top-K
+            let mut indexed: Vec<(usize, f64)> = dist.iter().copied().enumerate().collect();
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top_k_indices: Vec<usize> = indexed.iter().take(k).map(|(i, _)| *i).collect();
+            let hits = test_numbers.iter()
+                .filter(|&&n| top_k_indices.contains(&((n - 1) as usize)))
+                .count();
+            let recall = hits as f64 / pick_count as f64;
+
+            Some((draw_ll, recall))
+        })
+        .collect();
+
+    let n_tests = results.len();
+    if n_tests > 0 {
+        let avg_ll = results.iter().map(|(ll, _)| ll).sum::<f64>() / n_tests as f64;
+        let avg_recall = results.iter().map(|(_, r)| r).sum::<f64>() / n_tests as f64;
+        (avg_ll, avg_recall)
+    } else {
+        (f64::NEG_INFINITY, 0.0)
+    }
+}
+
 /// Calcule la log-likelihood de la distribution uniforme pour une pool donnée.
 pub fn uniform_log_likelihood(pool: Pool) -> f64 {
     let p = 1.0 / pool.size() as f64;
@@ -620,6 +735,55 @@ pub fn compute_weights_with_threshold(
     }
 }
 
+/// v22: Compute weights using recall@K metric instead of (or blended with) LL.
+/// recall_blend ∈ [0, 1]: 0 = pure LL (original), 1 = pure recall, 0.5 = hybrid.
+/// Uniform recall@K for balls = 5/50 × C(25,5)/C(50,5) ≈ 0.278 (probability 5 balls all in top-25).
+/// Actually, recall@25 for uniform = 25/50 = 0.5 per ball, so E[recall] = 5×(25/50)/5 = 0.5.
+pub fn compute_weights_with_recall(
+    calibrations: &[ModelCalibration],
+    pool: Pool,
+    temperature: f64,
+    recall_blend: f64,
+) -> Vec<(String, f64)> {
+    let uniform_ll = uniform_log_likelihood(pool);
+    // Uniform recall@K: each number has K/N chance of being in top-K under uniform distribution
+    let k = if pool == Pool::Balls { 25 } else { 6 };
+    let n_pool = pool.size();
+    let uniform_recall = k as f64 / n_pool as f64; // 0.5 for balls@25, 0.5 for stars@6
+
+    let raw_weights: Vec<f64> = calibrations
+        .iter()
+        .map(|c| {
+            let ll_skill = c.best_ll - uniform_ll;
+            let recall_skill = c.best_recall - uniform_recall;
+
+            // Both must be positive for the model to contribute
+            if ll_skill.is_nan() || ll_skill <= 0.0005 {
+                return 0.0;
+            }
+
+            let n = if c.best_n_tests > 0 { c.best_n_tests } else { 100 };
+
+            // Blended skill: weighted average of LL-skill and recall-skill
+            let blended_skill = (1.0 - recall_blend) * ll_skill + recall_blend * recall_skill.max(0.0);
+            let total_skill = (blended_skill * n as f64).min(20.0);
+            let raw = (total_skill / temperature).exp();
+            raw * cross_window_stability(&c.results)
+        })
+        .collect();
+
+    let total: f64 = raw_weights.iter().sum();
+
+    if total > 0.0 {
+        calibrations.iter().zip(raw_weights.iter())
+            .map(|(c, &w)| (c.model_name.clone(), w / total))
+            .collect()
+    } else {
+        let n = calibrations.len() as f64;
+        calibrations.iter().map(|c| (c.model_name.clone(), 1.0 / n)).collect()
+    }
+}
+
 pub fn calibrate_model(
     model: &dyn ForecastModel,
     draws: &[Draw],
@@ -630,7 +794,7 @@ pub fn calibrate_model(
 
     // FullHistory : une seule évaluation, pas de boucle sur les fenêtres
     if strategy == SamplingStrategy::FullHistory {
-        let ll = walk_forward_evaluate_with_strategy(
+        let (ll, recall) = walk_forward_evaluate_with_recall(
             model, draws, 0, pool, SamplingStrategy::FullHistory,
         );
         let min_history = 10;
@@ -645,11 +809,13 @@ pub fn calibrate_model(
                 sparse: false,
                 log_likelihood: ll,
                 n_tests,
+                recall_at_k: recall,
             }],
             best_window: 0,
             best_sparse: false,
             best_ll: ll,
             best_n_tests: n_tests,
+            best_recall: recall,
         };
     }
 
@@ -658,10 +824,11 @@ pub fn calibrate_model(
     let mut best_window = windows[0];
     let mut best_sparse = false;
     let mut best_n_tests = 0usize;
+    let mut best_recall = 0.0f64;
 
     for &window in windows {
-        // Toujours évaluer en mode consécutif
-        let ll = walk_forward_evaluate_with_strategy(
+        // v22: Evaluate with both LL and recall@K
+        let (ll, recall) = walk_forward_evaluate_with_recall(
             model, draws, window, pool, SamplingStrategy::Consecutive,
         );
         let max_t = draws.len().saturating_sub(window + 1);
@@ -673,6 +840,7 @@ pub fn calibrate_model(
             sparse: false,
             log_likelihood: ll,
             n_tests: n_actual,
+            recall_at_k: recall,
         });
 
         if ll > best_ll {
@@ -680,17 +848,17 @@ pub fn calibrate_model(
             best_window = window;
             best_sparse = false;
             best_n_tests = n_actual;
+            best_recall = recall;
         }
 
         // Si le modèle supporte le sparse, évaluer aussi en mode sparse
-        // Skip si trop peu de test points pour être statistiquement significatif
         if let SamplingStrategy::Sparse { span_multiplier } = strategy {
             let span = window * span_multiplier;
             let max_t_sparse = draws.len().saturating_sub(span + 1);
 
             if max_t_sparse >= 30 {
                 let sparse_strategy = SamplingStrategy::Sparse { span_multiplier };
-                let ll_sparse = walk_forward_evaluate_with_strategy(
+                let (ll_sparse, recall_sparse) = walk_forward_evaluate_with_recall(
                     model, draws, window, pool, sparse_strategy,
                 );
 
@@ -701,6 +869,7 @@ pub fn calibrate_model(
                     sparse: true,
                     log_likelihood: ll_sparse,
                     n_tests: n_actual_sparse,
+                    recall_at_k: recall_sparse,
                 });
 
                 if ll_sparse > best_ll {
@@ -708,6 +877,7 @@ pub fn calibrate_model(
                     best_window = window;
                     best_sparse = true;
                     best_n_tests = n_actual_sparse;
+                    best_recall = recall_sparse;
                 }
             }
         }
@@ -720,6 +890,7 @@ pub fn calibrate_model(
         best_sparse,
         best_ll,
         best_n_tests,
+        best_recall,
     }
 }
 
@@ -1721,6 +1892,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: -15.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -1729,6 +1901,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: -18.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -1747,6 +1920,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 1.0, // Meilleur que l'uniforme
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Bad".to_string(),
@@ -1755,6 +1929,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 1.0, // Pire que l'uniforme
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -1776,6 +1951,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.10,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Medium".to_string(),
@@ -1784,6 +1960,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.05,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Worst".to_string(),
@@ -1792,6 +1969,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 0.10,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -1849,6 +2027,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.10,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Mediocre".to_string(),
@@ -1857,6 +2036,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.05,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         // total_skill(Good) = 0.10 * 100 = 10, Med = 0.05 * 100 = 5
@@ -1881,6 +2061,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 1.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Terrible".to_string(),
@@ -1889,6 +2070,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 6.0, // skill = -6
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         // Avec T=1.0, exp(-6)/exp(1) = exp(-7) ≈ 9e-4, exp(-6)/(exp(1)+exp(-6)) → very small
@@ -1910,6 +2092,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 10.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -1918,6 +2101,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 10.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         let weights = compute_weights(&calibrations, Pool::Balls);
@@ -1973,6 +2157,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.5,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Uniform".to_string(),
@@ -1981,6 +2166,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll, // skill = 0
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "Bad".to_string(),
@@ -1989,6 +2175,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 0.5, // skill < 0
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         let weights = compute_weights_with_threshold(&calibrations, Pool::Balls, 1.0, 0.0);
@@ -2011,6 +2198,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 1.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -2019,6 +2207,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll - 2.0,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
         // All models below threshold → uniform fallback
@@ -2111,9 +2300,9 @@ mod tests {
     fn test_stability_constant_returns_one() {
         // Model with constant LL across windows → stability = 1.0
         let results = vec![
-            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.0, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -3.0, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.0, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -3.0, n_tests: 100, recall_at_k: 0.0 },
         ];
         let s = cross_window_stability(&results);
         assert!((s - 1.0).abs() < 1e-10, "Constant LL → stability = 1.0, got {}", s);
@@ -2123,9 +2312,9 @@ mod tests {
     fn test_stability_variable_penalizes() {
         // Model with high variance across windows → stability < 1.0
         let results = vec![
-            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.1, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.9, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.0, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.1, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.9, n_tests: 100, recall_at_k: 0.0 },
         ];
         let s = cross_window_stability(&results);
         assert!(s < 1.0, "Variable LL → stability < 1.0, got {}", s);
@@ -2133,9 +2322,9 @@ mod tests {
 
         // Very stable model (tiny variance) → close to 1.0
         let results_stable = vec![
-            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.000, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.001, n_tests: 100 },
-            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.999, n_tests: 100 },
+            CalibrationResult { model_name: "A".into(), window: 20, sparse: false, log_likelihood: -3.000, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 50, sparse: false, log_likelihood: -3.001, n_tests: 100, recall_at_k: 0.0 },
+            CalibrationResult { model_name: "A".into(), window: 100, sparse: false, log_likelihood: -2.999, n_tests: 100, recall_at_k: 0.0 },
         ];
         let s_stable = cross_window_stability(&results_stable);
         assert!(s_stable > s, "More stable model should have higher stability: {} > {}", s_stable, s);
@@ -2365,6 +2554,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.10,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
             ModelCalibration {
                 model_name: "B".to_string(),
@@ -2373,6 +2563,7 @@ mod tests {
                 best_sparse: false,
                 best_ll: uniform_ll + 0.05,
                 best_n_tests: 100,
+                best_recall: 0.0,
             },
         ];
 

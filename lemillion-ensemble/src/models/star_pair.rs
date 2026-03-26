@@ -72,23 +72,47 @@ fn marginalize(pair_probs: &[f64; N_PAIRS]) -> Vec<f64> {
     star_probs
 }
 
-/// Expert 1: Pair frequency with Laplace smoothing
-fn pair_frequency(draws: &[Draw]) -> [f64; N_PAIRS] {
-    let laplace = 0.5;
-    let mut counts = [laplace; N_PAIRS];
-    let total_base = laplace * N_PAIRS as f64;
+/// Expert 1: Bayesian Dirichlet-Multinomial pair frequency with temporal decay.
+///
+/// v22: Replaces fixed Laplace smoothing with a Dirichlet conjugate model
+/// using exponential temporal decay (recent draws count more).
+/// Prior: Dirichlet(α₀ = prior_strength / 66) — weak uniform prior.
+/// Posterior mean = (α₀ + weighted_counts) / (α₀×66 + total_weight).
+fn pair_frequency_bayesian(draws: &[Draw]) -> ([f64; N_PAIRS], f64) {
+    let prior_strength = 3.0; // total prior pseudo-count
+    let alpha_0 = prior_strength / N_PAIRS as f64;
+    let lambda = 0.003; // temporal decay rate (half-life ≈ 230 draws)
 
-    for draw in draws {
+    let mut weighted_counts = [0.0f64; N_PAIRS];
+    let mut total_weight = 0.0f64;
+
+    // draws[0] = most recent; iterate with age-based decay
+    for (i, draw) in draws.iter().enumerate() {
+        let age = i as f64; // 0 = most recent
+        let weight = (-lambda * age).exp();
         let (s1, s2) = pair_from_draw(draw);
-        counts[pair_index(s1, s2)] += 1.0;
+        weighted_counts[pair_index(s1, s2)] += weight;
+        total_weight += weight;
     }
 
-    let total = total_base + draws.len() as f64;
+    let denom = prior_strength + total_weight;
     let mut probs = [0.0; N_PAIRS];
     for i in 0..N_PAIRS {
-        probs[i] = counts[i] / total;
+        probs[i] = (alpha_0 + weighted_counts[i]) / denom;
     }
-    probs
+
+    // Posterior concentration = sum of all Dirichlet parameters
+    // Higher concentration = more confident = lower variance
+    let concentration = prior_strength + total_weight;
+    // Confidence in [0, 1]: saturates around 1.0 for large n
+    let confidence = concentration / (concentration + 100.0);
+
+    (probs, confidence)
+}
+
+/// Legacy Expert 1 interface (for backward compatibility with Hedge loop)
+fn pair_frequency(draws: &[Draw]) -> [f64; N_PAIRS] {
+    pair_frequency_bayesian(draws).0
 }
 
 /// Expert 2: Pair transition (grouped by sum category for sparsity reduction)
@@ -401,6 +425,14 @@ impl StarPairModel {
         }
 
         Some(combined)
+    }
+
+    /// v22: Returns pair distribution + Bayesian confidence from Dirichlet posterior.
+    /// Confidence ∈ [0, 1], higher = more concentrated posterior = less smoothing needed.
+    pub fn predict_pair_distribution_with_confidence(&self, draws: &[Draw]) -> Option<([f64; N_PAIRS], f64)> {
+        let combined = self.predict_pair_distribution(draws)?;
+        let (_, confidence) = pair_frequency_bayesian(draws);
+        Some((combined, confidence))
     }
 }
 

@@ -446,6 +446,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
                 best_sparse: false,
                 best_ll: existing.map(|c| c.best_ll).unwrap_or(f64::NEG_INFINITY),
                 best_n_tests: existing.map(|c| c.best_n_tests).unwrap_or(0),
+                best_recall: existing.map(|c| c.best_recall).unwrap_or(0.0),
             }
         }).collect()
     };
@@ -468,6 +469,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
                 best_sparse: false,
                 best_ll: existing.map(|c| c.best_ll).unwrap_or(f64::NEG_INFINITY),
                 best_n_tests: existing.map(|c| c.best_n_tests).unwrap_or(0),
+                best_recall: existing.map(|c| c.best_recall).unwrap_or(0.0),
             }
         }).collect()
     };
