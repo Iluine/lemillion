@@ -2455,15 +2455,15 @@
           "model_name": "TripletBoost",
           "window": 50,
           "sparse": false,
-          "log_likelihood": -25.036334208760763,
+          "log_likelihood": -25.03632835122121,
           "n_tests": 539,
-          "recall_at_k": 0.49499072356215196
+          "recall_at_k": 0.4946196660482373
         },
         {
           "model_name": "TripletBoost",
           "window": 50,
           "sparse": true,
-          "log_likelihood": -25.075595605146805,
+          "log_likelihood": -25.075595595189803,
           "n_tests": 439,
           "recall_at_k": 0.4701594533029609
         },
@@ -2471,7 +2471,7 @@
           "model_name": "TripletBoost",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -25.073150017821504,
+          "log_likelihood": -25.073150008037075,
           "n_tests": 509,
           "recall_at_k": 0.48722986247544176
         },
@@ -2479,7 +2479,7 @@
           "model_name": "TripletBoost",
           "window": 80,
           "sparse": true,
-          "log_likelihood": -25.04771629074279,
+          "log_likelihood": -25.04985206111106,
           "n_tests": 349,
           "recall_at_k": 0.46532951289398244
         },
@@ -2487,7 +2487,7 @@
           "model_name": "TripletBoost",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -25.083484653787067,
+          "log_likelihood": -25.083363651606536,
           "n_tests": 489,
           "recall_at_k": 0.4879345603271981
         },
@@ -2495,7 +2495,7 @@
           "model_name": "TripletBoost",
           "window": 100,
           "sparse": true,
-          "log_likelihood": -25.005724817777836,
+          "log_likelihood": -25.003231524273655,
           "n_tests": 289,
           "recall_at_k": 0.4795847750865051
         },
@@ -2503,15 +2503,15 @@
           "model_name": "TripletBoost",
           "window": 150,
           "sparse": false,
-          "log_likelihood": -25.05888413485261,
+          "log_likelihood": -25.058895527370126,
           "n_tests": 439,
-          "recall_at_k": 0.48337129840546655
+          "recall_at_k": 0.4833712984054666
         },
         {
           "model_name": "TripletBoost",
           "window": 150,
           "sparse": true,
-          "log_likelihood": -25.10852348737267,
+          "log_likelihood": -25.10852328576142,
           "n_tests": 139,
           "recall_at_k": 0.48057553956834553
         },
@@ -2527,7 +2527,7 @@
           "model_name": "TripletBoost",
           "window": 300,
           "sparse": false,
-          "log_likelihood": -25.006272450341744,
+          "log_likelihood": -25.006272416638847,
           "n_tests": 289,
           "recall_at_k": 0.4802768166089964
         }
@@ -4165,7 +4165,7 @@
           "model_name": "TensorCP",
           "window": 80,
           "sparse": false,
-          "log_likelihood": -20.252290284807913,
+          "log_likelihood": -20.25229028480791,
           "n_tests": 509,
           "recall_at_k": 0.49076620825147327
         },
@@ -4181,7 +4181,7 @@
           "model_name": "TensorCP",
           "window": 100,
           "sparse": false,
-          "log_likelihood": -20.20876527562562,
+          "log_likelihood": -20.208765275625616,
           "n_tests": 489,
           "recall_at_k": 0.4891615541922291
         },
@@ -44247,7 +44247,7 @@
     2.5
   ],
   "optimal_t_stars": 0.7,
-  "coherence_ball_weight": 75.0,
+  "coherence_ball_weight": 5.0,
   "coherence_star_weight": 0.0,
   "stacking_blend_balls": 0.4,
   "stacking_blend_stars": 0.5,
