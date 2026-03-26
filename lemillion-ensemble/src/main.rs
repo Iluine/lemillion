@@ -307,6 +307,29 @@ enum Command {
 
     /// Mode interactif (REPL)
     Interactive,
+
+    /// Évaluation honnête sur holdout (tirages jamais vus pendant la calibration)
+    HoldoutEval {
+        /// Fichier de calibration
+        #[arg(short, long, default_value = "calibration.json")]
+        calibration: String,
+
+        /// Nombre de tirages holdout (les plus récents)
+        #[arg(short = 'n', long, default_value = "50")]
+        holdout: usize,
+
+        /// Nombre de suggestions par tirage
+        #[arg(short, long, default_value = "5000")]
+        suggestions: usize,
+
+        /// Nombre de resamples bootstrap pour les intervalles de confiance
+        #[arg(long, default_value = "1000")]
+        bootstrap: usize,
+
+        /// Mode few-grids (N grilles)
+        #[arg(long)]
+        n_grids: Option<usize>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -331,6 +354,7 @@ fn main() -> Result<()> {
         Command::Benchmark { train, seed } => cmd_benchmark(&conn, train, seed),
         Command::Optimize { n_grids, last, suggestions, iterations, calibration, output, seed } => cmd_optimize(&conn, n_grids, last, suggestions, iterations, &calibration, &output, seed),
         Command::Interactive => interactive::run_interactive(&conn),
+        Command::HoldoutEval { calibration, holdout, suggestions, bootstrap, n_grids } => cmd_holdout_eval(&conn, &calibration, holdout, suggestions, bootstrap, n_grids),
     }
 }
 
@@ -707,7 +731,7 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         all_diags
     };
 
-    let ensemble_weights = EnsembleWeights {
+    let mut ensemble_weights = EnsembleWeights {
         ball_weights,
         star_weights,
         calibrations: ball_calibrations.into_iter().chain(star_calibrations).collect(),
@@ -728,6 +752,8 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
         online_ewma_alpha,
         online_window,
         diagnostics,
+        conformal_ball_max_ranks: Vec::new(),
+        conformal_star_max_ranks: Vec::new(),
     };
 
     display::display_weights(&ensemble_weights);
@@ -805,6 +831,58 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
                 println!("  {} : H/H_max = {:.4} (quasi-uniforme, smoothing trop élevé ?)", model.name(), h_ratio);
             }
         }
+    }
+
+    // v22: Collect conformal max-rank scores for K selection
+    {
+        println!("\nCollecte des rangs conformes pour K selection...");
+        let combiner = EnsembleCombiner::with_weights(
+            all_models(),
+            ensemble_weights.ball_weights.iter().map(|(_, w)| *w).collect(),
+            ensemble_weights.star_weights.iter().map(|(_, w)| *w).collect(),
+        );
+
+        let n_test = draws.len().min(300).saturating_sub(30);
+        let stride = (n_test / 200).max(1);
+        let mut ball_max_ranks = Vec::new();
+        let mut star_max_ranks = Vec::new();
+
+        for i in (0..n_test).step_by(stride) {
+            let test_draw = &draws[i];
+            let training = &draws[i + 1..];
+            if training.len() < 30 { continue; }
+
+            let ball_dist = combiner.predict(training, Pool::Balls).distribution;
+            let star_dist = combiner.predict(training, Pool::Stars).distribution;
+
+            // Rank balls by probability (descending)
+            let mut ball_indexed: Vec<(usize, f64)> = ball_dist.iter().copied().enumerate().collect();
+            ball_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let max_ball_rank = test_draw.balls.iter().map(|&b| {
+                ball_indexed.iter().position(|(idx, _)| *idx == (b as usize - 1)).unwrap_or(49) + 1
+            }).max().unwrap_or(50);
+            ball_max_ranks.push(max_ball_rank);
+
+            // Rank stars
+            let mut star_indexed: Vec<(usize, f64)> = star_dist.iter().copied().enumerate().collect();
+            star_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let max_star_rank = test_draw.stars.iter().map(|&s| {
+                star_indexed.iter().position(|(idx, _)| *idx == (s as usize - 1)).unwrap_or(11) + 1
+            }).max().unwrap_or(12);
+            star_max_ranks.push(max_star_rank);
+        }
+
+        if !ball_max_ranks.is_empty() {
+            let mut sorted = ball_max_ranks.clone();
+            sorted.sort();
+            let p95 = sorted[(0.95 * sorted.len() as f64) as usize];
+            let p50 = sorted[sorted.len() / 2];
+            println!("  Rangs max boules: P50={}, P95={} (sur {} test points)", p50, p95, ball_max_ranks.len());
+            println!("  → K conformal recommandé (95%): {}", p95);
+        }
+
+        ensemble_weights.conformal_ball_max_ranks = ball_max_ranks;
+        ensemble_weights.conformal_star_max_ranks = star_max_ranks;
     }
 
     // Sauvegarder
@@ -1361,6 +1439,9 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
 
             let neural_scorer_ref = if neural_rerank { neural_scorer_opt.as_ref() } else { None };
 
+            let conformal_ranks = weights.as_ref().ok()
+                .map(|w| w.conformal_ball_max_ranks.as_slice())
+                .filter(|s| !s.is_empty());
             let result = generate_suggestions_jackpot(
                 &bd, &sd, n_per_profile, filter.as_ref(),
                 Some(&coherence), Some(&joint_model),
@@ -1369,6 +1450,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 neural_scorer_ref,
                 Some(&star_coherence),
                 cw_ball, cw_star,
+                conformal_ranks,
             )?;
 
             for s in &result.suggestions {
@@ -2465,6 +2547,7 @@ fn cmd_backtest_jackpot(
                     None,
                     Some(&star_coherence),
                     bt_cw_ball, bt_cw_star,
+                    None,
                 )?;
 
                 // Vérifier si le tirage réel est dans le top-N
@@ -2524,6 +2607,360 @@ fn cmd_backtest_jackpot(
 
     pb.finish_and_clear();
     display::display_jackpot_backtest_results(&rows);
+
+    Ok(())
+}
+
+/// Évaluation honnête sur holdout : reproduit exactement le pipeline production
+/// sur des tirages JAMAIS vus pendant la calibration.
+/// Retourne des facteurs d'amélioration avec intervalles de confiance bootstrap.
+fn cmd_holdout_eval(
+    conn: &lemillion_db::rusqlite::Connection,
+    calibration_path: &str,
+    holdout_n: usize,
+    n_suggestions: usize,
+    n_bootstrap: usize,
+    n_grids: Option<usize>,
+) -> Result<()> {
+    let n = count_draws(conn)?;
+    if n == 0 { bail!("Base vide."); }
+    let all_draws = fetch_last_draws(conn, n)?;
+    if holdout_n >= all_draws.len() {
+        bail!("Holdout ({}) >= tirages disponibles ({})", holdout_n, all_draws.len());
+    }
+
+    let holdout_draws = &all_draws[..holdout_n];
+    // training_draws exclut le holdout — reproduit ce que cmd_calibrate fait avec --holdout N
+    let calibration_draws = &all_draws[holdout_n..];
+
+    println!("== Holdout Evaluation ==");
+    println!("  Tirages holdout    : {} (les plus récents)", holdout_n);
+    println!("  Tirages calibration: {} (excluant holdout)", calibration_draws.len());
+    println!("  Suggestions/tirage : {}", n_suggestions);
+    if let Some(ng) = n_grids {
+        println!("  Mode few-grids     : {} grilles", ng);
+    }
+    println!("  Bootstrap resamples: {}", n_bootstrap);
+    println!();
+
+    let weights = load_weights(&PathBuf::from(calibration_path))
+        .context("Impossible de charger calibration.json — lancez d'abord `calibrate --holdout N`")?;
+
+    let hyper = lemillion_ensemble::sampler::HyperParams::load(
+        std::path::Path::new("hyperparams.json"),
+    );
+
+    let pb = ProgressBar::new(holdout_n as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    use rayon::prelude::*;
+
+    // Pour chaque tirage holdout, reproduire le pipeline production
+    let results: Vec<display::HoldoutRow> = {
+        let indexed: Vec<(usize, display::HoldoutRow)> = (0..holdout_n)
+            .into_par_iter()
+            .map(|i| -> Result<(usize, display::HoldoutRow)> {
+                let test_draw = &holdout_draws[i];
+                // training = tous les tirages après ce holdout (tous les tirages de calibration + les holdout plus anciens)
+                let training_draws = &all_draws[i + 1..];
+
+                // 1. Build combiner with calibrated weights
+                let models = all_models();
+                let mut combiner = {
+                    let ball_w: Vec<f64> = models.iter()
+                        .map(|m| weights.ball_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                        .collect();
+                    let star_w: Vec<f64> = models.iter()
+                        .map(|m| weights.star_weights.iter().find(|(n, _)| n == m.name()).map(|(_, w)| *w).unwrap_or(0.0))
+                        .collect();
+                    EnsembleCombiner::with_weights(models, ball_w, star_w)
+                };
+
+                // 2. MetaPredictor adjustment
+                if !weights.detailed_ll.is_empty() {
+                    use lemillion_ensemble::ensemble::meta::{MetaPredictor, RegimeFeatures};
+                    let features = RegimeFeatures::from_draws(training_draws);
+                    if let Some(meta) = MetaPredictor::train(training_draws, &weights.detailed_ll, 1.0) {
+                        let adjustments = meta.weight_adjustments(&features);
+                        for (name, adj) in &adjustments {
+                            if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                && idx < combiner.ball_weights.len()
+                            {
+                                combiner.ball_weights[idx] *= adj;
+                            }
+                        }
+                        let total: f64 = combiner.ball_weights.iter().sum();
+                        if total > 0.0 { for w in combiner.ball_weights.iter_mut() { *w /= total; } }
+                    }
+                    if !weights.star_detailed_ll.is_empty() {
+                        if let Some(meta) = MetaPredictor::train(training_draws, &weights.star_detailed_ll, 1.0) {
+                            let adjustments = meta.weight_adjustments(&features);
+                            for (name, adj) in &adjustments {
+                                if let Some(idx) = combiner.models.iter().position(|m| m.name() == name)
+                                    && idx < combiner.star_weights.len()
+                                {
+                                    combiner.star_weights[idx] *= adj;
+                                }
+                            }
+                            let total: f64 = combiner.star_weights.iter().sum();
+                            if total > 0.0 { for w in combiner.star_weights.iter_mut() { *w /= total; } }
+                        }
+                    }
+                }
+
+                // 3. Hedge weights
+                {
+                    let eta = hyper.hedge_eta;
+                    let (hedged_ball, hedged_star) = compute_hedge_weights(
+                        &combiner.models, training_draws,
+                        &combiner.ball_weights, &combiner.star_weights,
+                        100, eta,
+                    );
+                    combiner.ball_weights = hedged_ball;
+                    combiner.star_weights = hedged_star;
+
+                    let te_f: &[&str] = &["TransferEntropy", "RényiTE", "CrossTE"];
+                    let stresa_f: &[&str] = &["StresaSGD", "StresaChaos"];
+                    let fams: Vec<(&[&str], f64)> = vec![(te_f, 0.20), (stresa_f, 0.15)];
+                    let mn: Vec<String> = combiner.models.iter().map(|m| m.name().to_string()).collect();
+                    apply_family_cap_vecs(&mn, &mut combiner.ball_weights, &fams);
+                    apply_family_cap_vecs(&mn, &mut combiner.star_weights, &fams);
+                }
+
+                // 4. Predict (decorrelated / stacked / agreement boost)
+                let has_corr_matrix = !weights.correlation_matrix.is_empty();
+                let use_stacking = weights.stacking_balls.is_some() || weights.stacking_stars.is_some();
+
+                let predict_pool = |pool: Pool| -> lemillion_ensemble::ensemble::EnsemblePrediction {
+                    if has_corr_matrix {
+                        let corr = match pool {
+                            Pool::Balls => &weights.correlation_matrix,
+                            Pool::Stars => if weights.star_correlation_matrix.is_empty() { &weights.correlation_matrix } else { &weights.star_correlation_matrix },
+                        };
+                        combiner.predict_decorrelated(training_draws, pool, corr, 0.60)
+                    } else {
+                        combiner.predict_with_agreement_boost(training_draws, pool, 0.20)
+                    }
+                };
+
+                let (mut ball_pred, mut star_pred) = if use_stacking {
+                    let blend_b = weights.stacking_blend_balls.unwrap_or(0.6);
+                    let bp = if let Some(ref sw) = weights.stacking_balls {
+                        combiner.predict_stacked(training_draws, Pool::Balls, sw, blend_b)
+                    } else {
+                        predict_pool(Pool::Balls)
+                    };
+                    let blend_s = weights.stacking_blend_stars.unwrap_or(0.6);
+                    let sp = if let Some(ref sw) = weights.stacking_stars {
+                        combiner.predict_stacked(training_draws, Pool::Stars, sw, blend_s)
+                    } else {
+                        predict_pool(Pool::Stars)
+                    };
+                    (bp, sp)
+                } else {
+                    (predict_pool(Pool::Balls), predict_pool(Pool::Stars))
+                };
+
+                // 5. Online/offline blend
+                {
+                    use lemillion_ensemble::ensemble::online::online_offline_blend_with_alpha;
+                    let oa = weights.online_ewma_alpha.unwrap_or(0.15);
+                    let ow = weights.online_window.unwrap_or(8);
+                    let blended = online_offline_blend_with_alpha(&ball_pred.distribution, training_draws, Pool::Balls, ow, oa);
+                    ball_pred.distribution = blended;
+                }
+
+                // 6. Beta-transform
+                if let Some((alpha, beta)) = weights.beta_balls {
+                    lemillion_ensemble::ensemble::beta_transform(&mut ball_pred.distribution, alpha, beta);
+                }
+                if let Some((alpha, beta)) = weights.beta_stars {
+                    lemillion_ensemble::ensemble::beta_transform(&mut star_pred.distribution, alpha, beta);
+                }
+
+                // 7. Conviction & temperature
+                let conviction = compute_conviction(
+                    &ball_pred.distribution, &star_pred.distribution,
+                    &ball_pred.spread, &star_pred.spread,
+                );
+                let rqa_factor = rqa_temperature_factor(training_draws);
+
+                let (eff_bt, eff_st) = if let Some(_ng) = n_grids {
+                    let (bt, st) = (hyper.t_balls, hyper.t_stars);
+                    (bt, st)
+                } else {
+                    let uniform_ball_ll = 5.0 * (1.0_f64 / 50.0).ln();
+                    let uniform_star_ll = 2.0 * (1.0_f64 / 12.0).ln();
+                    let ball_skill: f64 = weights.calibrations.iter()
+                        .filter_map(|c| {
+                            let wt = weights.ball_weights.iter().find(|(n,_)| *n == c.model_name).map(|(_,w)| *w).unwrap_or(0.0);
+                            if wt > 0.0 { Some(wt * (c.best_ll - uniform_ball_ll).max(0.0)) } else { None }
+                        }).sum();
+                    let star_skill: f64 = weights.calibrations.iter()
+                        .filter_map(|c| {
+                            let wt = weights.star_weights.iter().find(|(n,_)| *n == c.model_name).map(|(_,w)| *w).unwrap_or(0.0);
+                            if wt > 0.0 { Some(wt * (c.best_ll - uniform_star_ll).max(0.0)) } else { None }
+                        }).sum();
+                    let (mut bt, st) = conviction_temperature_split_with_skill(
+                        &conviction, Some(ball_skill), Some(star_skill));
+                    bt = (bt * rqa_factor).clamp(0.05, 2.0);
+                    (bt, st)
+                };
+
+                let ball_dist = if (eff_bt - 1.0).abs() > 1e-9 {
+                    apply_temperature(&ball_pred.distribution, eff_bt)
+                } else { ball_pred.distribution.clone() };
+                let star_dist = if (eff_st - 1.0).abs() > 1e-9 {
+                    apply_temperature(&star_pred.distribution, eff_st)
+                } else { star_pred.distribution.clone() };
+
+                // 8. Actual draw score (bayesian score of true draw under model)
+                let actual_score = compute_bayesian_score(
+                    &test_draw.balls, &test_draw.stars, &ball_dist, &star_dist,
+                );
+
+                // 9. Ball recall@K (track ranking of winning balls)
+                let mut ball_probs_indexed: Vec<(usize, f64)> = ball_dist.iter().copied().enumerate().collect();
+                ball_probs_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let ball_ranks: Vec<usize> = test_draw.balls.iter().map(|&b| {
+                    ball_probs_indexed.iter().position(|(idx, _)| *idx == (b as usize - 1)).unwrap_or(49)
+                }).collect();
+                let max_ball_rank = *ball_ranks.iter().max().unwrap_or(&49);
+                let recall_at_25 = test_draw.balls.iter().filter(|&&b| ball_ranks[test_draw.balls.iter().position(|&x| x == b).unwrap()] < 25).count() as f64 / 5.0;
+
+                let mut star_probs_indexed: Vec<(usize, f64)> = star_dist.iter().copied().enumerate().collect();
+                star_probs_indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                let star_ranks: Vec<usize> = test_draw.stars.iter().map(|&s| {
+                    star_probs_indexed.iter().position(|(idx, _)| *idx == (s as usize - 1)).unwrap_or(11)
+                }).collect();
+                let max_star_rank = *star_ranks.iter().max().unwrap_or(&11);
+
+                // 10. Generate suggestions and compute improvement factor
+                let filter = StructuralFilter::adaptive(training_draws);
+                let coherence = CoherenceScorer::from_history(training_draws, Pool::Balls);
+                let mut joint_model = lemillion_ensemble::models::joint::JointConditionalModel::default();
+                joint_model.train(training_draws);
+                let star_pair_model = lemillion_ensemble::models::star_pair::StarPairModel::default();
+                let star_pair_probs = star_pair_model.predict_pair_distribution(training_draws);
+                let conditioner = BallStarConditioner::from_history(training_draws);
+                let star_coherence = StarCoherenceScorer::from_history(training_draws);
+
+                let cw_ball = weights.coherence_ball_weight;
+                let cw_star = weights.coherence_star_weight;
+
+                let conformal_ranks = if weights.conformal_ball_max_ranks.is_empty() {
+                    None
+                } else {
+                    Some(weights.conformal_ball_max_ranks.as_slice())
+                };
+                let result = generate_suggestions_jackpot(
+                    &ball_dist, &star_dist, n_suggestions, Some(&filter),
+                    Some(&coherence), Some(&joint_model),
+                    star_pair_probs.as_ref(), None,
+                    Some(&conditioner), None,
+                    Some(&star_coherence),
+                    cw_ball, cw_star,
+                    conformal_ranks,
+                )?;
+
+                // 11. Few-grids selection if requested
+                let (improvement_factor, n_selected) = if let Some(ng) = n_grids {
+                    let selected = if ng <= 5 {
+                        select_optimal_n_grids_exact(&result.suggestions, ng, 3)
+                    } else {
+                        select_optimal_n_grids_sa(&result.suggestions, ng, 3, 1, 42)
+                    };
+                    let total_p: f64 = selected.iter().map(|s| s.score / 139_838_160.0).sum();
+                    let uniform_p = ng as f64 / 139_838_160.0;
+                    (total_p / uniform_p, ng)
+                } else {
+                    (result.improvement_factor, n_suggestions)
+                };
+
+                pb.inc(1);
+
+                Ok((i, display::HoldoutRow {
+                    date: test_draw.date.clone(),
+                    actual_balls: test_draw.balls,
+                    actual_stars: test_draw.stars,
+                    actual_score,
+                    improvement_factor,
+                    conviction: conviction.overall,
+                    max_ball_rank: max_ball_rank + 1, // 1-indexed
+                    max_star_rank: max_star_rank + 1,
+                    recall_at_25,
+                    n_selected,
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut sorted = indexed;
+        sorted.sort_by_key(|(i, _)| *i);
+        sorted.into_iter().map(|(_, r)| r).collect()
+    };
+
+    pb.finish_and_clear();
+
+    // Display per-draw results
+    display::display_holdout_results(&results);
+
+    // Bootstrap confidence intervals
+    if n_bootstrap > 0 && !results.is_empty() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let improvements: Vec<f64> = results.iter().map(|r| r.improvement_factor).collect();
+        let n = improvements.len();
+        let mut bootstrap_means = Vec::with_capacity(n_bootstrap);
+
+        for b in 0..n_bootstrap {
+            // Deterministic seeded resampling
+            let mut hasher = DefaultHasher::new();
+            b.hash(&mut hasher);
+            let seed = hasher.finish();
+            let mut rng_state = seed;
+            let mut sum = 0.0;
+            for _ in 0..n {
+                // Simple LCG
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let idx = (rng_state >> 33) as usize % n;
+                sum += improvements[idx];
+            }
+            bootstrap_means.push(sum / n as f64);
+        }
+
+        bootstrap_means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let p = |q: f64| -> f64 {
+            let idx = ((q * bootstrap_means.len() as f64) as usize).min(bootstrap_means.len() - 1);
+            bootstrap_means[idx]
+        };
+
+        println!("\n── Bootstrap CI ({} resamples) ──", n_bootstrap);
+        println!("  P5               : {:.2}x", p(0.05));
+        println!("  P25              : {:.2}x", p(0.25));
+        println!("  P50 (médiane)    : {:.2}x", p(0.50));
+        println!("  P75              : {:.2}x", p(0.75));
+        println!("  P95              : {:.2}x", p(0.95));
+        println!("  CI 90%           : [{:.2}x, {:.2}x]", p(0.05), p(0.95));
+
+        // Recall stats
+        let avg_recall = results.iter().map(|r| r.recall_at_25).sum::<f64>() / results.len() as f64;
+        let max_ranks: Vec<usize> = results.iter().map(|r| r.max_ball_rank).collect();
+        let mut sorted_ranks = max_ranks.clone();
+        sorted_ranks.sort();
+        let k95 = sorted_ranks[(0.95 * sorted_ranks.len() as f64) as usize];
+        println!("\n── Recall & K Conformal ──");
+        println!("  Recall@25 moyen  : {:.1}%", avg_recall * 100.0);
+        println!("  Max ball rank P50: {}", sorted_ranks[sorted_ranks.len() / 2]);
+        println!("  Max ball rank P95: {} (= K conformal recommandé)", k95);
+        println!("  5/5 dans top-25  : {}/{}", results.iter().filter(|r| r.recall_at_25 >= 1.0).count(), results.len());
+    }
 
     Ok(())
 }
@@ -2754,6 +3191,7 @@ fn cmd_backtest_jackpot_top3(
                 None,
                 Some(&bt_star_coherence),
                 None, None,
+                None,
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid
@@ -3185,6 +3623,7 @@ fn cmd_backtest_few_grids(
                 Some(&conditioner), None,
                 Some(&star_coherence),
                 None, None,
+                None,
             )?;
 
             for s in &result.suggestions {

@@ -1549,6 +1549,23 @@ pub fn conformal_subset_k(
     optimal_subset_k(ball_probs, n_grids)
 }
 
+/// v22: Conformal K from max-rank data.
+/// Given historical max_ranks (1-indexed rank of worst-ranked winning ball),
+/// returns K such that the coverage guarantee is met at level 1-alpha.
+pub fn conformal_k_from_ranks(max_ranks: &[usize], alpha: f64) -> usize {
+    if max_ranks.is_empty() {
+        return 50; // fallback: full pool
+    }
+    let mut sorted = max_ranks.to_vec();
+    sorted.sort();
+    let n = sorted.len();
+    // Conformal quantile: ceil((n+1)*(1-alpha))/n
+    let quantile_idx = (((n + 1) as f64 * (1.0 - alpha)).ceil() as usize).min(n) - 1;
+    let k = sorted[quantile_idx];
+    // Add margin of 2 for safety
+    (k + 2).min(50)
+}
+
 /// Calcule K_balls et K_stars adaptatifs pour que C(K_b,5)×C(K_s,2) >= 3×count.
 fn compute_adaptive_k(count: usize) -> (usize, usize) {
     let target = 3 * count as u64;
@@ -1611,6 +1628,7 @@ pub fn generate_suggestions_jackpot(
     star_coherence: Option<&StarCoherenceScorer>,
     coherence_ball_w: Option<f64>,
     coherence_star_w: Option<f64>,
+    conformal_max_ranks: Option<&[usize]>,
 ) -> Result<JackpotResult> {
     let cw = coherence_ball_w.unwrap_or(COHERENCE_WEIGHT);
     let scw = coherence_star_w.unwrap_or(STAR_COHERENCE_WEIGHT);
@@ -1643,8 +1661,16 @@ pub fn generate_suggestions_jackpot(
     let k_min_entropy = (25.0 + 20.0 * entropy_ratio).round() as usize; // v7 formula
     let k_min_favored = (n_favored + 8).max(15);
     let k_min = k_min_entropy.max(k_min_favored); // prendre la plus haute des deux bornes
-    // v18: Use conformal K when available, fallback to optimal_subset_k
-    let k_optimal = conformal_subset_k(ball_probs, count, None);
+    // v22: Use conformal K from max-rank data when available
+    let k_optimal = if let Some(ranks) = conformal_max_ranks {
+        if !ranks.is_empty() {
+            conformal_k_from_ranks(ranks, 0.05)
+        } else {
+            conformal_subset_k(ball_probs, count, None)
+        }
+    } else {
+        conformal_subset_k(ball_probs, count, None)
+    };
     let k_balls = k_balls_base.max(k_min);
     // Apply optimal cap only if it wouldn't restrict below k_min
     let k_balls = if k_optimal >= k_min { k_balls.min(k_optimal) } else { k_balls };
@@ -3911,7 +3937,7 @@ mod tests {
         let ball_probs: Vec<f64> = vec![1.0 / 50.0; 50];
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 5, None, None, None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 5);
         assert!(result.total_jackpot_probability > 0.0);
         assert!(result.enumeration_size > 0);
@@ -3937,7 +3963,7 @@ mod tests {
         let total: f64 = star_probs.iter().sum();
         let star_probs: Vec<f64> = star_probs.iter().map(|p| p / total).collect();
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 100, None, None, None, None, None, None, None, None, None, None, None).unwrap();
         assert_eq!(result.suggestions.len(), 100);
         assert!(result.improvement_factor > 1.0,
             "Des probas concentrées devraient donner un facteur > 1, got {}", result.improvement_factor);
@@ -3950,7 +3976,7 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 20, None, None, None, None, None, None, None, None, None, None, None).unwrap();
         for w in result.suggestions.windows(2) {
             assert!(w[0].score >= w[1].score,
                 "Suggestions non triées : {} < {}", w[0].score, w[1].score);
@@ -3964,8 +3990,8 @@ mod tests {
         let ball_probs: Vec<f64> = ball_probs.iter().map(|p| p / total).collect();
         let star_probs: Vec<f64> = vec![1.0 / 12.0; 12];
 
-        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None).unwrap();
-        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let r1 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None, None).unwrap();
+        let r2 = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, None, None, None, None, None, None, None, None, None, None, None).unwrap();
         for (a, b) in r1.suggestions.iter().zip(r2.suggestions.iter()) {
             assert_eq!(a.balls, b.balls);
             assert_eq!(a.stars, b.stars);
@@ -3983,7 +4009,7 @@ mod tests {
             spread_range: (10, 45),
         };
 
-        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None, None, None, None).unwrap();
+        let result = generate_suggestions_jackpot(&ball_probs, &star_probs, 10, Some(&filter), None, None, None, None, None, None, None, None, None, None).unwrap();
         // Toutes les suggestions doivent passer le filtre
         for s in &result.suggestions {
             assert!(filter.accept_balls(&s.balls),

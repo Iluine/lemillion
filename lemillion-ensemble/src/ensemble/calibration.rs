@@ -306,6 +306,14 @@ pub struct EnsembleWeights {
     /// H1: Multi-score diagnostics (Brier + CRPS) per model. Purely informational.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<CalibrationDiagnostics>,
+    /// v22: Conformal max-rank scores for K selection.
+    /// For each calibration test point, the maximum rank (1-indexed) of a winning ball
+    /// in the ensemble's ranked probability distribution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conformal_ball_max_ranks: Vec<usize>,
+    /// v22: Same for stars.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conformal_star_max_ranks: Vec<usize>,
 }
 
 /// Calcule le nombre réel de test points après stride.
@@ -2156,6 +2164,8 @@ mod tests {
             online_ewma_alpha: None,
             online_window: None,
             diagnostics: Vec::new(),
+            conformal_ball_max_ranks: Vec::new(),
+            conformal_star_max_ranks: Vec::new(),
         };
         let json = serde_json::to_string(&weights).unwrap();
         let loaded: EnsembleWeights = serde_json::from_str(&json).unwrap();

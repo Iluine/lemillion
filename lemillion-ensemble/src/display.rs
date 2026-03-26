@@ -1447,6 +1447,75 @@ pub fn display_jackpot_backtest_results(rows: &[JackpotBacktestRow]) {
     }
 }
 
+/// Résultat de l'évaluation holdout pour un tirage.
+pub struct HoldoutRow {
+    pub date: String,
+    pub actual_balls: [u8; 5],
+    pub actual_stars: [u8; 2],
+    pub actual_score: f64,
+    pub improvement_factor: f64,
+    pub conviction: f64,
+    pub max_ball_rank: usize,
+    pub max_star_rank: usize,
+    pub recall_at_25: f64,
+    pub n_selected: usize,
+}
+
+/// Affiche les résultats de l'évaluation holdout.
+pub fn display_holdout_results(rows: &[HoldoutRow]) {
+    println!("\n== Holdout Evaluation (tirages jamais vus) ==\n");
+
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec![
+            "Date", "Tirage réel", "Score", "Amélioration", "Conv.",
+            "Max rank boule", "Max rank étoile", "Recall@25",
+        ]);
+
+    for row in rows {
+        let balls_str = row.actual_balls.iter().map(|b| format!("{:2}", b)).collect::<Vec<_>>().join("-");
+        let stars_str = row.actual_stars.iter().map(|s| format!("{:2}", s)).collect::<Vec<_>>().join("-");
+        let draw_str = format!("{} + {}", balls_str, stars_str);
+
+        let rank_color = if row.max_ball_rank <= 25 { Color::Green } else if row.max_ball_rank <= 35 { Color::Yellow } else { Color::Red };
+        let recall_color = if row.recall_at_25 >= 1.0 { Color::Green } else if row.recall_at_25 >= 0.8 { Color::Yellow } else { Color::Red };
+
+        table.add_row(vec![
+            Cell::new(&row.date),
+            Cell::new(&draw_str),
+            Cell::new(format!("{:.4}", row.actual_score)),
+            Cell::new(format!("{:.2}x", row.improvement_factor)),
+            Cell::new(format!("{:.2}", row.conviction)),
+            Cell::new(format!("{}", row.max_ball_rank)).fg(rank_color),
+            Cell::new(format!("{}", row.max_star_rank)),
+            Cell::new(format!("{:.0}%", row.recall_at_25 * 100.0)).fg(recall_color),
+        ]);
+    }
+    println!("{table}");
+
+    if !rows.is_empty() {
+        let n = rows.len() as f64;
+        let avg_improvement = rows.iter().map(|r| r.improvement_factor).sum::<f64>() / n;
+        let avg_conviction = rows.iter().map(|r| r.conviction).sum::<f64>() / n;
+        let avg_recall = rows.iter().map(|r| r.recall_at_25).sum::<f64>() / n;
+
+        // Geometric mean (more robust than arithmetic for improvement factors)
+        let geo_mean = {
+            let log_sum: f64 = rows.iter().map(|r| r.improvement_factor.max(1e-10).ln()).sum();
+            (log_sum / n).exp()
+        };
+
+        println!("\n── Résumé Holdout ──");
+        println!("  Amélioration moyenne   : {:.2}x (arithmétique)", avg_improvement);
+        println!("  Amélioration géométrique: {:.2}x (plus robuste)", geo_mean);
+        println!("  Conviction moyenne     : {:.2}", avg_conviction);
+        println!("  Recall@25 moyen        : {:.1}%", avg_recall * 100.0);
+        println!("  5/5 dans top-25        : {}/{}", rows.iter().filter(|r| r.recall_at_25 >= 1.0).count(), rows.len());
+    }
+}
+
 /// Formate un grand nombre avec séparateurs de milliers.
 fn format_count(n: u64) -> String {
     let s = n.to_string();
