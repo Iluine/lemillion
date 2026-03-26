@@ -257,6 +257,155 @@ pub fn compute_ev(
     }
 }
 
+/// v23c: Estimate total tickets sold from real prize tier data.
+/// Uses tier 12 (2+1) winners as the most reliable estimator:
+/// tickets_sold ≈ winners_eu_tier12 / P(2+1)
+/// Falls back to tier 13 (2+0) or jackpot-based heuristic.
+pub fn estimate_tickets_from_tiers(draws: &[Draw]) -> f64 {
+    // Average over recent draws for stability
+    let n = draws.len().min(20);
+    if n == 0 { return 40_000_000.0; }
+
+    let mut ticket_estimates = Vec::new();
+    for draw in &draws[..n] {
+        if let Some(ref tiers) = draw.prize_tiers {
+            // Tier 12 (2+1): P = 1/49.27 ≈ 0.020295
+            if let Some(t12) = tiers.iter().find(|t| t.rank == 12) {
+                if t12.winners_eu > 100 {
+                    let p_2_1 = PRIZE_TIERS[11].probability; // 1/49
+                    ticket_estimates.push(t12.winners_eu as f64 / p_2_1);
+                }
+            }
+            // Tier 13 (2+0): P = 1/22 ≈ 0.04545
+            if let Some(t13) = tiers.iter().find(|t| t.rank == 13) {
+                if t13.winners_eu > 100 {
+                    let p_2_0 = PRIZE_TIERS[12].probability; // 1/22
+                    ticket_estimates.push(t13.winners_eu as f64 / p_2_0);
+                }
+            }
+        }
+    }
+
+    if ticket_estimates.is_empty() {
+        return 40_000_000.0; // fallback
+    }
+
+    // Median for robustness
+    ticket_estimates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    ticket_estimates[ticket_estimates.len() / 2]
+}
+
+/// v23c: Compute EV using real prize data from the most recent draw.
+/// Uses actual prize amounts and winner counts instead of heuristic estimates.
+pub fn compute_ev_real(
+    balls: &[u8; 5],
+    stars: &[u8; 2],
+    model: &PopularityModel,
+    jackpot: f64,
+    recent_draws: &[Draw],
+) -> EvResult {
+    let pop = grid_popularity(balls, stars, model);
+    let mut tier_evs = [0.0f64; 13];
+
+    // Use real ticket estimate instead of heuristic
+    let estimated_tickets = estimate_tickets_from_tiers(recent_draws);
+
+    // Use real fixed prizes from most recent draw (they can vary slightly)
+    let real_prizes: Option<&Vec<lemillion_db::models::PrizeTier>> = recent_draws.first()
+        .and_then(|d| d.prize_tiers.as_ref());
+
+    for (i, tier) in PRIZE_TIERS.iter().enumerate() {
+        if tier.is_parimutuel {
+            let expected_winners = estimated_tickets * tier.probability * pop;
+            let sharing_factor = if expected_winners > 1.0 {
+                1.0 / expected_winners
+            } else {
+                1.0
+            };
+
+            // Use real prize pool from recent data when available
+            let pool = if let Some(real) = real_prizes {
+                if let Some(rt) = real.iter().find(|t| t.rank == (i + 1) as u8) {
+                    if rt.prize > 0.0 && rt.winners_eu > 0 {
+                        // Real pool = prize_per_winner × winners
+                        rt.prize * rt.winners_eu as f64
+                    } else if i == 0 {
+                        jackpot
+                    } else {
+                        jackpot * match i { 1 => 0.015, 2 => 0.005, _ => 0.0 }
+                    }
+                } else {
+                    match i { 0 => jackpot, 1 => jackpot * 0.015, 2 => jackpot * 0.005, _ => 0.0 }
+                }
+            } else {
+                match i { 0 => jackpot, 1 => jackpot * 0.015, 2 => jackpot * 0.005, _ => 0.0 }
+            };
+
+            tier_evs[i] = tier.probability * pool * sharing_factor;
+        } else {
+            // Use real fixed prizes when available
+            let prize = if let Some(real) = real_prizes {
+                real.iter().find(|t| t.rank == (i + 1) as u8)
+                    .map(|t| t.prize)
+                    .filter(|&p| p > 0.0)
+                    .unwrap_or(tier.fixed_prize)
+            } else {
+                tier.fixed_prize
+            };
+            tier_evs[i] = tier.probability * prize;
+        }
+    }
+
+    let total_ev: f64 = tier_evs.iter().sum();
+    let ev_per_euro = total_ev / TICKET_PRICE;
+
+    EvResult {
+        total_ev,
+        ev_per_euro,
+        tier_evs,
+    }
+}
+
+/// v23c: Estimate actual ticket volume trend over time.
+/// Returns (median_tickets, trend) where trend > 1.0 means growing.
+pub fn ticket_volume_trend(draws: &[Draw]) -> (f64, f64) {
+    let n = draws.len().min(50);
+    let mut volumes: Vec<f64> = Vec::new();
+
+    for draw in &draws[..n] {
+        if let Some(ref tiers) = draw.prize_tiers {
+            if let Some(t12) = tiers.iter().find(|t| t.rank == 12) {
+                if t12.winners_eu > 100 {
+                    volumes.push(t12.winners_eu as f64 / PRIZE_TIERS[11].probability);
+                }
+            }
+        }
+    }
+
+    if volumes.len() < 5 {
+        return (40_000_000.0, 1.0);
+    }
+
+    let median = {
+        let mut sorted = volumes.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted[sorted.len() / 2]
+    };
+
+    // Trend: compare recent 10 vs older 10
+    let recent = &volumes[..volumes.len().min(10)];
+    let older = &volumes[volumes.len().min(10)..volumes.len().min(20)];
+    let trend = if !older.is_empty() && !recent.is_empty() {
+        let recent_avg: f64 = recent.iter().sum::<f64>() / recent.len() as f64;
+        let older_avg: f64 = older.iter().sum::<f64>() / older.len() as f64;
+        if older_avg > 0.0 { recent_avg / older_avg } else { 1.0 }
+    } else {
+        1.0
+    };
+
+    (median, trend)
+}
+
 /// EV-optimal play timing: when to play based on jackpot size.
 /// Returns a multiplier relative to the average jackpot (50M€).
 /// Player count grows sub-linearly with jackpot (~jackpot^0.6),
