@@ -70,6 +70,10 @@ enum Command {
         /// Nombre de tirages récents exclus de la calibration pour validation out-of-time
         #[arg(long, default_value = "0")]
         holdout: usize,
+
+        /// Blend recall@K dans le calcul des poids (0.0=LL pur, 1.0=recall pur, 0.3=hybride)
+        #[arg(long, default_value = "0.0")]
+        recall_blend: f64,
     },
 
     /// Afficher les poids de l'ensemble
@@ -339,7 +343,7 @@ fn main() -> Result<()> {
     migrate(&conn)?;
 
     match cli.command {
-        Command::Calibrate { windows, star_windows, output, temperature, min_skill, pool, holdout } => cmd_calibrate(&conn, &windows, star_windows.as_deref(), &output, temperature, min_skill, &pool, holdout),
+        Command::Calibrate { windows, star_windows, output, temperature, min_skill, pool, holdout, recall_blend } => cmd_calibrate(&conn, &windows, star_windows.as_deref(), &output, temperature, min_skill, &pool, holdout, recall_blend),
         Command::Weights { calibration } => cmd_weights(&calibration),
         Command::Predict { calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, no_stacking, neural_rerank, star_strategy, n_grids } => cmd_predict(&conn, &calibration, suggestions, seed, oversample, min_diff, temperature, jackpot, jackpot_mode, no_filter, top_models, no_meta_predictor, no_hedge, agreement_boost, no_stacking, neural_rerank, &star_strategy, n_grids),
         Command::History { last } => cmd_history(&conn, last),
@@ -358,7 +362,7 @@ fn main() -> Result<()> {
     }
 }
 
-pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, star_windows_str: Option<&str>, output: &str, temperature: f64, min_skill: f64, pool_str: &str, holdout: usize) -> Result<()> {
+pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_str: &str, star_windows_str: Option<&str>, output: &str, temperature: f64, min_skill: f64, pool_str: &str, holdout: usize, recall_blend: f64) -> Result<()> {
     use lemillion_ensemble::ensemble::calibration::DEFAULT_STAR_WINDOWS;
 
     let n = count_draws(conn)?;
@@ -571,7 +575,13 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     println!("\nTempérature boules : {:.2}, étoiles : {:.2}, seuil skill : {:.4}", temperature, star_temp, min_skill);
 
     let mut ball_weights = if calibrate_balls {
-        compute_weights_with_threshold(&ball_calibrations, Pool::Balls, temperature, min_skill)
+        if recall_blend > 0.001 {
+            use lemillion_ensemble::ensemble::calibration::compute_weights_with_recall;
+            println!("  → Mode recall-blend: {:.0}% recall + {:.0}% LL", recall_blend * 100.0, (1.0 - recall_blend) * 100.0);
+            compute_weights_with_recall(&ball_calibrations, Pool::Balls, temperature, recall_blend)
+        } else {
+            compute_weights_with_threshold(&ball_calibrations, Pool::Balls, temperature, min_skill)
+        }
     } else {
         existing_weights.as_ref().map(|w| w.ball_weights.clone()).unwrap_or_else(|| {
             models.iter().map(|m| (m.name().to_string(), 1.0 / models.len() as f64)).collect()
@@ -579,7 +589,12 @@ pub(crate) fn cmd_calibrate(conn: &lemillion_db::rusqlite::Connection, windows_s
     };
 
     let mut star_weights = if calibrate_stars {
-        compute_weights_with_threshold(&star_calibrations, Pool::Stars, star_temp, min_skill)
+        if recall_blend > 0.001 {
+            use lemillion_ensemble::ensemble::calibration::compute_weights_with_recall;
+            compute_weights_with_recall(&star_calibrations, Pool::Stars, star_temp, recall_blend)
+        } else {
+            compute_weights_with_threshold(&star_calibrations, Pool::Stars, star_temp, min_skill)
+        }
     } else {
         existing_weights.as_ref().map(|w| w.star_weights.clone()).unwrap_or_else(|| {
             models.iter().map(|m| (m.name().to_string(), 1.0 / models.len() as f64)).collect()

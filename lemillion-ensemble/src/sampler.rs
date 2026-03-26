@@ -859,7 +859,9 @@ impl CoherenceScorer {
         };
 
         // Combinaison pondérée
-        0.35 * sum_score + 0.25 * spread_score + 0.25 * pair_score + 0.15 * triplet_score
+        // v22: Increased triplet and pair weights (the structural signals that drive improvement).
+        // Reduced sum weight (less discriminative, more redundant with spread).
+        0.25 * sum_score + 0.20 * spread_score + 0.30 * pair_score + 0.25 * triplet_score
     }
 }
 
@@ -983,8 +985,8 @@ impl StarBallConditioner {
     }
 }
 
-/// Poids du bonus de cohérence étoiles dans le scoring jackpot (v15).
-const STAR_COHERENCE_WEIGHT: f64 = 15.0;
+/// Poids du bonus de cohérence étoiles dans le scoring jackpot (v22: increased from 15 to 25)
+const STAR_COHERENCE_WEIGHT: f64 = 25.0;
 
 /// Score de cohérence des paires d'étoiles (v15).
 ///
@@ -1609,8 +1611,10 @@ impl Ord for MinHeapEntry {
 
 /// Génère les top-N combinaisons par probabilité de jackpot (5+2).
 ///
-/// Poids du bonus de cohérence dans le scoring jackpot (v14)
-const COHERENCE_WEIGHT: f64 = 30.00;
+/// Poids du bonus de cohérence dans le scoring jackpot (v22: increased from 30 to 45)
+/// Holdout analysis shows coherence scoring is the primary driver of improvement factor,
+/// not raw ball ranking. Higher coherence weight amplifies structural grid quality.
+const COHERENCE_WEIGHT: f64 = 45.00;
 
 /// Énumère exhaustivement les combinaisons dans la zone haute probabilité,
 /// triées par score bayésien, sans diversité.
@@ -3097,10 +3101,10 @@ pub fn rqa_temperature_factor(draws: &[Draw]) -> f64 {
 /// Retourne (T_balls, T_stars).
 pub fn few_grid_temperature(n_grids: usize) -> (f64, f64) {
     match n_grids {
-        0..=3 => (0.55, 0.25),
-        4..=6 => (0.60, 0.30),
-        7..=10 => (0.65, 0.30),
-        _ => (0.70, 0.35), // >10 grilles : plus conservateur
+        0..=3 => (0.55, 0.18),  // v22: star T lowered from 0.25 to 0.18
+        4..=6 => (0.60, 0.22),  // v22: star T lowered from 0.30 to 0.22
+        7..=10 => (0.65, 0.25), // v22: star T lowered from 0.30 to 0.25
+        _ => (0.70, 0.30),      // >10: more conservative
     }
 }
 
@@ -3543,11 +3547,12 @@ pub fn conviction_temperature_split_with_skill(
     let star_temp = match star_skill {
         Some(s) if s > 0.0 => skill_temperature(s).min(0.35),
         _ => {
-            // v13: Smooth sigmoid interpolation for stars.
-            // star_score ≈ 0 → T ≈ 0.35, star_score = 0.35 → T ≈ 0.265, star_score ≈ 1 → T ≈ 0.18
+            // v22: More aggressive star sharpening — stars have only 12 numbers (66 pairs),
+            // so concentration is more effective than for balls (50 numbers).
+            // star_score ≈ 0 → T ≈ 0.30, star_score = 0.3 → T ≈ 0.20, star_score ≈ 1 → T ≈ 0.12
             let star_score = 0.7 * conviction.star_concentration + 0.3 * conviction.star_agreement;
-            let sigmoid = 1.0 / (1.0 + (-8.0 * (star_score - 0.35)).exp());
-            (0.35 - 0.17 * sigmoid).clamp(0.18, 0.40)
+            let sigmoid = 1.0 / (1.0 + (-10.0 * (star_score - 0.30)).exp());
+            (0.30 - 0.18 * sigmoid).clamp(0.12, 0.35)
         }
     };
 
@@ -4086,8 +4091,8 @@ mod tests {
         let (bt, st) = conviction_temperature_split(&conv);
         // ball_score = 0.7*0.1 + 0.3*0.1 = 0.10, sigmoid: near low end → T ≈ 0.12
         assert!(bt >= 0.05 && bt <= 0.15, "bt={bt}");
-        // star_score = 0.7*0.6 + 0.3*0.5 = 0.57, sigmoid: near high end → T ≈ 0.18-0.20
-        assert!(st >= 0.18 && st <= 0.25, "st={st}");
+        // v22: star_score = 0.7*0.6 + 0.3*0.5 = 0.57, sigmoid: near high end → T ≈ 0.12-0.16
+        assert!(st >= 0.12 && st <= 0.20, "st={st}");
 
         // Extreme low conviction → highest T
         let conv_low = ConvictionScore {
@@ -4098,7 +4103,8 @@ mod tests {
         };
         let (bt_low, st_low) = conviction_temperature_split(&conv_low);
         assert!(bt_low > 0.11 && bt_low < 0.13, "low conviction bt={bt_low}");
-        assert!(st_low > 0.33 && st_low < 0.37, "low conviction st={st_low}");
+        // v22: star T lowered: low conviction → T ≈ 0.28-0.32
+        assert!(st_low > 0.27 && st_low < 0.33, "low conviction st={st_low}");
 
         // Extreme high conviction → lowest T
         let conv_high = ConvictionScore {
@@ -4109,7 +4115,8 @@ mod tests {
         };
         let (bt_high, st_high) = conviction_temperature_split(&conv_high);
         assert!(bt_high >= 0.05 && bt_high < 0.06, "high conviction bt={bt_high}");
-        assert!(st_high >= 0.18 && st_high < 0.20, "high conviction st={st_high}");
+        // v22: star T lowered: high conviction → T ≈ 0.12
+        assert!(st_high >= 0.12 && st_high < 0.14, "high conviction st={st_high}");
     }
 
     #[test]
