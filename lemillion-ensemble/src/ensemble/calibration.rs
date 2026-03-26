@@ -1313,6 +1313,113 @@ pub fn compute_decorrelated_weights(
     effective
 }
 
+/// v22: Markowitz mean-variance portfolio optimization for model weights.
+/// Instead of penalizing correlations heuristically, optimizes:
+///   max_w (w'μ - risk_aversion × w'Σw) subject to w ≥ 0, Σw = 1
+/// where μ = mean skills (LL - uniform), Σ = covariance matrix of LLs.
+/// This REWARDS anti-correlations (negative covariance reduces portfolio variance).
+pub fn compute_markowitz_weights(
+    base_weights: &[f64],
+    model_names: &[String],
+    detailed_ll: &[(String, Vec<f64>)],
+    risk_aversion: f64,
+) -> Vec<f64> {
+    let n = base_weights.len();
+    if n == 0 || detailed_ll.is_empty() {
+        return base_weights.to_vec();
+    }
+
+    // Build mean vector and covariance matrix from detailed LL data
+    let mut means = vec![0.0f64; n];
+    let mut covariance = vec![vec![0.0f64; n]; n];
+
+    // Map model names to indices
+    let ll_map: std::collections::HashMap<&str, &[f64]> = detailed_ll.iter()
+        .map(|(name, lls)| (name.as_str(), lls.as_slice()))
+        .collect();
+
+    // Compute means
+    for (i, name) in model_names.iter().enumerate() {
+        if let Some(lls) = ll_map.get(name.as_str()) {
+            if !lls.is_empty() {
+                means[i] = lls.iter().sum::<f64>() / lls.len() as f64;
+            }
+        }
+    }
+
+    // Compute covariance matrix (only for models with LL data)
+    let min_len = detailed_ll.iter().map(|(_, lls)| lls.len()).min().unwrap_or(0);
+    if min_len < 10 {
+        return base_weights.to_vec();
+    }
+
+    for i in 0..n {
+        let lls_i = match ll_map.get(model_names[i].as_str()) {
+            Some(lls) => *lls,
+            None => continue,
+        };
+        for j in i..n {
+            let lls_j = match ll_map.get(model_names[j].as_str()) {
+                Some(lls) => *lls,
+                None => continue,
+            };
+            let len = lls_i.len().min(lls_j.len());
+            if len < 5 { continue; }
+
+            let mean_i = means[i];
+            let mean_j = means[j];
+            let cov: f64 = (0..len)
+                .map(|k| (lls_i[k] - mean_i) * (lls_j[k] - mean_j))
+                .sum::<f64>() / len as f64;
+            covariance[i][j] = cov;
+            covariance[j][i] = cov;
+        }
+    }
+
+    // Regularize covariance: Σ_reg = Σ + λI
+    let reg_lambda = 0.001;
+    for i in 0..n {
+        covariance[i][i] += reg_lambda;
+    }
+
+    // Iterative projected gradient ascent for:
+    //   max_w (w'μ - risk_aversion × w'Σw) s.t. w ≥ 0, Σw = 1
+    // Start from base_weights (calibrated weights as warm start)
+    let mut w = base_weights.to_vec();
+    let total: f64 = w.iter().sum();
+    if total > 0.0 { for wi in &mut w { *wi /= total; } }
+
+    let lr = 0.01;
+    for _ in 0..200 {
+        // Gradient: ∂/∂w = μ - 2 × risk_aversion × Σw
+        let mut grad = vec![0.0f64; n];
+        for i in 0..n {
+            grad[i] = means[i];
+            for j in 0..n {
+                grad[i] -= 2.0 * risk_aversion * covariance[i][j] * w[j];
+            }
+        }
+
+        // Gradient step + projection to simplex
+        for i in 0..n {
+            w[i] = (w[i] + lr * grad[i]).max(0.0);
+        }
+        let total: f64 = w.iter().sum();
+        if total > 0.0 { for wi in &mut w { *wi /= total; } }
+    }
+
+    // Blend with base weights (50/50) for stability
+    let blend = 0.5;
+    let mut result = vec![0.0f64; n];
+    for i in 0..n {
+        result[i] = blend * w[i] + (1.0 - blend) * base_weights[i];
+    }
+    let total: f64 = result.iter().sum();
+    if total > 0.0 { for wi in &mut result { *wi /= total; } }
+
+    result
+}
+
 fn pearson_correlation(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len() as f64;
     let mean_a = a.iter().sum::<f64>() / n;

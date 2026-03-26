@@ -244,7 +244,7 @@ pub fn hyperparams_bounds() -> Vec<ParamBounds> {
         ParamBounds { name: "coherence_weight".into(), min: 5.0, max: 60.0 },
         ParamBounds { name: "star_coherence_weight".into(), min: 3.0, max: 40.0 },
         ParamBounds { name: "hedge_eta".into(), min: 0.01, max: 0.50 },
-        ParamBounds { name: "joint_blend".into(), min: 0.0, max: 0.6 },
+        ParamBounds { name: "joint_blend".into(), min: 0.0, max: 0.8 },
         ParamBounds { name: "k_balls".into(), min: 12.0, max: 35.0 },
     ]
 }

@@ -1749,7 +1749,7 @@ pub fn generate_suggestions_jackpot(
                             let log_ball_score = if let Some(jm) = joint_model {
                                 let (joint_log, joint_conf) = jm.score_balls_with_confidence(&balls);
                                 if joint_log.is_finite() && joint_log > -100.0 {
-                                    let joint_weight = 0.15 + 0.25 * joint_conf; // [0.15, 0.40]
+                                    let joint_weight = 0.15 + 0.55 * joint_conf; // v22: [0.15, 0.70]
                                     let marginal_weight = 1.0 - joint_weight;
                                     marginal_weight * marginal_log_ball_score + joint_weight * joint_log
                                 } else {
@@ -1873,7 +1873,7 @@ pub fn generate_suggestions_jackpot(
                             let log_ball_score = if let Some(jm) = joint_model {
                                 let (joint_log, joint_conf) = jm.score_balls_with_confidence(&balls);
                                 if joint_log.is_finite() && joint_log > -100.0 {
-                                    let joint_weight = 0.15 + 0.25 * joint_conf; // [0.15, 0.40]
+                                    let joint_weight = 0.15 + 0.55 * joint_conf; // v22: [0.15, 0.70]
                                     let marginal_weight = 1.0 - joint_weight;
                                     marginal_weight * marginal_log_ball_score + joint_weight * joint_log
                                 } else {
@@ -2092,7 +2092,7 @@ pub fn generate_suggestions_gibbs(
                         let (joint_log, joint_conf) =
                             jm.score_balls_with_confidence(&test_balls);
                         if joint_log.is_finite() && joint_log > -100.0 {
-                            let joint_weight = 0.15 + 0.25 * joint_conf;
+                            let joint_weight = 0.15 + 0.55 * joint_conf; // v22: [0.15, 0.70]
                             joint_weight * joint_log
                         } else {
                             0.0
@@ -2264,7 +2264,7 @@ fn gibbs_score_grid(
     let log_ball_score = if let Some(jm) = joint_model {
         let (joint_log, joint_conf) = jm.score_balls_with_confidence(balls);
         if joint_log.is_finite() && joint_log > -100.0 {
-            let joint_weight = 0.15 + 0.25 * joint_conf; // [0.15, 0.40]
+            let joint_weight = 0.15 + 0.55 * joint_conf; // v22: [0.15, 0.70]
             let marginal_weight = 1.0 - joint_weight;
             marginal_weight * marginal_log_ball_score + joint_weight * joint_log
         } else {

@@ -68,6 +68,7 @@ pub mod sequential_transition;
 pub mod cross_pool_position;
 pub mod wear_drift;
 pub mod tail_copula;
+pub mod stresa_collision;
 
 use std::collections::HashMap;
 use lemillion_db::models::{Draw, Pool};
@@ -262,6 +263,7 @@ pub fn base_models() -> Vec<Box<dyn ForecastModel>> {
         Box::new(cross_pool_position::CrossPoolPositionModel::default()), // v20 4A
         Box::new(wear_drift::WearDriftModel::default()),  // v21 Phase 5
         Box::new(tail_copula::TailCopulaModel::default()),  // v21 Phase 6
+        Box::new(stresa_collision::StresaCollisionModel::default()),  // v22: mod-24 collision dynamics
     ]
 }
 
