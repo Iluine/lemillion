@@ -2952,6 +2952,9 @@ fn cmd_holdout_eval(
                 } else {
                     Some(weights.conformal_ball_max_ranks.as_slice())
                 };
+                // v24: Build empirical popularity model for anti-pop scoring
+                let pop_model = lemillion_ensemble::expected_value::PopularityModel::from_tier_data(training_draws);
+
                 let result = generate_suggestions_jackpot(
                     &ball_dist, &star_dist, n_suggestions, Some(&filter),
                     Some(&coherence), Some(&joint_model),
@@ -2960,7 +2963,7 @@ fn cmd_holdout_eval(
                     Some(&star_coherence),
                     cw_ball, cw_star,
                     conformal_ranks,
-                    None, 0.0,
+                    Some(&pop_model), hyper.anti_pop_weight,
                 )?;
 
                 // 11. Few-grids selection if requested
