@@ -127,6 +127,123 @@ impl PopularityModel {
             star_popularity: star_pop,
         }
     }
+
+    /// v24: Empirical popularity model calibrated from actual winner counts per tier.
+    ///
+    /// For each historical draw, computes deviation = actual_winners / expected_winners
+    /// at tiers 8-13 (enough winners for stability). Deviations > 1.0 mean the winning
+    /// numbers were POPULAR (many players picked them). Accumulates per number.
+    ///
+    /// Based on Baker & McHale (2011) "combination preference model" and
+    /// Cox et al. (1998) who showed players can DOUBLE EV with unpopular combos.
+    pub fn from_tier_data(draws: &[Draw]) -> Self {
+        // Start with heuristic model
+        let heuristic = Self::from_history(draws);
+
+        let mut ball_log_pop = [0.0f64; 50];
+        let mut star_log_pop = [0.0f64; 12];
+        let mut ball_counts = [0u32; 50];
+        let mut star_counts = [0u32; 12];
+
+        for draw in draws {
+            let tiers = match &draw.prize_tiers {
+                Some(t) if !t.is_empty() => t,
+                _ => continue,
+            };
+
+            // Estimate tickets sold for this draw
+            let tickets = {
+                let t12 = tiers.iter().find(|t| t.rank == 12);
+                let t13 = tiers.iter().find(|t| t.rank == 13);
+                if let Some(t) = t12 {
+                    if t.winners_eu > 100 {
+                        t.winners_eu as f64 / PRIZE_TIERS[11].probability
+                    } else if let Some(t13v) = t13 {
+                        t13v.winners_eu as f64 / PRIZE_TIERS[12].probability
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            };
+
+            if tickets < 1_000_000.0 { continue; } // skip unreliable
+
+            // Use tiers 8-13 (fixed prizes, enough winners for stability)
+            // Tier 8 = 2+2 (P=1/985, ~20k winners), Tier 13 = 2+0 (P=1/22, ~900k winners)
+            let mut deviations = Vec::new();
+            for tier_rank in 8..=13u8 {
+                if let Some(tier) = tiers.iter().find(|t| t.rank == tier_rank) {
+                    let expected = tickets * PRIZE_TIERS[(tier_rank - 1) as usize].probability;
+                    if expected > 50.0 {
+                        let deviation = tier.winners_eu as f64 / expected;
+                        deviations.push(deviation);
+                    }
+                }
+            }
+
+            if deviations.is_empty() { continue; }
+
+            // Average deviation across stable tiers
+            let avg_deviation = deviations.iter().sum::<f64>() / deviations.len() as f64;
+
+            // Log-deviation: positive = popular, negative = unpopular
+            let log_dev = avg_deviation.max(0.1).ln();
+
+            // Attribute to winning numbers (each number gets 1/n_numbers share)
+            for &b in &draw.balls {
+                let idx = (b - 1) as usize;
+                ball_log_pop[idx] += log_dev / 5.0; // share among 5 balls
+                ball_counts[idx] += 1;
+            }
+            for &s in &draw.stars {
+                let idx = (s - 1) as usize;
+                star_log_pop[idx] += log_dev / 2.0; // share among 2 stars
+                star_counts[idx] += 1;
+            }
+        }
+
+        // Convert accumulated log-deviations to popularity factors
+        let mut empirical_ball = [1.0f64; 50];
+        for i in 0..50 {
+            if ball_counts[i] > 10 {
+                let avg_log = ball_log_pop[i] / ball_counts[i] as f64;
+                empirical_ball[i] = avg_log.exp(); // exp(mean(log(deviation)))
+            }
+        }
+        let mut empirical_star = [1.0f64; 12];
+        for i in 0..12 {
+            if star_counts[i] > 10 {
+                let avg_log = star_log_pop[i] / star_counts[i] as f64;
+                empirical_star[i] = avg_log.exp();
+            }
+        }
+
+        // Normalize empirical to mean=1.0
+        let ball_mean = empirical_ball.iter().sum::<f64>() / 50.0;
+        if ball_mean > 0.0 { for p in &mut empirical_ball { *p /= ball_mean; } }
+        let star_mean = empirical_star.iter().sum::<f64>() / 12.0;
+        if star_mean > 0.0 { for p in &mut empirical_star { *p /= star_mean; } }
+
+        // Blend: 50% heuristic + 50% empirical
+        let mut ball_pop = [0.0f64; 50];
+        for i in 0..50 {
+            ball_pop[i] = (0.5 * heuristic.ball_popularity[i] + 0.5 * empirical_ball[i]).max(0.1);
+        }
+        let mut star_pop = [0.0f64; 12];
+        for i in 0..12 {
+            star_pop[i] = (0.5 * heuristic.star_popularity[i] + 0.5 * empirical_star[i]).max(0.1);
+        }
+
+        // Final normalization to mean=1.0
+        let ball_mean = ball_pop.iter().sum::<f64>() / 50.0;
+        if ball_mean > 0.0 { for p in &mut ball_pop { *p /= ball_mean; } }
+        let star_mean = star_pop.iter().sum::<f64>() / 12.0;
+        if star_mean > 0.0 { for p in &mut star_pop { *p /= star_mean; } }
+
+        Self { ball_popularity: ball_pop, star_popularity: star_pop }
+    }
 }
 
 /// Popularite d'une grille (produit des popularites individuelles × facteur de pattern).

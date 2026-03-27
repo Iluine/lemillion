@@ -1023,8 +1023,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
             hyper.t_balls, hyper.t_stars, hyper.coherence_weight, hyper.star_coherence_weight, hyper.hedge_eta);
     }
 
-    // Modele de popularite
-    let popularity = PopularityModel::from_history(&draws);
+    // v24: Empirical popularity model calibrated from actual winner counts
+    let popularity = PopularityModel::from_tier_data(&draws);
 
     // Afficher resume EV et carte de popularite (v23d: real ticket data)
     display::display_ev_summary(&popularity, jackpot, &draws);
@@ -1119,8 +1119,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         let (hedged_ball, hedged_star) = compute_hedge_weights(
             &combiner.models, &draws,
             &combiner.ball_weights, &combiner.star_weights,
-            100,       // n_recent : 100 derniers tirages
-            hedge_eta, // eta : learning rate réactif (from hyperparams)
+            30,        // v24: n_recent réduit 100→30 pour plus de réactivité
+            hedge_eta, // eta : learning rate réactif (from hyperparams, 0.40)
         );
         if balls_have_signal {
             combiner.ball_weights = hedged_ball;
@@ -1519,6 +1519,7 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
                 Some(&star_coherence),
                 cw_ball, cw_star,
                 conformal_ranks,
+                Some(&popularity), hyper.anti_pop_weight,
             )?;
 
             for s in &result.suggestions {
@@ -2618,6 +2619,7 @@ fn cmd_backtest_jackpot(
                     Some(&star_coherence),
                     bt_cw_ball, bt_cw_star,
                     None,
+                    None, 0.0,
                 )?;
 
                 // Vérifier si le tirage réel est dans le top-N
@@ -2789,7 +2791,7 @@ fn cmd_holdout_eval(
                     let (hedged_ball, hedged_star) = compute_hedge_weights(
                         &combiner.models, training_draws,
                         &combiner.ball_weights, &combiner.star_weights,
-                        100, eta,
+                        30, eta, // v24: n_recent 100→30
                     );
                     combiner.ball_weights = hedged_ball;
                     combiner.star_weights = hedged_star;
@@ -2958,6 +2960,7 @@ fn cmd_holdout_eval(
                     Some(&star_coherence),
                     cw_ball, cw_star,
                     conformal_ranks,
+                    None, 0.0,
                 )?;
 
                 // 11. Few-grids selection if requested
@@ -3284,6 +3287,7 @@ fn cmd_backtest_jackpot_top3(
                 Some(&bt_star_coherence),
                 None, None,
                 None,
+                None, 0.0,
             )?;
 
             // Pick best grid with max 2 common balls with any already selected grid
@@ -3716,6 +3720,7 @@ fn cmd_backtest_few_grids(
                 Some(&star_coherence),
                 None, None,
                 None,
+                None, 0.0,
             )?;
 
             for s in &result.suggestions {
