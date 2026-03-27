@@ -3,8 +3,8 @@
   "t_stars": 0.10,
   "coherence_weight": 60.0,
   "star_coherence_weight": 35.0,
-  "hedge_eta": 0.40,
+  "hedge_eta": 0.25,
   "joint_blend": 0.30,
   "k_balls": 15,
-  "anti_pop_weight": 8.0
+  "anti_pop_weight": 0.0
 }

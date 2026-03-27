@@ -1119,8 +1119,8 @@ pub(crate) fn cmd_predict(conn: &lemillion_db::rusqlite::Connection, calibration
         let (hedged_ball, hedged_star) = compute_hedge_weights(
             &combiner.models, &draws,
             &combiner.ball_weights, &combiner.star_weights,
-            30,        // v24: n_recent réduit 100→30 pour plus de réactivité
-            hedge_eta, // eta : learning rate réactif (from hyperparams, 0.40)
+            100,       // n_recent : 100 derniers tirages (30 was too reactive)
+            hedge_eta, // eta : learning rate réactif (from hyperparams)
         );
         if balls_have_signal {
             combiner.ball_weights = hedged_ball;
@@ -2791,7 +2791,7 @@ fn cmd_holdout_eval(
                     let (hedged_ball, hedged_star) = compute_hedge_weights(
                         &combiner.models, training_draws,
                         &combiner.ball_weights, &combiner.star_weights,
-                        30, eta, // v24: n_recent 100→30
+                        100, eta,
                     );
                     combiner.ball_weights = hedged_ball;
                     combiner.star_weights = hedged_star;
